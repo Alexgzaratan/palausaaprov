@@ -177,7 +177,7 @@ class DocumentoPowerLine:
             rango.ParagraphFormat.Alignment = 1
         imagen = documento.InlineShapes.AddPicture(str(ruta_imagen), False, True, rango)
         ancho_original, alto_original = float(imagen.Width), float(imagen.Height)
-        max_ancho, max_alto = 135.0, 90.0
+        max_ancho, max_alto = 260.0, 190.0
         escala = min(max_ancho / ancho_original, max_alto / alto_original, 1.0)
         imagen.LockAspectRatio = False
         imagen.Width = round(ancho_original * escala)
