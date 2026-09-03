@@ -71,19 +71,36 @@ stop_event_filtro = threading.Event()
 stop_event_mopar = threading.Event()
 stop_event_stock_fiat = threading.Event()
 
+def tarea_activa():
+    """Nombre de la tarea en curso que escribe sobre un Excel, o None si no hay ninguna."""
+    if automation_running:
+        return "Automatizacion"
+    if pedidos_running:
+        return "Generacion de pedidos"
+    if comparador_running:
+        return "Comparador de Excel"
+    if mopar_running:
+        return "Fichero MOPAR"
+    if stock_fiat_running:
+        return "Stock FIAT"
+    return None
+
 def cargar_configuracion():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
                 return json.load(f)
-        except: return {}
+        except Exception as e:
+            registrar_error_detallado(str(e), traceback.format_exc(), ref="cargar_configuracion")
+            return {}
     return {}
 
 def guardar_configuracion(config_dict):
     try:
         with open(CONFIG_FILE, "w") as f:
             json.dump(config_dict, f, indent=4)
-    except: pass
+    except Exception as e:
+        registrar_error_detallado(str(e), traceback.format_exc(), ref="guardar_configuracion")
 
 def registrar_error_detallado(error_msg, traceback_str, ref=None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -204,6 +221,7 @@ def filtrar_por_disponibilidad_task(ruta_excel_quiter, ruta_salida_folder, color
         ws.delete_cols(8, 10)
 
         wb.save(ruta_final)
+        wb.close()
         log(f"Analisis completado. Filas resaltadas: {filas_resaltadas}. Guardado en: {ruta_final}", "success")
         if progreso_callback: progreso_callback(1)
     except Exception as e:
@@ -235,7 +253,8 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
             try:
                 ref = str(fila[col_articulo]).strip().replace('2/', '')
                 dict_medias[ref] = float(fila[col_media])
-            except: continue
+            except Exception:
+                continue
         log(f"✅ Cargadas {len(dict_medias)} referencias.", "success")
         wb = load_workbook(ruta_excel_quiter)
         ws = wb.active
@@ -265,6 +284,7 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
         ws.delete_cols(8, 10)
         
         wb.save(ruta_final)
+        wb.close()
         log(f"Resumen rotacion: rojas por umbral {filas_baja_rotacion}, amarillas por disponibilidad {filas_no_disponibles}.", "success")
         log(f"✅ Análisis completado. Guardado en: {ruta_final}", "success")
         if progreso_callback: progreso_callback(1)
@@ -326,100 +346,101 @@ def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, preci
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--disable-gpu", "--disable-dev-shm-usage"])
-            context = browser.new_context()
-            context.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2}", lambda route: route.abort())
-            page = context.new_page()
-            url_acceso = f"https://{usuario}:{password}@parts.citroen.com/zzlogpl0"
             try:
-                page.goto(url_acceso, timeout=45000)
-                page.wait_for_selector("text=/Espa.ol/", timeout=20000)
-                page.locator("text=/Espa.ol/").first.click()
-                page.wait_for_selector("text=/Referencia/", timeout=25000)
-            except Exception as e:
-                log(f"Error de acceso/login: {e}", "error")
-                registrar_error_detallado(str(e), traceback.format_exc())
-                browser.close()
-                return
-            target_frame = None
-            for f in page.frames:
+                context = browser.new_context(http_credentials={"username": usuario, "password": password})
+                context.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2}", lambda route: route.abort())
+                page = context.new_page()
+                url_acceso = "https://parts.citroen.com/zzlogpl0"
                 try:
-                    if f.locator("text=/Referencia/").count() > 0:
-                        target_frame = f
+                    page.goto(url_acceso, timeout=45000)
+                    page.wait_for_selector("text=/Espa.ol/", timeout=20000)
+                    page.locator("text=/Espa.ol/").first.click()
+                    page.wait_for_selector("text=/Referencia/", timeout=25000)
+                except Exception as e:
+                    log(f"Error de acceso/login: {e}", "error")
+                    registrar_error_detallado(str(e), traceback.format_exc())
+                    return
+                target_frame = None
+                for f in page.frames:
+                    try:
+                        if f.locator("text=/Referencia/").count() > 0:
+                            target_frame = f
+                            break
+                    except Exception:
+                        continue
+                if not target_frame:
+                    log("No se encontr? el frame de trabajo.", "error")
+                    return
+
+                def preparar_formulario():
+                    btn_referencia = target_frame.locator("text=Referencia").first
+                    btn_disponibilidad = target_frame.locator("text=Mostrar disponibilidad pieza").first
+                    esperar_y_hacer_click(btn_referencia, timeout=20000)
+                    esperar_y_hacer_click(btn_disponibilidad, timeout=20000)
+                    campo_ref = target_frame.locator('input[name="mara-matnr[1]"]').first
+                    campo_ref.wait_for(state="visible", timeout=20000)
+                    campo_ref.click()
+                    campo_ref.fill("")
+                    return campo_ref
+
+                for fila_idx, referencia, valor_precio in sub_filas:
+                    if stop_event.is_set():
                         break
-                except Exception:
-                    continue
-            if not target_frame:
-                log("No se encontr? el frame de trabajo.", "error")
-                browser.close()
-                return
-
-            def preparar_formulario():
-                btn_referencia = target_frame.locator("text=Referencia").first
-                btn_disponibilidad = target_frame.locator("text=Mostrar disponibilidad pieza").first
-                esperar_y_hacer_click(btn_referencia, timeout=20000)
-                esperar_y_hacer_click(btn_disponibilidad, timeout=20000)
-                campo_ref = target_frame.locator('input[name="mara-matnr[1]"]').first
-                campo_ref.wait_for(state="visible", timeout=20000)
-                campo_ref.click()
-                campo_ref.fill("")
-                return campo_ref
-
-            for fila_idx, referencia, valor_precio in sub_filas:
-                if stop_event.is_set():
-                    break
-                try:
-                    precio_num = float(str(valor_precio).replace(",", "."))
-                    if precio_num < precio_minimo:
+                    try:
+                        precio_num = float(str(valor_precio).replace(",", "."))
+                        if precio_num < precio_minimo:
+                            update_global_progress()
+                            continue
+                    except Exception:
                         update_global_progress()
                         continue
-                except Exception:
-                    update_global_progress()
-                    continue
-                log(f"Consultando: {referencia}")
-                try:
-                    ultimo_error = None
-                    for intento in range(2):
-                        try:
-                            campo_ref = preparar_formulario()
-                            campo_ref.fill(str(referencia))
-                            radio = target_frame.locator('input[type="radio"]').nth(1)
-                            radio.wait_for(state="attached", timeout=10000)
-                            radio.click(force=True)
-                            btn_ejecutar = target_frame.locator("text=Ejecutar programa").first
-                            esperar_y_hacer_click(btn_ejecutar, timeout=15000)
-                            break
-                        except Exception as intento_error:
-                            ultimo_error = intento_error
-                            if intento == 0:
-                                log(f"Reintentando {referencia}: el formulario no estaba listo.", "error")
-                                try:
-                                    btn_otro = target_frame.locator("text=Otro Articulo").first
-                                    if btn_otro.is_visible(timeout=3000):
-                                        btn_otro.click()
-                                except Exception:
-                                    pass
-                                page.wait_for_timeout(1200)
-                                continue
-                            raise ultimo_error
-                    selector = "tr.moduloTableauBlanc td"
-                    target_frame.locator(selector).first.wait_for(state="visible", timeout=15000)
-                    resultado = target_frame.locator(selector).first.inner_text().strip()
-                    with excel_lock:
-                        wb = openpyxl.load_workbook(ruta_excel)
-                        ws = wb.active
-                        ws.cell(row=fila_idx, column=18).value = resultado
-                        wb.save(ruta_excel)
-                    log(f"OK {referencia}: {resultado}")
+                    log(f"Consultando: {referencia}")
                     try:
-                        btn_otro = target_frame.locator("text=Otro Articulo").first
-                        esperar_y_hacer_click(btn_otro, timeout=10000)
-                        page.wait_for_timeout(700)
-                    except Exception:
-                        pass
-                except Exception as e:
-                    log(f"Error en {referencia}: {e}", "error")
-                update_global_progress()
-            browser.close()
+                        ultimo_error = None
+                        for intento in range(2):
+                            try:
+                                campo_ref = preparar_formulario()
+                                campo_ref.fill(str(referencia))
+                                radio = target_frame.locator('input[type="radio"]').nth(1)
+                                radio.wait_for(state="attached", timeout=10000)
+                                radio.click(force=True)
+                                btn_ejecutar = target_frame.locator("text=Ejecutar programa").first
+                                esperar_y_hacer_click(btn_ejecutar, timeout=15000)
+                                break
+                            except Exception as intento_error:
+                                ultimo_error = intento_error
+                                if intento == 0:
+                                    log(f"Reintentando {referencia}: el formulario no estaba listo.", "error")
+                                    try:
+                                        btn_otro = target_frame.locator("text=Otro Articulo").first
+                                        if btn_otro.is_visible(timeout=3000):
+                                            btn_otro.click()
+                                    except Exception:
+                                        pass
+                                    page.wait_for_timeout(1200)
+                                    continue
+                                raise ultimo_error
+                        selector = "tr.moduloTableauBlanc td"
+                        target_frame.locator(selector).first.wait_for(state="visible", timeout=15000)
+                        resultado = target_frame.locator(selector).first.inner_text().strip()
+                        with excel_lock:
+                            wb = openpyxl.load_workbook(ruta_excel)
+                            ws = wb.active
+                            ws.cell(row=fila_idx, column=18).value = resultado
+                            wb.save(ruta_excel)
+                            wb.close()
+                        log(f"OK {referencia}: {resultado}")
+                        try:
+                            btn_otro = target_frame.locator("text=Otro Articulo").first
+                            esperar_y_hacer_click(btn_otro, timeout=10000)
+                            page.wait_for_timeout(700)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        log(f"Error en {referencia}: {e}", "error")
+                    update_global_progress()
+            finally:
+                browser.close()
     except Exception as e:
         log(f"Error critico en hilo: {e}", "error")
 
@@ -445,16 +466,20 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
 
         procesadas = 0
         cierre_notificado = False
+        progreso_lock = threading.Lock()
 
         def update_progress():
             nonlocal procesadas, cierre_notificado
             global automation_running
-            procesadas += 1
-            progreso = procesadas / total_tareas
+            with progreso_lock:
+                procesadas += 1
+                progreso = procesadas / total_tareas
+                deberia_cerrar = procesadas >= total_tareas and not cierre_notificado
+                if deberia_cerrar:
+                    cierre_notificado = True
             if progreso_callback:
                 progreso_callback(progreso)
-            if procesadas >= total_tareas and not cierre_notificado:
-                cierre_notificado = True
+            if deberia_cerrar:
                 automation_running = False
                 if finalizado_callback:
                     finalizado_callback()
@@ -587,8 +612,9 @@ def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, pr
                 referencia = ref_clean.zfill(13)[:13]
                 try:
                     cant_val = int(float(ws.cell_value(r, col_cant)))
-                except:
+                except Exception:
                     cant_val = 0
+                    log(f"⚠️ Cantidad no válida en fila {r+1}, se usará 0.", "error")
                 cantidad = str(cant_val).zfill(7)[:7]
                 cliente_raw = str(ws.cell_value(r, col_cliente)).strip()
                 cliente_nums = "".join(filter(str.isdigit, cliente_raw))
@@ -603,14 +629,7 @@ def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, pr
             # AJUSTE v13: Lógica FXXXX + Letras
             if not os.path.exists(carpeta_salida):
                 os.makedirs(carpeta_salida, exist_ok=True)
-            
-            # Buscar el último número FXXXX en la carpeta
-            ultimo_f = 999
-            for f in os.listdir(carpeta_salida):
-                m = re.match(r"F(\d+)", f)
-                if m:
-                    ultimo_f = max(ultimo_f, int(m.group(1)))
-            
+
             proximo_f = obtener_numero_mopar_del_dia(carpeta_salida)
             letras = string.ascii_uppercase # A, B, C...
             archivos_creados = 0
@@ -686,8 +705,9 @@ def generar_fichero_stock_fiat_task(ruta_excel, carpeta_salida, log_callback=Non
                 referencia = ref_clean.zfill(13)[:13]
                 try:
                     cant_val = int(float(ws.cell_value(fila_idx, col_cant)))
-                except:
+                except Exception:
                     cant_val = 0
+                    log(f"Cantidad no válida en fila {fila_idx+1}, se usará 0.", "error")
                 cantidad = str(cant_val).zfill(7)[:7]
                 ubicacion = "00000000"
                 linea = f"{referencia}{cantidad}{ubicacion}"
@@ -738,7 +758,7 @@ class AppIntegrada(ctk.CTk):
         self.resizable(False, False)
         if os.path.exists(ICONO_PATH):
             try: self.iconbitmap(ICONO_PATH)
-            except: pass
+            except Exception: pass
         self.setup_ui()
 
     def aplicar_tema_inicial(self):
@@ -984,159 +1004,6 @@ class AppIntegrada(ctk.CTk):
         if not self.frame_log.winfo_manager():
             self.frame_log.pack(pady=(2, 10), padx=22, fill="both", expand=True)
 
-    def setup_tab_auto(self, acc_color):
-        ctk.CTkLabel(self.tab_auto, text="Consulta de Disponibilidad Citroen (Multi-Hilo)", font=("Segoe UI", 16, "bold")).pack(pady=10)
-        row_file = ctk.CTkFrame(self.tab_auto, fg_color="transparent")
-        row_file.pack(pady=10, fill="x", padx=50)
-        self.excel_auto_entry = ctk.CTkEntry(row_file, placeholder_text="Excel de stock...", height=30)
-        self.excel_auto_entry.insert(0, self.config.get("ruta_excel_auto", ""))
-        self.excel_auto_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        btn_file = ctk.CTkButton(row_file, text="Archivo", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]))
-        if self.hover_color:
-            btn_file.configure(hover_color=self.hover_color)
-        btn_file.pack(side="right")
-        row_input = ctk.CTkFrame(self.tab_auto, fg_color="transparent")
-        row_input.pack(pady=10)
-        ctk.CTkLabel(row_input, text="Precio minimo (EUR):").grid(row=0, column=0, padx=10)
-        self.precio_entry = ctk.CTkEntry(row_input, width=100, height=30, justify="center")
-        self.precio_entry.insert(0, self.config.get("precio_min", "0"))
-        self.precio_entry.grid(row=0, column=1, padx=5)
-        self.btn_auto = ctk.CTkButton(self.tab_auto, text="INICIAR AUTOMATIZACION", height=45, font=("Segoe UI", 14, "bold"), fg_color=acc_color, command=self.toggle_auto)
-        if self.hover_color:
-            self.btn_auto.configure(hover_color=self.hover_color)
-        self.btn_auto.pack(pady=15, padx=100, fill="x")
-
-    def setup_tab_pedidos(self):
-        acc_color = self.accent_color if self.accent_color else "#28a745"
-        ctk.CTkLabel(self.tab_pedidos, text="Generacion de CSV Urgentes", font=("Segoe UI", 16, "bold")).pack(pady=10)
-        row_file = ctk.CTkFrame(self.tab_pedidos, fg_color="transparent")
-        row_file.pack(pady=10, fill="x", padx=50)
-        self.excel_pedidos_entry = ctk.CTkEntry(row_file, placeholder_text="Excel URGENTE.xlsx...", height=30)
-        self.excel_pedidos_entry.insert(0, self.config.get("ruta_excel_pedidos", ""))
-        self.excel_pedidos_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        btn_file = ctk.CTkButton(row_file, text="Archivo", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_archivo(self.excel_pedidos_entry, [("Excel files", "*.xlsx")]))
-        btn_file.pack(side="right")
-        row_folder = ctk.CTkFrame(self.tab_pedidos, fg_color="transparent")
-        row_folder.pack(pady=10, fill="x", padx=50)
-        self.folder_pedidos_entry = ctk.CTkEntry(row_folder, placeholder_text="Carpeta de destino...", height=30)
-        self.folder_pedidos_entry.insert(0, self.config.get("ruta_folder_pedidos", ""))
-        self.folder_pedidos_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        btn_folder = ctk.CTkButton(row_folder, text="Carpeta", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_carpeta(self.folder_pedidos_entry))
-        btn_folder.pack(side="right")
-        self.btn_pedidos = ctk.CTkButton(self.tab_pedidos, text="GENERAR PEDIDOS", height=45, font=("Segoe UI", 14, "bold"), fg_color=acc_color, command=self.toggle_pedidos)
-        self.btn_pedidos.pack(pady=15, padx=100, fill="x")
-
-    def setup_tab_comparador(self, acc_color):
-        ctk.CTkLabel(self.tab_comparador, text="Comparar Archivos Excel", font=("Segoe UI", 16, "bold")).pack(pady=10)
-        row_excel_old = ctk.CTkFrame(self.tab_comparador, fg_color="transparent")
-        row_excel_old.pack(pady=5, fill="x", padx=50)
-        self.excel_old_entry = ctk.CTkEntry(row_excel_old, placeholder_text="Excel Antiguo...", height=30)
-        self.excel_old_entry.insert(0, self.config.get("ruta_excel_antiguo", ""))
-        self.excel_old_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        ctk.CTkButton(row_excel_old, text="Archivo", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_archivo(self.excel_old_entry, [("Excel files", "*.xlsx")])).pack(side="right")
-        row_excel_new = ctk.CTkFrame(self.tab_comparador, fg_color="transparent")
-        row_excel_new.pack(pady=5, fill="x", padx=50)
-        self.excel_new_entry = ctk.CTkEntry(row_excel_new, placeholder_text="Excel Nuevo...", height=30)
-        self.excel_new_entry.insert(0, self.config.get("ruta_excel_nuevo", ""))
-        self.excel_new_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        ctk.CTkButton(row_excel_new, text="Archivo", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_archivo(self.excel_new_entry, [("Excel files", "*.xlsx")])).pack(side="right")
-        row_folder_comp = ctk.CTkFrame(self.tab_comparador, fg_color="transparent")
-        row_folder_comp.pack(pady=5, fill="x", padx=50)
-        self.folder_comp_entry = ctk.CTkEntry(row_folder_comp, placeholder_text="Carpeta destino...", height=30)
-        self.folder_comp_entry.insert(0, self.config.get("ruta_folder_comparador", ""))
-        self.folder_comp_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        ctk.CTkButton(row_folder_comp, text="Carpeta", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_carpeta(self.folder_comp_entry)).pack(side="right")
-        row_color = ctk.CTkFrame(self.tab_comparador, fg_color="transparent")
-        row_color.pack(pady=10)
-        self.color_optionmenu = ctk.CTkOptionMenu(row_color, values=["Amarillo", "Rojo", "Verde", "Azul", "Naranja"], height=30, fg_color=acc_color, button_color=acc_color)
-        self.color_optionmenu.set(self.config.get("color_resaltado", "Amarillo"))
-        self.color_optionmenu.grid(row=0, column=1, padx=5)
-        self.btn_comparador = ctk.CTkButton(self.tab_comparador, text="COMPARAR EXCELS", height=45, font=("Segoe UI", 14, "bold"), fg_color=acc_color, command=self.toggle_comparador)
-        self.btn_comparador.pack(pady=10, padx=100, fill="x")
-
-    def setup_tab_rotacion(self, acc_color):
-        ctk.CTkLabel(self.tab_rotacion, text="Analisis de Consumos (Rotacion)", font=("Segoe UI", 16, "bold")).pack(pady=10)
-        row_quiter = ctk.CTkFrame(self.tab_rotacion, fg_color="transparent")
-        row_quiter.pack(pady=5, fill="x", padx=50)
-        self.excel_quiter_entry = ctk.CTkEntry(row_quiter, placeholder_text="Excel de Quiter (DMS)...", height=30)
-        self.excel_quiter_entry.insert(0, self.config.get("ruta_excel_quiter", ""))
-        self.excel_quiter_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        ctk.CTkButton(row_quiter, text="Archivo", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")])).pack(side="right")
-        row_rot = ctk.CTkFrame(self.tab_rotacion, fg_color="transparent")
-        row_rot.pack(pady=5, fill="x", padx=50)
-        self.excel_rot_entry = ctk.CTkEntry(row_rot, placeholder_text="Archivo PROPUESTAPEDIDO.xls...", height=30)
-        self.excel_rot_entry.insert(0, self.config.get("ruta_excel_rotacion", ""))
-        self.excel_rot_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        ctk.CTkButton(row_rot, text="Archivo", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")])).pack(side="right")
-        row_folder_rot = ctk.CTkFrame(self.tab_rotacion, fg_color="transparent")
-        row_folder_rot.pack(pady=5, fill="x", padx=50)
-        self.folder_rot_entry = ctk.CTkEntry(row_folder_rot, placeholder_text="Carpeta destino...", height=30)
-        self.folder_rot_entry.insert(0, self.config.get("ruta_folder_rotacion", ""))
-        self.folder_rot_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        ctk.CTkButton(row_folder_rot, text="Carpeta", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_carpeta(self.folder_rot_entry)).pack(side="right")
-        row_umbral = ctk.CTkFrame(self.tab_rotacion, fg_color="transparent")
-        row_umbral.pack(pady=10)
-        ctk.CTkLabel(row_umbral, text="Umbral media minima:").grid(row=0, column=0, padx=10)
-        self.umbral_entry = ctk.CTkEntry(row_umbral, width=80, justify="center")
-        self.umbral_entry.insert(0, self.config.get("umbral_rotacion", "0.08"))
-        self.umbral_entry.grid(row=0, column=1)
-        self.btn_rotacion = ctk.CTkButton(self.tab_rotacion, text="RESALTAR POR ROTACION", height=45, font=("Segoe UI", 14, "bold"), fg_color=acc_color, command=self.iniciar_filtro_rotacion)
-        self.btn_rotacion.pack(pady=15, padx=100, fill="x")
-
-    def setup_tab_mopar(self, acc_color):
-        ctk.CTkLabel(self.tab_mopar, text="Conversion a Fichero MOPAR", font=("Segoe UI", 16, "bold")).pack(pady=10)
-        row_file = ctk.CTkFrame(self.tab_mopar, fg_color="transparent")
-        row_file.pack(pady=10, fill="x", padx=50)
-        self.excel_mopar_entry = ctk.CTkEntry(row_file, placeholder_text="Excel de entrada (.xls)...", height=30)
-        self.excel_mopar_entry.insert(0, self.config.get("ruta_excel_mopar", ""))
-        self.excel_mopar_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        ctk.CTkButton(row_file, text="Archivo", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files", "*.xls *.xlsx")])).pack(side="right")
-        row_folder = ctk.CTkFrame(self.tab_mopar, fg_color="transparent")
-        row_folder.pack(pady=10, fill="x", padx=50)
-        self.folder_mopar_entry = ctk.CTkEntry(row_folder, placeholder_text="Carpeta de destino...", height=30)
-        self.folder_mopar_entry.insert(0, self.config.get("ruta_folder_mopar", ""))
-        self.folder_mopar_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        ctk.CTkButton(row_folder, text="Carpeta", width=70, height=30, fg_color=acc_color, command=lambda: self.seleccionar_carpeta(self.folder_mopar_entry)).pack(side="right")
-        self.btn_mopar = ctk.CTkButton(self.tab_mopar, text="GENERAR FICHERO MOPAR", height=45, font=("Segoe UI", 14, "bold"), fg_color=acc_color, command=self.toggle_mopar)
-        self.btn_mopar.pack(pady=15, padx=100, fill="x")
-
-    def setup_tab_config(self, acc_color):
-        ctk.CTkLabel(self.tab_config, text="Credenciales", font=("Segoe UI", 16, "bold")).pack(pady=10)
-        frame_creds = ctk.CTkFrame(self.tab_config)
-        frame_creds.pack(pady=5, padx=50, fill="x")
-        ctk.CTkLabel(frame_creds, text="Usuario:").grid(row=0, column=0, padx=20, pady=10)
-        self.user_entry = ctk.CTkEntry(frame_creds, width=200, height=30)
-        self.user_entry.insert(0, self.config.get("usuario", ""))
-        self.user_entry.grid(row=0, column=1, padx=20, pady=10)
-        ctk.CTkLabel(frame_creds, text="Contrasena:").grid(row=1, column=0, padx=20, pady=10)
-        self.pass_entry = ctk.CTkEntry(frame_creds, width=200, height=30, show="*")
-        self.pass_entry.insert(0, self.config.get("password", ""))
-        self.pass_entry.grid(row=1, column=1, padx=20, pady=10)
-
-        ctk.CTkLabel(self.tab_config, text="Rendimiento", font=("Segoe UI", 16, "bold")).pack(pady=(15, 5))
-        frame_perf = ctk.CTkFrame(self.tab_config)
-        frame_perf.pack(pady=5, padx=50, fill="x")
-        ctk.CTkLabel(frame_perf, text="Numero de hilos paralelos:").grid(row=0, column=0, padx=20, pady=10)
-        self.hilos_option = ctk.CTkOptionMenu(frame_perf, values=["1", "2", "3", "4", "5"], height=30, fg_color=acc_color, button_color=acc_color)
-        self.hilos_option.set(str(self.config.get("num_hilos", "3")))
-        self.hilos_option.grid(row=0, column=1, padx=20, pady=10)
-
-        ctk.CTkLabel(self.tab_config, text="Personalizacion", font=("Segoe UI", 16, "bold")).pack(pady=(15, 5))
-        frame_temas = ctk.CTkFrame(self.tab_config)
-        frame_temas.pack(pady=5, padx=50, fill="x")
-        ctk.CTkLabel(frame_temas, text="Modo:").grid(row=0, column=0, padx=20, pady=5)
-        self.modo_option = ctk.CTkOptionMenu(frame_temas, values=["Dark", "Light", "System"], height=30, fg_color=acc_color, button_color=acc_color)
-        self.modo_option.set(self.config.get("modo_apariencia", "Dark"))
-        self.modo_option.grid(row=0, column=1, padx=20, pady=5)
-        ctk.CTkLabel(frame_temas, text="Tema:").grid(row=1, column=0, padx=20, pady=5)
-        self.tema_option = ctk.CTkOptionMenu(frame_temas, values=["Azul", "Verde", "Azul Oscuro"], height=30, fg_color=acc_color, button_color=acc_color)
-        tema_actual = self.config.get("tema_color", "Azul")
-        if tema_actual not in ["Azul", "Verde", "Azul Oscuro"]:
-            tema_actual = "Azul"
-        self.tema_option.set(tema_actual)
-        self.tema_option.grid(row=1, column=1, padx=20, pady=5)
-        ctk.CTkButton(self.tab_config, text="GUARDAR CONFIGURACION", height=40, fg_color=acc_color, command=self.guardar_config_ui).pack(pady=20)
-
     def build_tab_auto(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_auto, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.")
         self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]))
@@ -1186,14 +1053,14 @@ class AppIntegrada(ctk.CTk):
 
     def build_tab_mopar(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_mopar, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeracion diaria persistente.")
-        self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files", "*.xls *.xlsx")]))
+        self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_mopar_entry", "ruta_folder_mopar", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_mopar_entry))
         self.btn_mopar = self.crear_boton_principal(card, "GENERAR FICHERO MOPAR", self.toggle_mopar)
         self.btn_mopar.pack(padx=22, pady=(4, 22), fill="x")
 
     def build_tab_stock_fiat(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_stock_fiat, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.")
-        self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files", "*.xls *.xlsx")]))
+        self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_stock_fiat_entry", "ruta_folder_stock_fiat", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_stock_fiat_entry))
         self.btn_stock_fiat = self.crear_boton_principal(card, "GENERAR STOCK FIAT", self.toggle_stock_fiat)
         self.btn_stock_fiat.pack(padx=22, pady=(4, 22), fill="x")
@@ -1311,6 +1178,10 @@ class AppIntegrada(ctk.CTk):
             self.iniciar_auto()
 
     def iniciar_auto(self):
+        activa = tarea_activa()
+        if activa:
+            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+            return
         try:
             self.guardar_configuracion_ui_internal()
             ruta = self.widget_get("excel_auto_entry")
@@ -1348,6 +1219,10 @@ class AppIntegrada(ctk.CTk):
             stop_event_pedidos.set()
 
     def iniciar_pedidos(self):
+        activa = tarea_activa()
+        if activa:
+            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+            return
         self.guardar_configuracion_ui_internal()
         ruta = self.excel_pedidos_entry.get()
         folder = self.folder_pedidos_entry.get()
@@ -1373,6 +1248,10 @@ class AppIntegrada(ctk.CTk):
             stop_event_comparador.set()
 
     def iniciar_comparador(self):
+        activa = tarea_activa()
+        if activa:
+            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+            return
         self.guardar_configuracion_ui_internal()
         ruta_ant = self.excel_old_entry.get()
         ruta_nue = self.excel_new_entry.get()
@@ -1397,6 +1276,10 @@ class AppIntegrada(ctk.CTk):
         self.btn_comparador.configure(text="COMPARAR EXCELS", fg_color=acc_color, state="normal")
 
     def iniciar_filtro_rotacion(self):
+        activa = tarea_activa()
+        if activa:
+            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+            return
         self.guardar_configuracion_ui_internal()
         ruta_quiter = self.excel_quiter_entry.get()
         ruta_rot = self.excel_rot_entry.get()
@@ -1433,6 +1316,10 @@ class AppIntegrada(ctk.CTk):
             self.iniciar_mopar()
 
     def iniciar_mopar(self):
+        activa = tarea_activa()
+        if activa:
+            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+            return
         self.guardar_configuracion_ui_internal()
         ruta = self.excel_mopar_entry.get()
         folder = self.folder_mopar_entry.get()
@@ -1460,6 +1347,10 @@ class AppIntegrada(ctk.CTk):
             self.iniciar_stock_fiat()
 
     def iniciar_stock_fiat(self):
+        activa = tarea_activa()
+        if activa:
+            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+            return
         self.guardar_configuracion_ui_internal()
         ruta = self.excel_stock_fiat_entry.get()
         folder = self.folder_stock_fiat_entry.get()

@@ -45,43 +45,58 @@ def registrar_error_reclamacion(error, detalle, referencia):
 class HistorialReclamaciones:
     def __init__(self, database_path=DATABASE_FILE):
         self.database_path = database_path
-        with self._conexion() as conexion:
-            conexion.execute("""
-                CREATE TABLE IF NOT EXISTS reclamaciones_power_line (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    litigio TEXT NOT NULL,
-                    fecha TEXT NOT NULL,
-                    pedido_sap TEXT,
-                    referencia TEXT,
-                    ruta_word TEXT NOT NULL,
-                    ruta_pdf TEXT
-                )
-            """)
+        conexion = self._conexion()
+        try:
+            with conexion:
+                conexion.execute("""
+                    CREATE TABLE IF NOT EXISTS reclamaciones_power_line (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        litigio TEXT NOT NULL,
+                        fecha TEXT NOT NULL,
+                        pedido_sap TEXT,
+                        referencia TEXT,
+                        ruta_word TEXT NOT NULL,
+                        ruta_pdf TEXT
+                    )
+                """)
+        finally:
+            conexion.close()
 
     def _conexion(self):
         return sqlite3.connect(self.database_path)
 
     def guardar(self, litigio, pedido_sap, referencia, ruta_word, ruta_pdf):
-        with self._conexion() as conexion:
-            conexion.execute(
-                "INSERT INTO reclamaciones_power_line "
-                "(litigio, fecha, pedido_sap, referencia, ruta_word, ruta_pdf) VALUES (?, ?, ?, ?, ?, ?)",
-                (litigio, datetime.now().strftime("%d/%m/%Y %H:%M"), pedido_sap, referencia, ruta_word, ruta_pdf),
-            )
+        conexion = self._conexion()
+        try:
+            with conexion:
+                conexion.execute(
+                    "INSERT INTO reclamaciones_power_line "
+                    "(litigio, fecha, pedido_sap, referencia, ruta_word, ruta_pdf) VALUES (?, ?, ?, ?, ?, ?)",
+                    (litigio, datetime.now().strftime("%d/%m/%Y %H:%M"), pedido_sap, referencia, ruta_word, ruta_pdf),
+                )
+        finally:
+            conexion.close()
 
     def buscar(self, texto=""):
         filtro = f"%{texto.strip()}%"
-        with self._conexion() as conexion:
+        conexion = self._conexion()
+        try:
             return conexion.execute(
                 "SELECT id, litigio, fecha, pedido_sap, referencia, ruta_word, ruta_pdf "
                 "FROM reclamaciones_power_line WHERE litigio LIKE ? OR referencia LIKE ? OR pedido_sap LIKE ? "
                 "ORDER BY id DESC",
                 (filtro, filtro, filtro),
             ).fetchall()
+        finally:
+            conexion.close()
 
     def eliminar(self, registro_id):
-        with self._conexion() as conexion:
-            conexion.execute("DELETE FROM reclamaciones_power_line WHERE id = ?", (registro_id,))
+        conexion = self._conexion()
+        try:
+            with conexion:
+                conexion.execute("DELETE FROM reclamaciones_power_line WHERE id = ?", (registro_id,))
+        finally:
+            conexion.close()
 
 
 class DocumentoPowerLine:
