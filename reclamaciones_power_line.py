@@ -1,0 +1,551 @@
+"""Módulo aislado para crear y consultar reclamaciones de Power Line."""
+
+import os
+import shutil
+import sqlite3
+import tempfile
+import threading
+import traceback
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+import customtkinter as ctk
+from PIL import Image
+from tkinterdnd2 import DND_FILES, TkinterDnD
+
+
+DATABASE_FILE = "reclamaciones_power_line.db"
+ERROR_LOG_FILE = "error_log_detallado.txt"
+PHOTO_FIELDS = (
+    ("bulto", "Fotografía bulto completo"),
+    ("deterioro", "Fotografía detalle del deterioro"),
+    ("etiqueta", "Fotografía detalle de la etiqueta"),
+)
+TEXT_BOOKMARKS = {
+    "pedido": ("PedidoSAP", "PEDIDO_SAP", "Pedido_SAP"),
+    "referencia": ("Referencia", "REFERENCIA"),
+    "descripcion": ("Descripcion", "DESCRIPCION", "Descripción"),
+}
+PHOTO_BOOKMARKS = {
+    "bulto": ("FotoBultoCompleto", "FOTO_BULTO_COMPLETO", "FotoBulto"),
+    "deterioro": ("FotoDetalleDeterioro", "FOTO_DETALLE_DETERIORO", "FotoDeterioro"),
+    "etiqueta": ("FotoDetalleEtiqueta", "FOTO_DETALLE_ETIQUETA", "FotoEtiqueta"),
+}
+
+
+def registrar_error_reclamacion(error, detalle, referencia):
+    with open(ERROR_LOG_FILE, "a", encoding="utf-8") as archivo:
+        archivo.write(
+            f"--- ERROR RECLAMACIONES POWER LINE [{datetime.now():%Y-%m-%d %H:%M:%S}] ---\n"
+            f"Referencia: {referencia or '-'}\nMensaje: {detalle}\nTraceback:\n{error}\n{'-' * 30}\n\n"
+        )
+
+
+class HistorialReclamaciones:
+    def __init__(self, database_path=DATABASE_FILE):
+        self.database_path = database_path
+        with self._conexion() as conexion:
+            conexion.execute("""
+                CREATE TABLE IF NOT EXISTS reclamaciones_power_line (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    litigio TEXT NOT NULL,
+                    fecha TEXT NOT NULL,
+                    pedido_sap TEXT,
+                    referencia TEXT,
+                    ruta_word TEXT NOT NULL,
+                    ruta_pdf TEXT
+                )
+            """)
+
+    def _conexion(self):
+        return sqlite3.connect(self.database_path)
+
+    def guardar(self, litigio, pedido_sap, referencia, ruta_word, ruta_pdf):
+        with self._conexion() as conexion:
+            conexion.execute(
+                "INSERT INTO reclamaciones_power_line "
+                "(litigio, fecha, pedido_sap, referencia, ruta_word, ruta_pdf) VALUES (?, ?, ?, ?, ?, ?)",
+                (litigio, datetime.now().strftime("%d/%m/%Y %H:%M"), pedido_sap, referencia, ruta_word, ruta_pdf),
+            )
+
+    def buscar(self, texto=""):
+        filtro = f"%{texto.strip()}%"
+        with self._conexion() as conexion:
+            return conexion.execute(
+                "SELECT id, litigio, fecha, pedido_sap, referencia, ruta_word, ruta_pdf "
+                "FROM reclamaciones_power_line WHERE litigio LIKE ? OR referencia LIKE ? OR pedido_sap LIKE ? "
+                "ORDER BY id DESC",
+                (filtro, filtro, filtro),
+            ).fetchall()
+
+    def eliminar(self, registro_id):
+        with self._conexion() as conexion:
+            conexion.execute("DELETE FROM reclamaciones_power_line WHERE id = ?", (registro_id,))
+
+
+class DocumentoPowerLine:
+    """Rellena una copia de plantilla mediante Word para no alterar su formato."""
+
+    def __init__(self, plantilla, salida, datos, fotos, generar_pdf):
+        self.plantilla = Path(plantilla)
+        self.salida = Path(salida)
+        self.datos = datos
+        self.fotos = fotos
+        self.generar_pdf = generar_pdf
+
+    @staticmethod
+    def _preparar_foto(origen, carpeta_temporal, clave):
+        destino = Path(carpeta_temporal) / f"{clave}.jpg"
+        with Image.open(origen) as imagen:
+            imagen = imagen.convert("RGB")
+            imagen.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
+            imagen.save(destino, "JPEG", quality=82, optimize=True)
+        return str(destino)
+
+    @staticmethod
+    def _rango_marcador(documento, nombres):
+        for nombre in nombres:
+            if documento.Bookmarks.Exists(nombre):
+                return documento.Bookmarks.Item(nombre).Range
+        return None
+
+    @staticmethod
+    def _buscar_marcador(documento, etiquetas):
+        for etiqueta in etiquetas:
+            for historia in range(1, 8):
+                try:
+                    rango = documento.StoryRanges(historia)
+                except Exception:
+                    continue
+                while rango is not None:
+                    encontrado = rango.Duplicate
+                    buscador = encontrado.Find
+                    buscador.ClearFormatting()
+                    buscador.Text = etiqueta
+                    if buscador.Execute():
+                        return encontrado
+                    try:
+                        rango = rango.NextStoryRange
+                    except Exception:
+                        rango = None
+        return None
+
+    @staticmethod
+    def _texto_en_rango(documento, valor, nombres, etiquetas):
+        rango = DocumentoPowerLine._rango_marcador(documento, nombres)
+        reemplazar = rango is not None
+        if rango is None:
+            rango = DocumentoPowerLine._buscar_marcador(documento, etiquetas)
+        if rango is None:
+            raise ValueError(f"No se encontró el campo de plantilla: {etiquetas[0]}")
+        if reemplazar or rango.Text.strip().startswith(("{{", "<<")):
+            rango.Text = valor
+            return
+        rango.Collapse(0)
+        rango.InsertAfter(f" {valor}")
+
+    @staticmethod
+    def _imagen_en_rango(documento, ruta_imagen, nombres, etiquetas):
+        rango = DocumentoPowerLine._rango_marcador(documento, nombres)
+        reemplazar = rango is not None
+        if rango is None:
+            rango = DocumentoPowerLine._buscar_marcador(documento, etiquetas)
+        if rango is None:
+            raise ValueError(f"No se encontró el espacio de plantilla: {etiquetas[0]}")
+        if reemplazar or rango.Text.strip().startswith(("{{", "<<")):
+            rango.Text = ""
+        else:
+            rango.Collapse(0)
+            rango.InsertAfter("\r")
+            rango.Collapse(0)
+            rango.ParagraphFormat.Alignment = 1
+        imagen = documento.InlineShapes.AddPicture(str(ruta_imagen), False, True, rango)
+        ancho_original, alto_original = float(imagen.Width), float(imagen.Height)
+        max_ancho, max_alto = 135.0, 90.0
+        escala = min(max_ancho / ancho_original, max_alto / alto_original, 1.0)
+        imagen.LockAspectRatio = False
+        imagen.Width = round(ancho_original * escala)
+        imagen.Height = round(alto_original * escala)
+
+    def generar(self):
+        if not self.plantilla.is_file():
+            raise FileNotFoundError("La plantilla Word configurada no existe.")
+        self.salida.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="power_line_") as temporal:
+            fotos = {clave: self._preparar_foto(ruta, temporal, clave) for clave, ruta in self.fotos.items()}
+            shutil.copy2(self.plantilla, self.salida)
+            import pythoncom
+            import win32com.client
+
+            pythoncom.CoInitialize()
+            word = None
+            documento = None
+            try:
+                try:
+                    word = win32com.client.DispatchEx("Word.Application")
+                except Exception as error:
+                    raise RuntimeError("No se pudo iniciar Microsoft Word. Comprueba que Microsoft Word está instalado y puede abrirse normalmente.") from error
+                word.Visible = False
+                word.DisplayAlerts = 0
+                try:
+                    documento = word.Documents.Open(str(self.salida))
+                except Exception as error:
+                    raise RuntimeError("No se pudo abrir la copia de la plantilla Word.") from error
+                self._texto_en_rango(documento, self.datos["pedido"], TEXT_BOOKMARKS["pedido"], ("{{PEDIDO_SAP}}", "<<PEDIDO_SAP>>", "Nº de pedido SAP:", "Nº pedido SAP:"))
+                self._texto_en_rango(documento, self.datos["referencia"], TEXT_BOOKMARKS["referencia"], ("{{REFERENCIA}}", "<<REFERENCIA>>", "Referencia:"))
+                self._texto_en_rango(documento, self.datos["descripcion"], TEXT_BOOKMARKS["descripcion"], ("{{DESCRIPCION}}", "<<DESCRIPCION>>", "Descripción del problema:"))
+                for clave, _ in PHOTO_FIELDS:
+                    etiqueta = "{{FOTO_" + clave.upper() + "}}"
+                    etiquetas_foto = {
+                        "bulto": (etiqueta, "<<FOTO_BULTO>>", "Fotografía bulto Completo"),
+                        "deterioro": (etiqueta, "<<FOTO_DETERIORO>>", "Fotografía Detalle del Deterioro"),
+                        "etiqueta": (etiqueta, "<<FOTO_ETIQUETA>>", "Fotografía Detalle de la Etiqueta"),
+                    }
+                    self._imagen_en_rango(documento, fotos[clave], PHOTO_BOOKMARKS[clave], etiquetas_foto[clave])
+                documento.Save()
+                ruta_pdf = None
+                if self.generar_pdf:
+                    ruta_pdf = str(self.salida.with_suffix(".pdf"))
+                    documento.ExportAsFixedFormat(ruta_pdf, 17)
+                return str(self.salida), ruta_pdf
+            finally:
+                if documento is not None:
+                    try:
+                        documento.Close(SaveChanges=True)
+                    except Exception:
+                        pass
+                if word is not None:
+                    try:
+                        word.Quit()
+                    except Exception:
+                        pass
+                pythoncom.CoUninitialize()
+
+
+class ModuloReclamacionesPowerLine:
+    def __init__(self, app, configuracion):
+        self.app = app
+        self.configuracion = configuracion
+        self.historial = HistorialReclamaciones()
+        self.fotos = {clave: "" for clave, _ in PHOTO_FIELDS}
+        self.previews = {}
+        self.imagenes_preview = {}
+        self.carpeta_adjuntos = Path(tempfile.mkdtemp(prefix="power_line_adjuntos_"))
+        self.dnd_activo = False
+
+    def construir(self, tab):
+        try:
+            TkinterDnD.require(self.app)
+            self.dnd_activo = True
+        except Exception:
+            self.dnd_activo = False
+        panel = ctk.CTkTabview(tab, fg_color=self.app.color_panel_claro, segmented_button_selected_color=self.app.color_principal,
+                               segmented_button_selected_hover_color=self.app.color_hover)
+        panel.pack(padx=14, pady=12, fill="both", expand=True)
+        self.tab_formulario = panel.add("Formulario")
+        self.tab_historial = panel.add("Historial")
+        self._construir_formulario()
+        self._construir_historial()
+
+    def _construir_formulario(self):
+        contenedor = ctk.CTkScrollableFrame(self.tab_formulario, fg_color="transparent")
+        contenedor.pack(padx=2, pady=2, fill="both", expand=True)
+        card = ctk.CTkFrame(contenedor, fg_color=self.app.color_superficie, corner_radius=18, border_width=2, border_color=self.app.color_borde)
+        card.pack(padx=12, pady=8, fill="x", expand=True)
+        encabezado = ctk.CTkFrame(card, fg_color=self.app.color_panel_medio, corner_radius=12)
+        encabezado.pack(padx=14, pady=(14, 8), fill="x")
+        ctk.CTkLabel(encabezado, text="RECLAMACIONES", font=("Segoe UI", 15, "bold"), text_color="#f7fbff").pack(anchor="w", padx=14, pady=8)
+        self.litigio_entry = self._campo(card, "Nº Litigio *")
+        self.pedido_entry = self._campo(card, "Nº Pedido SAP")
+        self.referencia_entry = self._campo(card, "Referencia")
+        self._crear_selector_destino(card)
+        ctk.CTkLabel(card, text="Descripción del problema", font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(2, 4))
+        self.descripcion_text = ctk.CTkTextbox(card, height=46, corner_radius=12, border_width=2, border_color=self.app.color_borde,
+                                               fg_color="#ffffff", text_color=self.app.color_texto)
+        self.descripcion_text.pack(padx=22, pady=(0, 8), fill="x")
+        ctk.CTkLabel(card, text="Fotografías *", font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(2, 4))
+        fotos_frame = ctk.CTkFrame(card, fg_color="transparent")
+        fotos_frame.pack(padx=22, pady=(0, 10), fill="x")
+        for clave, etiqueta in PHOTO_FIELDS:
+            self._crear_selector_foto(fotos_frame, clave, etiqueta)
+        self.pdf_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(card, text="Generar también PDF", variable=self.pdf_var, fg_color=self.app.color_principal,
+                        hover_color=self.app.color_hover, text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(0, 8))
+        acciones = ctk.CTkFrame(card, fg_color="transparent")
+        acciones.pack(padx=22, pady=(0, 18), fill="x")
+        self.btn_generar = self.app.crear_boton_principal(acciones, "GENERAR DOCUMENTO", self.generar_documento)
+        self.btn_generar.pack(fill="x")
+
+    def _crear_selector_destino(self, card):
+        destino = ctk.CTkFrame(card, fg_color=self.app.color_superficie_alt, corner_radius=12)
+        destino.pack(padx=22, pady=(0, 8), fill="x")
+        ctk.CTkLabel(destino, text="Carpeta de destino", font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=12, pady=(8, 3))
+        destino_fila = ctk.CTkFrame(destino, fg_color="transparent")
+        destino_fila.pack(padx=12, pady=(0, 8), fill="x")
+        self.destino_entry = ctk.CTkEntry(destino_fila, height=36, corner_radius=12, border_width=2, border_color=self.app.color_borde,
+                                           fg_color="#ffffff", text_color=self.app.color_texto)
+        self.destino_entry.insert(0, self.configuracion.get("power_line_ruta_guardado", ""))
+        self.destino_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(destino_fila, text="ELEGIR CARPETA", width=122, height=36, corner_radius=12, fg_color=self.app.color_principal,
+                      hover_color="#17222e", command=self.cambiar_carpeta).pack(side="right")
+
+    def _campo(self, parent, texto):
+        ctk.CTkLabel(parent, text=texto, font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(2, 3))
+        entrada = ctk.CTkEntry(parent, height=32, corner_radius=12, border_width=2, border_color=self.app.color_borde,
+                                fg_color="#ffffff", text_color=self.app.color_texto)
+        entrada.pack(padx=22, pady=(0, 6), fill="x")
+        return entrada
+
+    def _crear_selector_foto(self, parent, clave, etiqueta):
+        marco = ctk.CTkFrame(parent, fg_color=self.app.color_superficie_alt, corner_radius=12)
+        marco.pack(fill="x", pady=3)
+        vista = ctk.CTkLabel(marco, text="", width=54)
+        vista.pack(side="left", padx=(8, 0), pady=5)
+        etiqueta_estado = ctk.CTkLabel(marco, text=etiqueta + "\nArrastra desde el explorador o un adjunto del correo", justify="left", anchor="w",
+                                       font=("Segoe UI", 11), text_color=self.app.color_texto)
+        etiqueta_estado.pack(side="left", padx=12, pady=8, fill="x", expand=True)
+        boton = ctk.CTkButton(marco, text="Seleccionar", width=94, height=32, corner_radius=10, fg_color=self.app.color_panel_medio,
+                              hover_color="#17222e", command=lambda: self.seleccionar_foto(clave))
+        boton.pack(side="right", padx=(4, 8), pady=8)
+        eliminar = ctk.CTkButton(marco, text="×", width=30, height=32, corner_radius=10, fg_color=self.app.color_peligro,
+                                 hover_color="#b03a36", command=lambda: self.eliminar_foto(clave))
+        eliminar.pack(side="right", padx=2, pady=8)
+        self.previews[clave] = (vista, etiqueta_estado, boton, eliminar, etiqueta)
+        if self.dnd_activo:
+            marco.drop_target_register(DND_FILES)
+            marco.dnd_bind("<<Drop>>", lambda event, foto=clave: self._soltar_foto(event, foto))
+
+    def seleccionar_foto(self, clave):
+        ruta = filedialog.askopenfilename(filetypes=[("Imágenes", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"), ("Todos los archivos", "*.*")])
+        if ruta:
+            self.establecer_foto(clave, ruta)
+
+    def _soltar_foto(self, event, clave):
+        rutas = self.app.tk.splitlist(event.data)
+        if rutas and Path(rutas[0]).is_file():
+            self.establecer_foto(clave, rutas[0])
+        else:
+            messagebox.showwarning("Adjunto no disponible", "No se pudo leer el adjunto arrastrado. Guárdalo desde el correo y vuelve a arrastrarlo o selecciónalo.")
+        return "copy"
+
+    def establecer_foto(self, clave, ruta):
+        try:
+            with Image.open(ruta) as imagen:
+                imagen.verify()
+        except Exception:
+            messagebox.showerror("Error", "El archivo seleccionado no es una imagen válida.")
+            return
+        extension = Path(ruta).suffix.lower() or ".jpg"
+        copia = self.carpeta_adjuntos / f"{clave}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}{extension}"
+        shutil.copy2(ruta, copia)
+        self.fotos[clave] = str(copia)
+        vista, etiqueta, _, _, titulo = self.previews[clave]
+        with Image.open(ruta) as imagen:
+            miniatura = imagen.convert("RGB")
+            miniatura.thumbnail((50, 50), Image.Resampling.LANCZOS)
+            preview = ctk.CTkImage(light_image=miniatura.copy(), dark_image=miniatura.copy(), size=miniatura.size)
+        self.imagenes_preview[clave] = preview
+        vista.configure(image=preview)
+        etiqueta.configure(text=f"{titulo}\n{Path(ruta).name}  ✓")
+
+    def eliminar_foto(self, clave):
+        self.fotos[clave] = ""
+        vista, etiqueta, _, _, titulo = self.previews[clave]
+        self.imagenes_preview.pop(clave, None)
+        vista.configure(image=None)
+        etiqueta.configure(text=titulo + "\nArrastra una imagen o selecciónala")
+
+    def cambiar_carpeta(self):
+        ruta = filedialog.askdirectory(title="Selecciona la carpeta de guardado")
+        if ruta:
+            self.configuracion["power_line_ruta_guardado"] = ruta
+            if hasattr(self, "destino_entry"):
+                self.destino_entry.delete(0, "end")
+                self.destino_entry.insert(0, ruta)
+            if hasattr(self, "guardado_entry"):
+                self.guardado_entry.delete(0, "end")
+                self.guardado_entry.insert(0, ruta)
+            self.app.guardar_configuracion_ui_internal()
+            self.app.actualizar_estado("carpeta de Power Line actualizada", ruta)
+
+    def _construir_historial(self):
+        card = self.app.crear_tarjeta_tab(self.tab_historial, "Historial de reclamaciones", "Busca, abre o elimina registros; eliminar no borra los documentos.")
+        fila = ctk.CTkFrame(card, fg_color="transparent")
+        fila.pack(padx=22, pady=(0, 10), fill="x")
+        self.busqueda_entry = ctk.CTkEntry(fila, placeholder_text="Nº litigio, referencia o pedido SAP...", height=36, corner_radius=12,
+                                            border_width=2, border_color=self.app.color_borde, fg_color="#ffffff", text_color=self.app.color_texto)
+        self.busqueda_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.busqueda_entry.bind("<KeyRelease>", lambda _event: self.actualizar_historial())
+        ctk.CTkButton(fila, text="Buscar", width=76, height=36, corner_radius=12, fg_color=self.app.color_panel_medio,
+                      hover_color="#17222e", command=self.actualizar_historial).pack(side="right")
+        tabla_frame = ctk.CTkFrame(card, fg_color="#ffffff", corner_radius=12)
+        tabla_frame.pack(padx=22, pady=(0, 10), fill="both", expand=True)
+        columnas = ("litigio", "fecha", "pedido", "referencia")
+        self.tabla = ttk.Treeview(tabla_frame, columns=columnas, show="headings", height=7)
+        for clave, texto, ancho in (("litigio", "Nº Litigio", 115), ("fecha", "Fecha", 120), ("pedido", "Pedido SAP", 120), ("referencia", "Referencia", 150)):
+            self.tabla.heading(clave, text=texto)
+            self.tabla.column(clave, width=ancho, anchor="w")
+        self.tabla.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        barra = ttk.Scrollbar(tabla_frame, orient="vertical", command=self.tabla.yview)
+        barra.pack(side="right", fill="y", pady=4)
+        self.tabla.configure(yscrollcommand=barra.set)
+        acciones = ctk.CTkFrame(card, fg_color="transparent")
+        acciones.pack(padx=22, pady=(0, 18), fill="x")
+        ctk.CTkButton(acciones, text="Abrir documento", height=36, corner_radius=12, fg_color=self.app.color_panel_medio, hover_color="#17222e", command=self.abrir_documento).pack(side="left")
+        ctk.CTkButton(acciones, text="Abrir carpeta", height=36, corner_radius=12, fg_color=self.app.color_panel_medio, hover_color="#17222e", command=self.abrir_carpeta).pack(side="left", padx=8)
+        ctk.CTkButton(acciones, text="Eliminar registro", height=36, corner_radius=12, fg_color=self.app.color_peligro, hover_color="#b03a36", command=self.eliminar_registro).pack(side="right")
+        self.actualizar_historial()
+
+    def actualizar_historial(self):
+        if not hasattr(self, "tabla"):
+            return
+        for fila in self.tabla.get_children():
+            self.tabla.delete(fila)
+        for registro in self.historial.buscar(self.busqueda_entry.get()):
+            self.tabla.insert("", "end", iid=str(registro[0]), values=(registro[1], registro[2], registro[3], registro[4]))
+
+    def _registro_seleccionado(self):
+        seleccion = self.tabla.selection()
+        if not seleccion:
+            messagebox.showwarning("Aviso", "Selecciona un registro del historial.")
+            return None
+        registro_id = int(seleccion[0])
+        return next((fila for fila in self.historial.buscar("") if fila[0] == registro_id), None)
+
+    def abrir_documento(self):
+        registro = self._registro_seleccionado()
+        if registro:
+            try:
+                os.startfile(registro[5])
+            except OSError:
+                messagebox.showwarning("Aviso", "No se pudo abrir el documento.")
+
+    def abrir_carpeta(self):
+        registro = self._registro_seleccionado()
+        if registro:
+            try:
+                os.startfile(str(Path(registro[5]).parent))
+            except OSError:
+                messagebox.showwarning("Aviso", "No se pudo abrir la carpeta.")
+
+    def eliminar_registro(self):
+        registro = self._registro_seleccionado()
+        if registro and messagebox.askyesno("Confirmar", "¿Eliminar el registro? Los archivos no se borrarán."):
+            self.historial.eliminar(registro[0])
+            self.actualizar_historial()
+
+    def _validar(self):
+        if not self.litigio_entry.get().strip():
+            messagebox.showerror("Error", "El Nº Litigio es obligatorio.")
+            return False
+        faltantes = [etiqueta for clave, etiqueta in PHOTO_FIELDS if not self.fotos[clave]]
+        if faltantes:
+            messagebox.showerror("Error", "Debes adjuntar las tres fotografías requeridas.")
+            return False
+        plantilla = self.configuracion.get("power_line_ruta_plantilla", "")
+        if not plantilla or not Path(plantilla).is_file():
+            messagebox.showerror("Error", "Configura una plantilla Word válida en Configuración.")
+            return False
+        return True
+
+    def generar_documento(self):
+        if not self._validar():
+            return
+        ruta_guardado = self.destino_entry.get().strip() if hasattr(self, "destino_entry") else self.configuracion.get("power_line_ruta_guardado", "")
+        if not ruta_guardado:
+            ruta_guardado = filedialog.askdirectory(title="Selecciona la carpeta de guardado")
+            if not ruta_guardado:
+                return
+            self.configuracion["power_line_ruta_guardado"] = ruta_guardado
+            if hasattr(self, "destino_entry"):
+                self.destino_entry.delete(0, "end")
+                self.destino_entry.insert(0, ruta_guardado)
+            if hasattr(self, "guardado_entry"):
+                self.guardado_entry.delete(0, "end")
+                self.guardado_entry.insert(0, ruta_guardado)
+            self.app.guardar_configuracion_ui_internal()
+        self.configuracion["power_line_ruta_guardado"] = ruta_guardado
+        if hasattr(self, "guardado_entry"):
+            self.guardado_entry.delete(0, "end")
+            self.guardado_entry.insert(0, ruta_guardado)
+        self.app.guardar_configuracion_ui_internal()
+        datos = {"litigio": self.litigio_entry.get().strip(), "pedido": self.pedido_entry.get().strip(),
+                 "referencia": self.referencia_entry.get().strip(), "descripcion": self.descripcion_text.get("1.0", "end-1c").strip()}
+        salida = Path(ruta_guardado) / f"Litigio {datos['litigio']}.docx"
+        self.btn_generar.configure(state="disabled", text="GENERANDO...")
+        threading.Thread(target=self._generar_en_segundo_plano, args=(datos, salida), daemon=True).start()
+
+    def _generar_en_segundo_plano(self, datos, salida):
+        try:
+            datos_documento = {clave: datos[clave] for clave in ("pedido", "referencia", "descripcion")}
+            word, pdf = DocumentoPowerLine(self.configuracion["power_line_ruta_plantilla"], salida, datos_documento, self.fotos.copy(), self.pdf_var.get()).generar()
+            self.historial.guardar(datos["litigio"], datos["pedido"], datos["referencia"], word, pdf)
+            self.app.after(0, lambda: self._finalizar_generacion(word, pdf))
+        except Exception as error:
+            detalle = self._detalle_error(error)
+            registrar_error_reclamacion(traceback.format_exc(), detalle, datos.get("referencia"))
+            self.app.after(0, lambda mensaje=detalle: self._error_generacion(mensaje))
+
+    @staticmethod
+    def _detalle_error(error):
+        mensaje = str(error).strip()
+        if mensaje and mensaje.lower() != "none":
+            return mensaje
+        argumentos = getattr(error, "args", ())
+        detalle = " | ".join(str(argumento) for argumento in argumentos if argumento not in (None, ""))
+        if detalle:
+            return detalle
+        return f"Error interno de Word ({type(error).__name__}). Consulta el registro detallado para más información."
+
+    def _finalizar_generacion(self, word, pdf):
+        self.btn_generar.configure(state="normal", text="GENERAR DOCUMENTO")
+        self.actualizar_historial()
+        self.app.actualizar_estado("reclamación Power Line generada", word)
+        if self.configuracion.get("power_line_abrir_documento", False):
+            os.startfile(word)
+        if self.configuracion.get("power_line_abrir_carpeta", False):
+            os.startfile(str(Path(word).parent))
+        mensaje = "Documento Word generado correctamente."
+        if pdf:
+            mensaje += " También se ha generado el PDF."
+        messagebox.showinfo("Éxito", mensaje)
+
+    def _error_generacion(self, detalle):
+        self.btn_generar.configure(state="normal", text="GENERAR DOCUMENTO")
+        messagebox.showerror("Error", f"No se pudo generar la reclamación.\n{detalle}")
+
+    def construir_ajustes(self, parent):
+        marco = ctk.CTkFrame(parent, fg_color=self.app.color_superficie_alt, corner_radius=14)
+        marco.pack(padx=22, pady=(0, 14), fill="x")
+        ctk.CTkLabel(marco, text="Reclamaciones Power Line", font=("Segoe UI", 12, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=18, pady=(12, 6))
+        self.plantilla_entry = self._fila_ajuste(marco, "Ruta de la plantilla Word", "power_line_ruta_plantilla", self._seleccionar_plantilla)
+        self.guardado_entry = self._fila_ajuste(marco, "Ruta por defecto de guardado", "power_line_ruta_guardado", self.cambiar_carpeta)
+        self.abrir_documento_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_abrir_documento", False)))
+        self.abrir_carpeta_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_abrir_carpeta", False)))
+        ctk.CTkCheckBox(marco, text="Abrir documento al finalizar", variable=self.abrir_documento_var, fg_color=self.app.color_principal, hover_color=self.app.color_hover, text_color=self.app.color_texto).pack(anchor="w", padx=18, pady=4)
+        ctk.CTkCheckBox(marco, text="Abrir carpeta al finalizar", variable=self.abrir_carpeta_var, fg_color=self.app.color_principal, hover_color=self.app.color_hover, text_color=self.app.color_texto).pack(anchor="w", padx=18, pady=(4, 12))
+
+    def _fila_ajuste(self, parent, texto, clave, comando):
+        fila = ctk.CTkFrame(parent, fg_color="transparent")
+        fila.pack(padx=18, pady=5, fill="x")
+        ctk.CTkLabel(fila, text=texto, width=180, anchor="w", font=("Segoe UI", 11), text_color=self.app.color_texto).pack(side="left")
+        entrada = ctk.CTkEntry(fila, height=32, corner_radius=10, border_color=self.app.color_borde, fg_color="#ffffff", text_color=self.app.color_texto)
+        entrada.insert(0, self.configuracion.get(clave, ""))
+        entrada.pack(side="left", fill="x", expand=True, padx=6)
+        ctk.CTkButton(fila, text="Examinar", width=80, height=32, corner_radius=10, fg_color=self.app.color_panel_medio, hover_color="#17222e", command=comando).pack(side="right")
+        return entrada
+
+    def _seleccionar_plantilla(self):
+        ruta = filedialog.askopenfilename(filetypes=[("Plantilla Word", "*.docx *.dotx")])
+        if ruta:
+            self.plantilla_entry.delete(0, "end")
+            self.plantilla_entry.insert(0, ruta)
+
+    def obtener_configuracion(self):
+        return {
+            "power_line_ruta_plantilla": self.plantilla_entry.get() if hasattr(self, "plantilla_entry") else self.configuracion.get("power_line_ruta_plantilla", ""),
+            "power_line_ruta_guardado": self.guardado_entry.get() if hasattr(self, "guardado_entry") else self.configuracion.get("power_line_ruta_guardado", ""),
+            "power_line_abrir_documento": self.abrir_documento_var.get() if hasattr(self, "abrir_documento_var") else False,
+            "power_line_abrir_carpeta": self.abrir_carpeta_var.get() if hasattr(self, "abrir_carpeta_var") else False,
+        }

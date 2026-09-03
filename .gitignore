@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.db
+*.db-journal
+error_log_detallado.txt
+errores_capturas/
+_docx_qa/
+config.json
+config_palausa_aprovisionamiento.json
