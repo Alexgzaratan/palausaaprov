@@ -14,7 +14,6 @@ import traceback
 import shutil
 import xlrd
 import string
-from PIL import Image
 from datetime import datetime
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -35,12 +34,6 @@ CONFIG_FILE = "config_palausa_aprovisionamiento.json"
 ICONO_NOMBRE = "ultraball.ico"
 ERROR_FOLDER = "errores_capturas"
 LOG_DETALLADO = "error_log_detallado.txt"
-REGION_ICON_FOLDER = Path("assets") / "region_icons"
-
-# Colores del Tema Lila (Cyber-Lila)
-COLOR_LILA = "#9b59b6"
-COLOR_LILA_HOVER = "#8e44ad"
-COLOR_FONDO_NEGRO = "#1a1a1a"
 
 # Bloqueo para escritura segura en Excel desde múltiples hilos
 excel_lock = threading.Lock()
@@ -369,7 +362,7 @@ def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, preci
                     except Exception:
                         continue
                 if not target_frame:
-                    log("No se encontr? el frame de trabajo.", "error")
+                    log("No se encontró el frame de trabajo.", "error")
                     return
 
                 def preparar_formulario():
@@ -753,200 +746,100 @@ class AppIntegrada(ctk.CTk):
         super().__init__()
         self.config = cargar_configuracion()
         self.aplicar_tema_inicial()
-        self.title("PALAUSA APROVISIONAMIENTO PRO (MULTI-HILO)")
-        self.geometry("850x950")
-        self.resizable(False, False)
+        self.title("Palausa Aprovisionamiento")
+        self.geometry("1000x980")
+        self.minsize(1000, 760)
+        self.resizable(True, True)
         if os.path.exists(ICONO_PATH):
             try: self.iconbitmap(ICONO_PATH)
             except Exception: pass
         self.setup_ui()
 
     def aplicar_tema_inicial(self):
-        modo = self.config.get("modo_apariencia", "Dark")
-        tema = "Sinnoh"
-        self.config["tema_color"] = "Sinnoh"
-        ctk.set_appearance_mode(modo)
-        mapa_temas = {
-            "Azul": "blue",
-            "Verde": "green",
-            "Azul Oscuro": "dark-blue",
-            "Kanto": "blue",
-            "Johto": "green",
-            "Hoenn": "blue",
-            "Sinnoh": "dark-blue",
-            "Unova": "dark-blue",
-        }
-        tema_base = mapa_temas.get(tema, "blue")
-        ctk.set_default_color_theme(tema_base)
+        # Modo y tema fijos: interfaz clara y consistente en toda la aplicación.
+        ctk.set_appearance_mode("Light")
+        ctk.set_default_color_theme("blue")
         self.accent_color = None
         self.hover_color = None
 
     def aplicar_estilos_ui(self):
-        tema = "Sinnoh"
-        paletas = {
-            "Kanto": {
-                "principal": "#d83a3a",
-                "hover": "#a92a2a",
-                "superficie": "#f1f4f8",
-                "superficie_alt": "#dce4ec",
-                "borde": "#7b8ca3",
-                "texto": "#16212f",
-                "texto_sec": "#506277",
-                "panel_oscuro": "#1b2735",
-                "panel_medio": "#243447",
-                "panel_claro": "#eef3f8",
-                "acento_azul": "#4aa3ff",
-                "luz": "#ffd24a",
-            },
-            "Johto": {
-                "principal": "#c59a2f",
-                "hover": "#98751f",
-                "superficie": "#f7f3e8",
-                "superficie_alt": "#e8debf",
-                "borde": "#8f8570",
-                "texto": "#2a2418",
-                "texto_sec": "#6e644e",
-                "panel_oscuro": "#2d2a24",
-                "panel_medio": "#4b4438",
-                "panel_claro": "#f3ecdb",
-                "acento_azul": "#9fd3ff",
-                "luz": "#f6e27a",
-            },
-            "Hoenn": {
-                "principal": "#b83a20",
-                "hover": "#842414",
-                "superficie": "#f8efe8",
-                "superficie_alt": "#efd5c7",
-                "borde": "#9a5a3c",
-                "texto": "#2a170f",
-                "texto_sec": "#7c4c38",
-                "panel_oscuro": "#2f140d",
-                "panel_medio": "#5b2415",
-                "panel_claro": "#f6e6dd",
-                "acento_azul": "#ff7a2f",
-                "luz": "#ffd166",
-            },
-            "Sinnoh": {
-                "principal": "#6f7fd8",
-                "hover": "#515fab",
-                "superficie": "#f1f2f8",
-                "superficie_alt": "#dde1f0",
-                "borde": "#7b84a2",
-                "texto": "#1a2031",
-                "texto_sec": "#5c6683",
-                "panel_oscuro": "#1f2438",
-                "panel_medio": "#313a57",
-                "panel_claro": "#eceff8",
-                "acento_azul": "#8ed0ff",
-                "luz": "#f2d06b",
-            },
-            "Unova": {
-                "principal": "#3b3b3b",
-                "hover": "#252525",
-                "superficie": "#f3f3f3",
-                "superficie_alt": "#dfdfdf",
-                "borde": "#8a8a8a",
-                "texto": "#171717",
-                "texto_sec": "#5a5a5a",
-                "panel_oscuro": "#111111",
-                "panel_medio": "#232323",
-                "panel_claro": "#ededed",
-                "acento_azul": "#66d1ff",
-                "luz": "#d8d8d8",
-            },
-        }
-        paleta = paletas.get(tema, paletas["Kanto"])
-        self.color_principal = paleta["principal"]
-        self.color_hover = paleta["hover"]
-        self.color_superficie = paleta["superficie"]
-        self.color_superficie_alt = paleta["superficie_alt"]
-        self.color_borde = paleta["borde"]
-        self.color_texto = paleta["texto"]
-        self.color_texto_sec = paleta["texto_sec"]
-        self.color_panel_oscuro = paleta["panel_oscuro"]
-        self.color_panel_medio = paleta["panel_medio"]
-        self.color_panel_claro = paleta["panel_claro"]
-        self.color_acento_azul = paleta["acento_azul"]
-        self.color_ok = "#2ecc71"
-        self.color_warn = "#f39c12"
-        self.color_peligro = "#d9534f"
-        self.color_pokedex_luz = paleta["luz"]
+        # Paleta única, neutra y profesional (sustituye al antiguo sistema de temas/regiones).
+        self.color_principal = "#2563eb"       # Acento primario (acciones principales)
+        self.color_hover = "#1d4ed8"
+        self.color_superficie = "#ffffff"      # Fondo de tarjetas/paneles
+        self.color_superficie_alt = "#f1f4f9"  # Fondo de sub-secciones dentro de una tarjeta
+        self.color_borde = "#dbe1ea"
+        self.color_texto = "#1e2733"
+        self.color_texto_sec = "#64748b"
+        self.color_panel_oscuro = "#eef2f8"    # Secciones destacadas de fondo claro
+        self.color_panel_medio = "#eef1f6"     # Fondo de botones secundarios
+        self.color_panel_medio_hover = "#dfe4ec"
+        self.color_panel_claro = "#f5f6f9"     # Fondo general de la ventana
+        self.color_acento_azul = "#0ea5e9"
+        self.color_ok = "#16a34a"
+        self.color_warn = "#d97706"
+        self.color_peligro = "#dc2626"
+        self.color_peligro_hover = "#b91c1c"
+        self.color_pokedex_luz = "#0f172a"     # Texto de énfasis (estado, porcentaje)
 
     def crear_tarjeta_tab(self, tab, titulo, subtitulo):
-        card = ctk.CTkFrame(tab, fg_color=self.color_superficie, corner_radius=18, border_width=2, border_color=self.color_borde)
-        card.pack(padx=28, pady=18, fill="both", expand=True)
-        header = ctk.CTkFrame(card, fg_color=self.color_panel_medio, corner_radius=14)
-        header.pack(padx=14, pady=(14, 8), fill="x")
-        led_row = ctk.CTkFrame(header, fg_color="transparent")
-        led_row.pack(anchor="w", padx=14, pady=(10, 4))
-        ctk.CTkLabel(led_row, text="●", text_color=self.color_principal, font=("Segoe UI", 14, "bold")).pack(side="left", padx=(0, 4))
-        ctk.CTkLabel(led_row, text="●", text_color=self.color_acento_azul, font=("Segoe UI", 14, "bold")).pack(side="left", padx=(0, 4))
-        ctk.CTkLabel(led_row, text="●", text_color=self.color_pokedex_luz, font=("Segoe UI", 14, "bold")).pack(side="left")
-        ctk.CTkLabel(header, text=titulo.upper(), font=("Segoe UI", 18, "bold"), text_color="#f7fbff").pack(anchor="w", padx=14, pady=(0, 2))
-        ctk.CTkLabel(header, text=subtitulo, font=("Segoe UI", 12), text_color="#b9c7d5").pack(anchor="w", padx=14, pady=(0, 12))
+        card = ctk.CTkFrame(tab, fg_color=self.color_superficie, corner_radius=12, border_width=1, border_color=self.color_borde)
+        card.pack(padx=20, pady=16, fill="both", expand=True)
+        ctk.CTkLabel(card, text=titulo, font=("Segoe UI", 17, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(22, 2))
+        ctk.CTkLabel(card, text=subtitulo, font=("Segoe UI", 12), text_color=self.color_texto_sec).pack(anchor="w", padx=24, pady=(0, 14))
+        ctk.CTkFrame(card, fg_color=self.color_borde, height=1).pack(fill="x", padx=24, pady=(0, 16))
         return card
 
     def crear_fila_archivo(self, parent, label_text, entry_attr, config_key, placeholder, button_text, command):
-        ctk.CTkLabel(parent, text=label_text, font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=22, pady=(6, 6))
+        ctk.CTkLabel(parent, text=label_text, font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(padx=22, pady=(0, 12), fill="x")
-        entry = ctk.CTkEntry(row, placeholder_text=placeholder, height=38, corner_radius=12, border_width=2, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        row.pack(padx=24, pady=(0, 16), fill="x")
+        entry = ctk.CTkEntry(row, placeholder_text=placeholder, height=38, corner_radius=8, border_width=1, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
         entry.insert(0, self.config.get(config_key, ""))
         entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
         setattr(self, entry_attr, entry)
-        btn = ctk.CTkButton(row, text=button_text, width=78, height=38, corner_radius=12, fg_color=self.color_panel_medio, text_color="#f7fbff", hover_color="#17222e", command=command)
+        btn = ctk.CTkButton(row, text=button_text, width=92, height=38, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=command)
         btn.pack(side="right")
         return entry
 
     def crear_boton_principal(self, parent, text, command):
-        return ctk.CTkButton(parent, text=text, height=46, corner_radius=14, font=("Segoe UI", 14, "bold"), fg_color=self.color_principal, text_color="#fff7f7", border_width=1, border_color="#7a1d1d", hover_color=self.color_hover, command=command)
-
-    def obtener_icono_region_path(self):
-        tema = self.config.get("tema_color", "Kanto").lower()
-        ruta = REGION_ICON_FOLDER / f"{tema}.png"
-        return ruta if ruta.exists() else None
+        return ctk.CTkButton(parent, text=text, height=44, corner_radius=8, font=("Segoe UI", 13, "bold"), fg_color=self.color_principal, text_color="#ffffff", hover_color=self.color_hover, command=command)
 
     def setup_ui(self):
         self.aplicar_estilos_ui()
         acc_color = self.color_principal
         self.ultima_ruta_generada = ""
-        self.configure(fg_color="#cfd9e3")
-        hero = ctk.CTkFrame(self, fg_color=self.color_principal, corner_radius=22, border_width=2, border_color="#58648f")
-        hero.pack(pady=(6, 2), padx=22, fill="x")
-        hero_top = ctk.CTkFrame(hero, fg_color="transparent")
-        hero_top.pack(fill="x", padx=16, pady=(8, 8))
-        hero_lights = ctk.CTkFrame(hero_top, fg_color="transparent")
-        hero_lights.pack(side="left")
-        ctk.CTkLabel(hero_lights, text="◉", font=("Segoe UI", 24, "bold"), text_color="#8ed0ff").pack(side="left")
-        ctk.CTkLabel(hero_lights, text="●", font=("Segoe UI", 18, "bold"), text_color=self.color_pokedex_luz).pack(side="left", padx=(6, 0))
-        ctk.CTkLabel(hero_lights, text="●", font=("Segoe UI", 18, "bold"), text_color="#ffffff").pack(side="left", padx=(6, 0))
-        hero_title = ctk.CTkFrame(hero_top, fg_color="transparent")
-        hero_title.pack(side="left", expand=True, padx=(18, 0))
-        ctk.CTkLabel(hero_title, text="PALAUSA APROVISIONAMIENTO PRO", font=("Segoe UI", 22, "bold"), text_color="#fffaf7").pack(anchor="w")
-        ruta_icono_region = self.obtener_icono_region_path()
-        if ruta_icono_region:
-            self.region_icon_img = ctk.CTkImage(light_image=Image.open(ruta_icono_region), dark_image=Image.open(ruta_icono_region), size=(72, 72))
-            ctk.CTkLabel(hero_top, image=self.region_icon_img, text="").pack(side="right")
+        self.configure(fg_color=self.color_panel_claro)
+
+        cabecera = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=0, border_width=0)
+        cabecera.pack(fill="x")
+        cabecera_int = ctk.CTkFrame(cabecera, fg_color="transparent")
+        cabecera_int.pack(fill="x", padx=24, pady=16)
+        ctk.CTkLabel(cabecera_int, text="Palausa Aprovisionamiento", font=("Segoe UI", 20, "bold"), text_color=self.color_texto).pack(anchor="w")
+        ctk.CTkLabel(cabecera_int, text="Herramienta interna de gestión de stock y pedidos", font=("Segoe UI", 12), text_color=self.color_texto_sec).pack(anchor="w", pady=(2, 0))
+        ctk.CTkFrame(self, fg_color=self.color_borde, height=1).pack(fill="x")
+
         self.tabview = ctk.CTkTabview(
             self,
-            width=810,
-            height=350,
-            corner_radius=18,
+            height=460,
+            corner_radius=10,
             segmented_button_selected_color=acc_color,
             segmented_button_selected_hover_color=self.color_hover,
+            segmented_button_fg_color=self.color_panel_medio,
+            segmented_button_unselected_color=self.color_panel_medio,
+            text_color=self.color_texto,
             fg_color=self.color_panel_claro,
-            border_width=2,
-            border_color=self.color_borde
+            border_width=0,
         )
-        self.tabview.pack(pady=2, padx=22, fill="x")
-        self.tab_auto = self.tabview.add("Automatizacion")
+        self.tabview.pack(pady=(16, 8), padx=22, fill="x")
+        self.tab_auto = self.tabview.add("Automatización")
         self.tab_pedidos = self.tabview.add("Pedidos")
         self.tab_comparador = self.tabview.add("Comparador")
-        self.tab_rotacion = self.tabview.add("Filtro Rotacion")
+        self.tab_rotacion = self.tabview.add("Filtro Rotación")
         self.tab_mopar = self.tabview.add("Fichero Mopar")
         self.tab_stock_fiat = self.tabview.add("Stock FIAT")
         self.tab_reclamaciones_power_line = self.tabview.add("Reclamaciones")
-        self.tab_config = self.tabview.add("Configuracion")
+        self.tab_config = self.tabview.add("Configuración")
         self.build_tab_auto(acc_color)
         self.build_tab_pedidos(acc_color)
         self.build_tab_comparador(acc_color)
@@ -957,36 +850,39 @@ class AppIntegrada(ctk.CTk):
         self.reclamaciones_power_line.construir(self.tab_reclamaciones_power_line)
         self.build_tab_config(acc_color)
         self.tabview.configure(command=self.actualizar_paneles_por_pestana)
-        self.frame_progreso = ctk.CTkFrame(self, fg_color=self.color_panel_medio, corner_radius=18, border_width=2, border_color=self.color_borde)
-        self.frame_progreso.pack(pady=(2, 1), padx=22, fill="x")
-        ctk.CTkLabel(self.frame_progreso, text="Estado de escaneo", font=("Segoe UI", 12, "bold"), text_color="#f4f6fb").pack(anchor="w", padx=16, pady=(10, 2))
+
+        self.frame_progreso = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=10, border_width=1, border_color=self.color_borde)
+        self.frame_progreso.pack(pady=(0, 8), padx=22, fill="x")
+        ctk.CTkLabel(self.frame_progreso, text="Progreso", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(12, 4))
         barra_row = ctk.CTkFrame(self.frame_progreso, fg_color="transparent")
-        barra_row.pack(padx=16, pady=(0, 10), fill="x")
+        barra_row.pack(padx=16, pady=(0, 12), fill="x")
         self.progreso_var = ctk.DoubleVar()
-        self.barra_prog = ctk.CTkProgressBar(barra_row, variable=self.progreso_var, height=16, corner_radius=999, progress_color=self.color_acento_azul, fg_color="#41556b")
+        self.barra_prog = ctk.CTkProgressBar(barra_row, variable=self.progreso_var, height=12, corner_radius=999, progress_color=self.color_principal, fg_color=self.color_superficie_alt)
         self.barra_prog.pack(side="left", fill="x", expand=True, padx=(0, 15))
-        self.porcentaje_label = ctk.CTkLabel(barra_row, text="0%", font=("Segoe UI", 14, "bold"), text_color=self.color_pokedex_luz)
+        self.porcentaje_label = ctk.CTkLabel(barra_row, text="0%", font=("Segoe UI", 13, "bold"), text_color=self.color_pokedex_luz)
         self.porcentaje_label.pack(side="right")
-        self.frame_estado = ctk.CTkFrame(self, fg_color=self.color_panel_medio, corner_radius=16, border_width=2, border_color=self.color_borde)
-        self.frame_estado.pack(pady=(1, 1), padx=22, fill="x")
-        ctk.CTkLabel(self.frame_estado, text="Centro de control", font=("Segoe UI", 13, "bold"), text_color="#f4f6fb").pack(anchor="w", padx=14, pady=(8, 1))
+
+        self.frame_estado = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=10, border_width=1, border_color=self.color_borde)
+        self.frame_estado.pack(pady=(0, 8), padx=22, fill="x")
+        ctk.CTkLabel(self.frame_estado, text="Estado", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(12, 4))
         self.estado_label = ctk.CTkLabel(self.frame_estado, text="Estado: listo", font=("Segoe UI", 12, "bold"), text_color=self.color_pokedex_luz)
-        self.estado_label.pack(anchor="w", padx=14, pady=(1, 1))
-        self.ruta_label = ctk.CTkLabel(self.frame_estado, text="Ultima salida: -", font=("Consolas", 10), text_color="#cfdae5", anchor="w", justify="left")
-        self.ruta_label.pack(anchor="w", padx=14, pady=(0, 6))
+        self.estado_label.pack(anchor="w", padx=16, pady=(0, 2))
+        self.ruta_label = ctk.CTkLabel(self.frame_estado, text="Última salida: -", font=("Consolas", 10), text_color=self.color_texto_sec, anchor="w", justify="left")
+        self.ruta_label.pack(anchor="w", padx=16, pady=(0, 8))
         self.frame_acciones = ctk.CTkFrame(self.frame_estado, fg_color="transparent")
-        self.frame_acciones.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkButton(self.frame_acciones, text="Abrir ultima salida", height=30, corner_radius=10, fg_color="#35506a", text_color="#f8fbff", hover_color="#24384a", command=self.abrir_ultima_salida).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(self.frame_acciones, text="Abrir errores", height=30, corner_radius=10, fg_color="#35506a", text_color="#f8fbff", hover_color="#24384a", command=lambda: self.abrir_directorio(ERROR_FOLDER)).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(self.frame_acciones, text="Abrir log", height=30, corner_radius=10, fg_color="#35506a", text_color="#f8fbff", hover_color="#24384a", command=self.abrir_log_detallado).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(self.frame_acciones, text="Limpiar log", height=30, corner_radius=10, fg_color="#35506a", text_color="#f8fbff", hover_color="#24384a", command=self.limpiar_log).pack(side="left")
-        self.frame_log = ctk.CTkFrame(self, fg_color=self.color_panel_medio, corner_radius=18, border_width=2, border_color=self.color_borde)
-        self.frame_log.pack(pady=(2, 10), padx=22, fill="both", expand=True)
-        ctk.CTkLabel(self.frame_log, text="Registro de actividad", font=("Segoe UI", 14, "bold"), text_color="#f4f6fb").pack(anchor="w", padx=16, pady=(10, 6))
-        self.log_box = ctk.CTkTextbox(self.frame_log, width=800, height=500, font=("Consolas", 13), border_width=2, border_color="#5a6d84", corner_radius=16, fg_color="#f8fbff", text_color="#102030")
-        self.log_box.pack(padx=14, pady=(0, 14), fill="both", expand=True)
-        self.log_box.tag_config("success", foreground="#2ecc71")
-        self.log_box.tag_config("error", foreground="#e74c3c")
+        self.frame_acciones.pack(fill="x", padx=16, pady=(0, 12))
+        ctk.CTkButton(self.frame_acciones, text="Abrir última salida", height=30, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, command=self.abrir_ultima_salida).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(self.frame_acciones, text="Abrir errores", height=30, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, command=lambda: self.abrir_directorio(ERROR_FOLDER)).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(self.frame_acciones, text="Abrir log", height=30, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, command=self.abrir_log_detallado).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(self.frame_acciones, text="Limpiar log", height=30, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, command=self.limpiar_log).pack(side="left")
+
+        self.frame_log = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=10, border_width=1, border_color=self.color_borde)
+        self.frame_log.pack(pady=(0, 16), padx=22, fill="both", expand=True)
+        ctk.CTkLabel(self.frame_log, text="Registro de actividad", font=("Segoe UI", 13, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(12, 8))
+        self.log_box = ctk.CTkTextbox(self.frame_log, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color="#ffffff", text_color=self.color_texto)
+        self.log_box.pack(padx=16, pady=(0, 16), fill="both", expand=True)
+        self.log_box.tag_config("success", foreground=self.color_ok)
+        self.log_box.tag_config("error", foreground=self.color_peligro)
 
     def actualizar_paneles_por_pestana(self):
         ocultar_paneles = self.tabview.get() == "Reclamaciones"
@@ -994,105 +890,107 @@ class AppIntegrada(ctk.CTk):
         if ocultar_paneles:
             for panel in paneles:
                 panel.pack_forget()
-            self.tabview.pack_configure(fill="both", expand=True, pady=(2, 10))
+            self.tabview.pack_configure(fill="both", expand=True, pady=(16, 16))
             return
-        self.tabview.pack_configure(fill="x", expand=False, pady=2)
+        self.tabview.pack_configure(fill="x", expand=False, pady=(16, 8))
         if not self.frame_progreso.winfo_manager():
-            self.frame_progreso.pack(pady=(2, 1), padx=22, fill="x", before=self.frame_estado)
+            self.frame_progreso.pack(pady=(0, 8), padx=22, fill="x", before=self.frame_estado)
         if not self.frame_estado.winfo_manager():
-            self.frame_estado.pack(pady=(1, 1), padx=22, fill="x", before=self.frame_log)
+            self.frame_estado.pack(pady=(0, 8), padx=22, fill="x", before=self.frame_log)
         if not self.frame_log.winfo_manager():
-            self.frame_log.pack(pady=(2, 10), padx=22, fill="both", expand=True)
+            self.frame_log.pack(pady=(0, 16), padx=22, fill="both", expand=True)
 
     def build_tab_auto(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_auto, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.")
         self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]))
-        row_input = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=14)
-        row_input.pack(padx=22, pady=(2, 14), fill="x")
-        ctk.CTkLabel(row_input, text="Precio minimo (EUR)", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.precio_entry = ctk.CTkEntry(row_input, width=120, height=36, justify="center", corner_radius=12, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        row_input = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        row_input.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(row_input, text="Precio mínimo (EUR)", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
+        self.precio_entry = ctk.CTkEntry(row_input, width=120, height=36, justify="center", corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
         self.precio_entry.insert(0, self.config.get("precio_min", "0"))
         self.precio_entry.pack(side="right", padx=14, pady=12)
-        self.btn_auto = self.crear_boton_principal(card, "EJECUTAR AUTOMATIZACION PARALELA", self.toggle_auto)
-        self.btn_auto.pack(padx=22, pady=(4, 22), fill="x")
+        self.btn_auto = self.crear_boton_principal(card, "Iniciar automatización", self.toggle_auto)
+        self.btn_auto.pack(padx=24, pady=(4, 24), fill="x")
 
     def build_tab_pedidos(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_pedidos, "Generacion de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.")
+        card = self.crear_tarjeta_tab(self.tab_pedidos, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.")
         self.crear_fila_archivo(card, "Excel urgente", "excel_pedidos_entry", "ruta_excel_pedidos", "Excel URGENTE.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.excel_pedidos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_pedidos_entry", "ruta_folder_pedidos", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_pedidos_entry))
-        self.btn_pedidos = self.crear_boton_principal(card, "GENERAR PEDIDOS", self.toggle_pedidos)
-        self.btn_pedidos.pack(padx=22, pady=(4, 22), fill="x")
+        self.btn_pedidos = self.crear_boton_principal(card, "Generar pedidos", self.toggle_pedidos)
+        self.btn_pedidos.pack(padx=24, pady=(4, 24), fill="x")
 
     def build_tab_comparador(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_comparador, "Comparador de Excel", "Resalta las lineas repetidas y genera un archivo comparado en la carpeta elegida.")
+        card = self.crear_tarjeta_tab(self.tab_comparador, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.")
         self.crear_fila_archivo(card, "Excel antiguo", "excel_old_entry", "ruta_excel_antiguo", "Excel antiguo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_old_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Excel nuevo", "excel_new_entry", "ruta_excel_nuevo", "Excel nuevo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_new_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_comp_entry", "ruta_folder_comparador", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_comp_entry))
-        row_color = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=14)
-        row_color.pack(padx=22, pady=(2, 14), fill="x")
+        row_color = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        row_color.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(row_color, text="Color de resaltado", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.color_optionmenu = ctk.CTkOptionMenu(row_color, values=["Amarillo", "Rojo", "Verde", "Azul", "Naranja"], height=36, corner_radius=12, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
+        self.color_optionmenu = ctk.CTkOptionMenu(row_color, values=["Amarillo", "Rojo", "Verde", "Azul", "Naranja"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
         self.color_optionmenu.set(self.config.get("color_resaltado", "Amarillo"))
         self.color_optionmenu.pack(side="right", padx=14, pady=12)
-        self.btn_comparador = self.crear_boton_principal(card, "COMPARAR EXCELS", self.toggle_comparador)
-        self.btn_comparador.pack(padx=22, pady=(4, 22), fill="x")
+        self.btn_comparador = self.crear_boton_principal(card, "Comparar Excels", self.toggle_comparador)
+        self.btn_comparador.pack(padx=24, pady=(4, 24), fill="x")
 
     def build_tab_rotacion(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_rotacion, "Filtro de rotacion", "Marca referencias de baja rotacion en base al umbral y la propuesta de pedido.")
+        card = self.crear_tarjeta_tab(self.tab_rotacion, "Filtro de rotación", "Marca referencias de baja rotación en base al umbral y la propuesta de pedido.")
         self.crear_fila_archivo(card, "Excel de Quiter", "excel_quiter_entry", "ruta_excel_quiter", "Excel de Quiter (DMS)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Archivo de propuesta", "excel_rot_entry", "ruta_excel_rotacion", "Archivo PROPUESTAPEDIDO.xls...", "Examinar", lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_rot_entry", "ruta_folder_rotacion", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_rot_entry))
-        row_umbral = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=14)
-        row_umbral.pack(padx=22, pady=(2, 14), fill="x")
-        ctk.CTkLabel(row_umbral, text="Umbral minimo", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.umbral_entry = ctk.CTkEntry(row_umbral, width=120, justify="center", height=36, corner_radius=12, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        row_umbral = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        row_umbral.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(row_umbral, text="Umbral mínimo", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
+        self.umbral_entry = ctk.CTkEntry(row_umbral, width=120, justify="center", height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
         self.umbral_entry.insert(0, self.config.get("umbral_rotacion", "0.08"))
         self.umbral_entry.pack(side="right", padx=14, pady=12)
-        self.btn_rotacion = self.crear_boton_principal(card, "RESALTAR POR ROTACION", self.iniciar_filtro_rotacion)
-        self.btn_rotacion.pack(padx=22, pady=(4, 22), fill="x")
+        self.btn_rotacion = self.crear_boton_principal(card, "Resaltar por rotación", self.iniciar_filtro_rotacion)
+        self.btn_rotacion.pack(padx=24, pady=(4, 24), fill="x")
 
     def build_tab_mopar(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_mopar, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeracion diaria persistente.")
+        card = self.crear_tarjeta_tab(self.tab_mopar, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_mopar_entry", "ruta_folder_mopar", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_mopar_entry))
-        self.btn_mopar = self.crear_boton_principal(card, "GENERAR FICHERO MOPAR", self.toggle_mopar)
-        self.btn_mopar.pack(padx=22, pady=(4, 22), fill="x")
+        self.btn_mopar = self.crear_boton_principal(card, "Generar fichero Mopar", self.toggle_mopar)
+        self.btn_mopar.pack(padx=24, pady=(4, 24), fill="x")
 
     def build_tab_stock_fiat(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_stock_fiat, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_stock_fiat_entry", "ruta_folder_stock_fiat", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_stock_fiat_entry))
-        self.btn_stock_fiat = self.crear_boton_principal(card, "GENERAR STOCK FIAT", self.toggle_stock_fiat)
-        self.btn_stock_fiat.pack(padx=22, pady=(4, 22), fill="x")
+        self.btn_stock_fiat = self.crear_boton_principal(card, "Generar Stock FIAT", self.toggle_stock_fiat)
+        self.btn_stock_fiat.pack(padx=24, pady=(4, 24), fill="x")
 
     def build_tab_config(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_config, "Configuracion general", "Ajusta credenciales, rendimiento y apariencia visual de la herramienta.")
-        frame_creds = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=14)
-        frame_creds.pack(padx=22, pady=(0, 14), fill="x")
+        contenedor = ctk.CTkScrollableFrame(self.tab_config, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        card = self.crear_tarjeta_tab(contenedor, "Configuración general", "Ajusta credenciales, rendimiento y apariencia visual de la herramienta.")
+        frame_creds = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        frame_creds.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(frame_creds, text="Usuario", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=0, column=0, padx=18, pady=12, sticky="w")
-        self.user_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=12, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.user_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
         self.user_entry.insert(0, self.config.get("usuario", ""))
         self.user_entry.grid(row=0, column=1, padx=18, pady=12, sticky="ew")
-        ctk.CTkLabel(frame_creds, text="Contrasena", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=1, column=0, padx=18, pady=12, sticky="w")
-        self.pass_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=12, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto, show="*")
+        ctk.CTkLabel(frame_creds, text="Contraseña", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=1, column=0, padx=18, pady=12, sticky="w")
+        self.pass_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto, show="*")
         self.pass_entry.insert(0, self.config.get("password", ""))
         self.pass_entry.grid(row=1, column=1, padx=18, pady=12, sticky="ew")
         frame_creds.grid_columnconfigure(1, weight=1)
-        frame_perf = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=14)
-        frame_perf.pack(padx=22, pady=(0, 14), fill="x")
+        frame_perf = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        frame_perf.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(frame_perf, text="Hilos paralelos", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.hilos_option = ctk.CTkOptionMenu(frame_perf, values=["1", "2", "3", "4", "5"], height=36, corner_radius=12, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
+        self.hilos_option = ctk.CTkOptionMenu(frame_perf, values=["1", "2", "3", "4", "5"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
         self.hilos_option.set(str(self.config.get("num_hilos", "3")))
         self.hilos_option.pack(side="right", padx=14, pady=12)
-        frame_temas = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=14)
-        frame_temas.pack(padx=22, pady=(0, 14), fill="x")
-        ctk.CTkLabel(frame_temas, text="Region", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=0, column=0, padx=18, pady=12, sticky="w")
-        self.tema_option = ctk.CTkOptionMenu(frame_temas, values=["Sinnoh"], height=36, corner_radius=12, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
+        frame_temas = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        frame_temas.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(frame_temas, text="Región", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=0, column=0, padx=18, pady=12, sticky="w")
+        self.tema_option = ctk.CTkOptionMenu(frame_temas, values=["Sinnoh"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
         self.tema_option.set("Sinnoh")
         self.tema_option.grid(row=0, column=1, padx=18, pady=12, sticky="ew")
         frame_temas.grid_columnconfigure(1, weight=1)
         self.reclamaciones_power_line.construir_ajustes(card)
-        ctk.CTkButton(card, text="GUARDAR CONFIGURACION", height=42, corner_radius=14, fg_color=acc_color, hover_color=self.color_hover, command=self.guardar_config_ui).pack(padx=22, pady=(4, 22), fill="x")
+        ctk.CTkButton(card, text="Guardar configuración", height=42, corner_radius=8, fg_color=acc_color, hover_color=self.color_hover, command=self.guardar_config_ui).pack(padx=24, pady=(4, 24), fill="x")
 
     def seleccionar_archivo(self, entry, tipos):
         ruta = filedialog.askopenfilename(filetypes=tipos)
@@ -1118,7 +1016,7 @@ class AppIntegrada(ctk.CTk):
         self.estado_label.configure(text=f"Estado: {texto}")
         if ruta:
             self.ultima_ruta_generada = ruta
-            self.ruta_label.configure(text=f"?ltima salida: {ruta}")
+            self.ruta_label.configure(text=f"Última salida: {ruta}")
 
     def limpiar_log(self):
         self.log_box.delete("1.0", "end")
@@ -1134,7 +1032,7 @@ class AppIntegrada(ctk.CTk):
 
     def abrir_ultima_salida(self):
         if not self.ultima_ruta_generada:
-            messagebox.showinfo("Informacion", "Todavia no hay una salida generada.")
+            messagebox.showinfo("Información", "Todavía no hay una salida generada.")
             return
         if os.path.isfile(self.ultima_ruta_generada):
             ruta_a_abrir = os.path.dirname(self.ultima_ruta_generada)
@@ -1167,13 +1065,13 @@ class AppIntegrada(ctk.CTk):
     def guardar_config_ui(self, silent=False):
         self.guardar_configuracion_ui_internal()
         if not silent:
-            messagebox.showinfo("Exito", "Configuracion guardada.")
+            messagebox.showinfo("Éxito", "Configuración guardada.")
 
     def toggle_auto(self):
         global automation_running
         if automation_running:
             stop_event_auto.set()
-            self.btn_auto.configure(text="DETENIENDO...", state="disabled")
+            self.btn_auto.configure(text="Deteniendo...", state="disabled")
         else:
             self.iniciar_auto()
 
@@ -1201,15 +1099,15 @@ class AppIntegrada(ctk.CTk):
         if not user or not pwd:
             messagebox.showwarning("Aviso", "Completa usuario y contrasena antes de continuar.")
             return
-        self.actualizar_estado("automatizacion en curso", ruta)
-        self.btn_auto.configure(text="DETENER", fg_color="red")
+        self.actualizar_estado("automatización en curso", ruta)
+        self.btn_auto.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         stop_event_auto.clear()
         threading.Thread(target=ejecutar_automatizacion_task, args=(ruta, user, pwd, precio, hilos, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_auto), stop_event_auto), daemon=True).start()
 
     def finalizar_auto(self):
         acc_color = self.color_principal
-        self.actualizar_estado("automatizacion finalizada", self.excel_auto_entry.get())
-        self.btn_auto.configure(text="INICIAR AUTOMATIZACION", fg_color=acc_color, state="normal")
+        self.actualizar_estado("automatización finalizada", self.excel_auto_entry.get())
+        self.btn_auto.configure(text="Iniciar automatización", fg_color=acc_color, hover_color=self.color_hover, state="normal")
 
     def toggle_pedidos(self):
         global pedidos_running
@@ -1226,19 +1124,19 @@ class AppIntegrada(ctk.CTk):
         self.guardar_configuracion_ui_internal()
         ruta = self.excel_pedidos_entry.get()
         folder = self.folder_pedidos_entry.get()
-        if not self.validar_archivo(ruta, "Selecciona un Excel valido para generar pedidos."):
+        if not self.validar_archivo(ruta, "Selecciona un Excel válido para generar pedidos."):
             return
         if not self.validar_carpeta(folder, "Selecciona una carpeta de destino para los pedidos."):
             return
         self.actualizar_estado("generando pedidos", folder)
-        self.btn_pedidos.configure(text="DETENER", fg_color="red")
+        self.btn_pedidos.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         stop_event_pedidos.clear()
         threading.Thread(target=generar_pedidos_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_pedidos), stop_event_pedidos), daemon=True).start()
 
     def finalizar_pedidos(self):
         acc_color = self.color_principal
         self.actualizar_estado("pedidos generados", self.folder_pedidos_entry.get())
-        self.btn_pedidos.configure(text="GENERAR PEDIDOS", fg_color=acc_color, state="normal")
+        self.btn_pedidos.configure(text="Generar pedidos", fg_color=acc_color, hover_color=self.color_hover, state="normal")
 
     def toggle_comparador(self):
         global comparador_running
@@ -1266,14 +1164,14 @@ class AppIntegrada(ctk.CTk):
             return
         ruta_salida = str(Path(folder) / "resultado_comparacion.xlsx")
         self.actualizar_estado("comparando excels", ruta_salida)
-        self.btn_comparador.configure(text="DETENER", fg_color="red")
+        self.btn_comparador.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         stop_event_comparador.clear()
         threading.Thread(target=comparar_excel_task, args=(ruta_ant, ruta_nue, ruta_salida, colores_hex[color], lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_comparador), stop_event_comparador), daemon=True).start()
 
     def finalizar_comparador(self):
         acc_color = self.color_principal
-        self.actualizar_estado("comparacion finalizada", str(Path(self.folder_comp_entry.get()) / "resultado_comparacion.xlsx"))
-        self.btn_comparador.configure(text="COMPARAR EXCELS", fg_color=acc_color, state="normal")
+        self.actualizar_estado("comparación finalizada", str(Path(self.folder_comp_entry.get()) / "resultado_comparacion.xlsx"))
+        self.btn_comparador.configure(text="Comparar Excels", fg_color=acc_color, hover_color=self.color_hover, state="normal")
 
     def iniciar_filtro_rotacion(self):
         activa = tarea_activa()
@@ -1287,31 +1185,31 @@ class AppIntegrada(ctk.CTk):
         try:
             umbral = float(self.umbral_entry.get())
         except Exception:
-            messagebox.showwarning("Aviso", "Introduce un umbral de rotacion valido.")
+            messagebox.showwarning("Aviso", "Introduce un umbral de rotación válido.")
             return
         if not self.validar_archivo(ruta_quiter, "Selecciona el Excel de Quiter."):
             return
         if not self.validar_archivo(ruta_rot, "Selecciona el archivo de propuesta."):
             return
-        if not self.validar_carpeta(folder_salida, "Selecciona una carpeta de salida para rotacion."):
+        if not self.validar_carpeta(folder_salida, "Selecciona una carpeta de salida para rotación."):
             return
         ruta_estimacion = str(Path(folder_salida) / f"{Path(ruta_quiter).stem}_ROTACION.xlsx")
-        self.actualizar_estado("analizando rotacion", ruta_estimacion)
-        self.btn_rotacion.configure(state="disabled", text="ANALIZANDO...")
+        self.actualizar_estado("analizando rotación", ruta_estimacion)
+        self.btn_rotacion.configure(state="disabled", text="Analizando...")
         threading.Thread(target=filtrar_por_rotacion_task, args=(ruta_quiter, ruta_rot, folder_salida, umbral, "FF0000", lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_filtro_rotacion)), daemon=True).start()
 
     def finalizar_filtro_rotacion(self):
         ruta_quiter = self.excel_quiter_entry.get()
         if self.folder_rot_entry.get() and ruta_quiter:
             ruta_final = str(Path(self.folder_rot_entry.get()) / f"{Path(ruta_quiter).stem}_ROTACION.xlsx")
-            self.actualizar_estado("rotacion completada", ruta_final)
-        self.btn_rotacion.configure(state="normal", text="RESALTAR POR ROTACION")
+            self.actualizar_estado("rotación completada", ruta_final)
+        self.btn_rotacion.configure(state="normal", text="Resaltar por rotación")
 
     def toggle_mopar(self):
         global mopar_running
         if mopar_running:
             stop_event_mopar.set()
-            self.btn_mopar.configure(text="DETENIENDO...", state="disabled")
+            self.btn_mopar.configure(text="Deteniendo...", state="disabled")
         else:
             self.iniciar_mopar()
 
@@ -1323,18 +1221,18 @@ class AppIntegrada(ctk.CTk):
         self.guardar_configuracion_ui_internal()
         ruta = self.excel_mopar_entry.get()
         folder = self.folder_mopar_entry.get()
-        if not self.validar_archivo(ruta, "Por favor selecciona un archivo Excel valido."):
+        if not self.validar_archivo(ruta, "Por favor selecciona un archivo Excel válido."):
             return
         if not self.validar_carpeta(folder, "Por favor selecciona una carpeta de destino."):
             return
         self.actualizar_estado("generando fichero Mopar", folder)
         if not os.path.exists(ruta):
-            messagebox.showwarning("Aviso", "Por favor selecciona un archivo Excel valido.")
+            messagebox.showwarning("Aviso", "Por favor selecciona un archivo Excel válido.")
             return
         if not os.path.exists(folder):
             messagebox.showwarning("Aviso", "Por favor selecciona una carpeta de destino.")
             return
-        self.btn_mopar.configure(text="DETENER", fg_color="red")
+        self.btn_mopar.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         stop_event_mopar.clear()
         threading.Thread(target=generar_fichero_mopar_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_mopar), stop_event_mopar), daemon=True).start()
 
@@ -1342,7 +1240,7 @@ class AppIntegrada(ctk.CTk):
         global stock_fiat_running
         if stock_fiat_running:
             stop_event_stock_fiat.set()
-            self.btn_stock_fiat.configure(text="DETENIENDO...", state="disabled")
+            self.btn_stock_fiat.configure(text="Deteniendo...", state="disabled")
         else:
             self.iniciar_stock_fiat()
 
@@ -1354,18 +1252,18 @@ class AppIntegrada(ctk.CTk):
         self.guardar_configuracion_ui_internal()
         ruta = self.excel_stock_fiat_entry.get()
         folder = self.folder_stock_fiat_entry.get()
-        if not self.validar_archivo(ruta, "Por favor selecciona un archivo Excel valido para Stock FIAT."):
+        if not self.validar_archivo(ruta, "Por favor selecciona un archivo Excel válido para Stock FIAT."):
             return
         if not self.validar_carpeta(folder, "Por favor selecciona una carpeta de destino para Stock FIAT."):
             return
         self.actualizar_estado("generando Stock FIAT", folder)
         if not os.path.exists(ruta):
-            messagebox.showwarning("Aviso", "Por favor selecciona un archivo Excel valido para Stock FIAT.")
+            messagebox.showwarning("Aviso", "Por favor selecciona un archivo Excel válido para Stock FIAT.")
             return
         if not os.path.exists(folder):
             messagebox.showwarning("Aviso", "Por favor selecciona una carpeta de destino para Stock FIAT.")
             return
-        self.btn_stock_fiat.configure(text="DETENER", fg_color="red")
+        self.btn_stock_fiat.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         stop_event_stock_fiat.clear()
         threading.Thread(target=generar_fichero_stock_fiat_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_stock_fiat), stop_event_stock_fiat), daemon=True).start()
 
@@ -1403,12 +1301,12 @@ class AppIntegrada(ctk.CTk):
     def finalizar_mopar(self):
         acc_color = self.color_principal
         self.actualizar_estado("fichero Mopar generado", self.folder_mopar_entry.get())
-        self.btn_mopar.configure(text="📄 GENERAR FICHERO MOPAR", fg_color=acc_color, state="normal")
+        self.btn_mopar.configure(text="Generar fichero Mopar", fg_color=acc_color, hover_color=self.color_hover, state="normal")
 
     def finalizar_stock_fiat(self):
         acc_color = self.color_principal
         self.actualizar_estado("Stock FIAT generado", self.folder_stock_fiat_entry.get())
-        self.btn_stock_fiat.configure(text="GENERAR STOCK FIAT", fg_color=acc_color, state="normal")
+        self.btn_stock_fiat.configure(text="Generar Stock FIAT", fg_color=acc_color, hover_color=self.color_hover, state="normal")
 
 if __name__ == "__main__":
     app = AppIntegrada()
