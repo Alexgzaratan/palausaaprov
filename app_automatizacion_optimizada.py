@@ -122,24 +122,26 @@ def crear_copia_seguridad(ruta_archivo, carpeta_destino="backups_pedidos"):
     shutil.copy2(ruta_archivo, ruta_backup)
     return str(ruta_backup)
 
-def obtener_numero_mopar_del_dia(carpeta_salida):
+def obtener_numero_mopar_del_dia(carpeta_salida, prefijo_clave="mopar"):
     config = cargar_configuracion()
+    clave_fecha = f"{prefijo_clave}_fecha"
+    clave_numero = f"{prefijo_clave}_numero"
     hoy = datetime.now().strftime("%Y-%m-%d")
-    ultimo_dia = config.get("mopar_fecha")
-    ultimo_numero = config.get("mopar_numero")
+    ultimo_dia = config.get(clave_fecha)
+    ultimo_numero = config.get(clave_numero)
 
     if ultimo_dia == hoy and ultimo_numero is not None:
         return int(ultimo_numero)
 
-    ultimo_f = 999
+    ultimo_f = 0
     for f in os.listdir(carpeta_salida):
         m = re.match(r"F(\d+)", f)
         if m:
             ultimo_f = max(ultimo_f, int(m.group(1)))
 
     proximo_f = ultimo_f + 1
-    config["mopar_fecha"] = hoy
-    config["mopar_numero"] = proximo_f
+    config[clave_fecha] = hoy
+    config[clave_numero] = proximo_f
     guardar_configuracion(config)
     return proximo_f
 
@@ -713,7 +715,7 @@ def generar_fichero_stock_fiat_task(ruta_excel, carpeta_salida, log_callback=Non
             if not os.path.exists(carpeta_salida):
                 os.makedirs(carpeta_salida, exist_ok=True)
 
-            proximo_f = obtener_numero_mopar_del_dia(carpeta_salida)
+            proximo_f = obtener_numero_mopar_del_dia(carpeta_salida, prefijo_clave="stock_fiat")
             letras = string.ascii_uppercase
             archivos_creados = 0
 
@@ -982,13 +984,6 @@ class AppIntegrada(ctk.CTk):
         self.hilos_option = ctk.CTkOptionMenu(frame_perf, values=["1", "2", "3", "4", "5"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
         self.hilos_option.set(str(self.config.get("num_hilos", "3")))
         self.hilos_option.pack(side="right", padx=14, pady=12)
-        frame_temas = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        frame_temas.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(frame_temas, text="Región", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=0, column=0, padx=18, pady=12, sticky="w")
-        self.tema_option = ctk.CTkOptionMenu(frame_temas, values=["Sinnoh"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
-        self.tema_option.set("Sinnoh")
-        self.tema_option.grid(row=0, column=1, padx=18, pady=12, sticky="ew")
-        frame_temas.grid_columnconfigure(1, weight=1)
         self.reclamaciones_power_line.construir_ajustes(card)
         ctk.CTkButton(card, text="Guardar configuración", height=42, corner_radius=8, fg_color=acc_color, hover_color=self.color_hover, command=self.guardar_config_ui).pack(padx=24, pady=(4, 24), fill="x")
 
@@ -1289,9 +1284,10 @@ class AppIntegrada(ctk.CTk):
             "ruta_folder_stock_fiat": self.widget_get("folder_stock_fiat_entry"),
             "color_resaltado": self.widget_get("color_optionmenu", "Amarillo"),
             "modo_apariencia": self.widget_get("modo_option", self.config.get("modo_apariencia", "Dark")),
-            "tema_color": self.widget_get("tema_option", self.config.get("tema_color", "Azul")),
             "mopar_fecha": self.config.get("mopar_fecha"),
-            "mopar_numero": self.config.get("mopar_numero")
+            "mopar_numero": self.config.get("mopar_numero"),
+            "stock_fiat_fecha": self.config.get("stock_fiat_fecha"),
+            "stock_fiat_numero": self.config.get("stock_fiat_numero")
         }
         if hasattr(self, "reclamaciones_power_line"):
             config.update(self.reclamaciones_power_line.obtener_configuracion())
