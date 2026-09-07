@@ -57,6 +57,7 @@ comparador_running = False
 filtro_rotacion_running = False
 mopar_running = False
 stock_fiat_running = False
+hoja_pedidos_running = False
 stop_event_auto = threading.Event()
 stop_event_pedidos = threading.Event()
 stop_event_comparador = threading.Event()
@@ -498,7 +499,7 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
 # 4. LÓGICA DE GENERACIÓN DE PEDIDOS (CON CARPETAS POR RANGO) - v13
 # ---------------------------------------------------
 
-def generar_pedidos_task(ruta_excel, carpeta_pedidos, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None):
+def generar_pedidos_task(ruta_excel, carpeta_pedidos, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None, numero_callback=None):
     global pedidos_running
     pedidos_running = True
     def log(texto, tag=None):
@@ -548,6 +549,7 @@ def generar_pedidos_task(ruta_excel, carpeta_pedidos, log_callback=None, progres
                 csv.writer(f, delimiter=";").writerows(bloque)
             
             log(f"✅ Pedido generado: {contador}.csv (en {os.path.basename(ruta_rango)})", "success")
+            if numero_callback: numero_callback(str(contador))
             if progreso_callback: progreso_callback((i + len(bloque)) / len(datos))
         
         # 4. BORRADO FÍSICO FINAL DEL EXCEL
@@ -567,10 +569,53 @@ def generar_pedidos_task(ruta_excel, carpeta_pedidos, log_callback=None, progres
         if finalizado_callback: finalizado_callback()
 
 # ---------------------------------------------------
+# 4bis. LÓGICA DE HOJA DE PEDIDOS DIARIA (COPIA EN LIMPIO DE LA PLANTILLA)
+# ---------------------------------------------------
+
+MESES_ES = {
+    1: "ENERO", 2: "FEBRERO", 3: "MARZO", 4: "ABRIL", 5: "MAYO", 6: "JUNIO",
+    7: "JULIO", 8: "AGOSTO", 9: "SEPTIEMBRE", 10: "OCTUBRE", 11: "NOVIEMBRE", 12: "DICIEMBRE",
+}
+
+def ruta_hoja_pedidos_del_dia(carpeta_hojas, fecha=None):
+    """Ruta AÑO/MES/DD-MM-AAAA.xlsx que le corresponde a una fecha dentro de la carpeta de hojas."""
+    fecha = fecha or datetime.now()
+    carpeta_mes = Path(carpeta_hojas) / str(fecha.year) / MESES_ES[fecha.month]
+    nombre = fecha.strftime("%d-%m-%Y") + ".xlsx"
+    return carpeta_mes / nombre
+
+def generar_hoja_pedidos_task(ruta_plantilla, carpeta_hojas, log_callback=None, progreso_callback=None, finalizado_callback=None, forzar=False, fecha=None):
+    global hoja_pedidos_running
+    hoja_pedidos_running = True
+    def log(texto, tag=None):
+        if log_callback: log_callback(f"[HOJA PEDIDOS] {texto}", tag)
+    log("Generando hoja de pedidos del día a partir de la plantilla...")
+    try:
+        if not ruta_plantilla or not os.path.exists(ruta_plantilla):
+            log("❌ No se encuentra la plantilla de hoja de pedidos.", "error")
+            return
+        ruta_final = ruta_hoja_pedidos_del_dia(carpeta_hojas, fecha)
+        if progreso_callback: progreso_callback(0.2)
+        if ruta_final.exists() and not forzar:
+            log(f"La hoja de hoy ya existía, no se ha sobrescrito: {ruta_final}", "success")
+            if progreso_callback: progreso_callback(1)
+            return
+        ruta_final.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ruta_plantilla, ruta_final)
+        if progreso_callback: progreso_callback(1)
+        log(f"✅ Hoja de pedidos generada: {ruta_final}", "success")
+    except Exception as e:
+        log(f"❌ Error: {e}", "error")
+        registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_hoja_pedidos_task")
+    finally:
+        hoja_pedidos_running = False
+        if finalizado_callback: finalizado_callback()
+
+# ---------------------------------------------------
 # 5. LÓGICA DE FICHERO MOPAR (CON NOMBRES FXXXX + LETRAS) - v13
 # ---------------------------------------------------
 
-def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None):
+def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None, numero_callback=None):
     global mopar_running
     mopar_running = True
     def log(texto, tag=None):
@@ -644,8 +689,9 @@ def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, pr
                     f.write("\n".join(grupo))
                 
                 log(f"✅ Generado MOPAR: {nombre_fichero}", "success")
+                if numero_callback: numero_callback(nombre_fichero)
                 archivos_creados += 1
-            
+
             log(f"✨ Proceso completado. Se han generado {archivos_creados} archivos con prefijo F{proximo_f}.", "success")
     except Exception as e:
         log(f"❌ Error crítico: {e}", "error")
@@ -756,6 +802,7 @@ class AppIntegrada(ctk.CTk):
             try: self.iconbitmap(ICONO_PATH)
             except Exception: pass
         self.setup_ui()
+        self.comprobar_hoja_pedidos_al_inicio()
 
     def aplicar_tema_inicial(self):
         # Modo y tema fijos: interfaz clara y consistente en toda la aplicación.
@@ -912,14 +959,28 @@ class AppIntegrada(ctk.CTk):
         self.precio_entry.insert(0, self.config.get("precio_min", "0"))
         self.precio_entry.pack(side="right", padx=14, pady=12)
         self.btn_auto = self.crear_boton_principal(card, "Iniciar automatización", self.toggle_auto)
-        self.btn_auto.pack(padx=24, pady=(4, 24), fill="x")
+        self.btn_auto.pack(padx=24, pady=(4, 16), fill="x")
+        ctk.CTkLabel(card, text="Referencias consultadas", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
+        self.auto_log_box = self.crear_caja_log(card, alto=140)
+        self.auto_log_box.pack(padx=24, pady=(0, 12), fill="x")
+        ctk.CTkButton(card, text="Abrir carpeta del Excel", height=36, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.abrir_carpeta_auto).pack(padx=24, pady=(0, 24), fill="x")
 
     def build_tab_pedidos(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_pedidos, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.")
         self.crear_fila_archivo(card, "Excel urgente", "excel_pedidos_entry", "ruta_excel_pedidos", "Excel URGENTE.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.excel_pedidos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_pedidos_entry", "ruta_folder_pedidos", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_pedidos_entry))
         self.btn_pedidos = self.crear_boton_principal(card, "Generar pedidos", self.toggle_pedidos)
-        self.btn_pedidos.pack(padx=24, pady=(4, 24), fill="x")
+        self.btn_pedidos.pack(padx=24, pady=(4, 16), fill="x")
+        ctk.CTkLabel(card, text="Números de pedido generados", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
+        self.pedidos_generados_box = ctk.CTkTextbox(card, height=90, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color="#ffffff", text_color=self.color_texto)
+        self.pedidos_generados_box.pack(padx=24, pady=(0, 24), fill="x")
+        self.pedidos_generados_box.configure(state="disabled")
+
+        card_hoja = self.crear_tarjeta_tab(self.tab_pedidos, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.")
+        self.crear_fila_archivo(card_hoja, "Plantilla de hoja", "plantilla_hoja_entry", "ruta_plantilla_hojas", "HOJA DE PEDIDOS.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.plantilla_hoja_entry, [("Excel files", "*.xlsx")]))
+        self.crear_fila_archivo(card_hoja, "Carpeta HOJAS DE PEDIDO", "carpeta_hojas_entry", "ruta_carpeta_hojas", "Carpeta HOJAS DE PEDIDO...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_hojas_entry))
+        self.btn_hoja_pedidos = self.crear_boton_principal(card_hoja, "Generar hoja de hoy", self.iniciar_hoja_pedidos)
+        self.btn_hoja_pedidos.pack(padx=24, pady=(4, 24), fill="x")
 
     def build_tab_comparador(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_comparador, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.")
@@ -947,14 +1008,22 @@ class AppIntegrada(ctk.CTk):
         self.umbral_entry.insert(0, self.config.get("umbral_rotacion", "0.08"))
         self.umbral_entry.pack(side="right", padx=14, pady=12)
         self.btn_rotacion = self.crear_boton_principal(card, "Resaltar por rotación", self.iniciar_filtro_rotacion)
-        self.btn_rotacion.pack(padx=24, pady=(4, 24), fill="x")
+        self.btn_rotacion.pack(padx=24, pady=(4, 16), fill="x")
+        ctk.CTkLabel(card, text="Registro de rotación", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
+        self.rotacion_log_box = self.crear_caja_log(card, alto=110)
+        self.rotacion_log_box.pack(padx=24, pady=(0, 12), fill="x")
+        ctk.CTkButton(card, text="Abrir carpeta destino", height=36, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.abrir_carpeta_rotacion).pack(padx=24, pady=(0, 24), fill="x")
 
     def build_tab_mopar(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_mopar, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_mopar_entry", "ruta_folder_mopar", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_mopar_entry))
         self.btn_mopar = self.crear_boton_principal(card, "Generar fichero Mopar", self.toggle_mopar)
-        self.btn_mopar.pack(padx=24, pady=(4, 24), fill="x")
+        self.btn_mopar.pack(padx=24, pady=(4, 16), fill="x")
+        ctk.CTkLabel(card, text="Ficheros Mopar generados", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
+        self.mopar_generados_box = ctk.CTkTextbox(card, height=90, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color="#ffffff", text_color=self.color_texto)
+        self.mopar_generados_box.pack(padx=24, pady=(0, 24), fill="x")
+        self.mopar_generados_box.configure(state="disabled")
 
     def build_tab_stock_fiat(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_stock_fiat, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.")
@@ -1015,6 +1084,68 @@ class AppIntegrada(ctk.CTk):
 
     def limpiar_log(self):
         self.log_box.delete("1.0", "end")
+
+    def crear_caja_log(self, parent, alto=110):
+        caja = ctk.CTkTextbox(parent, height=alto, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color="#ffffff", text_color=self.color_texto)
+        caja.tag_config("success", foreground=self.color_ok)
+        caja.tag_config("error", foreground=self.color_peligro)
+        caja.configure(state="disabled")
+        return caja
+
+    def agregar_a_caja(self, caja, texto, tag=None):
+        caja.configure(state="normal")
+        caja.insert("end", f"{texto}\n", tag)
+        caja.configure(state="disabled")
+        caja.see("end")
+
+    def limpiar_caja(self, caja):
+        caja.configure(state="normal")
+        caja.delete("1.0", "end")
+        caja.configure(state="disabled")
+
+    def log_callback_auto(self, texto, tag=None):
+        self.agregar_log(texto, tag)
+        self.agregar_a_caja(self.auto_log_box, texto, tag)
+
+    def log_callback_rotacion(self, texto, tag=None):
+        self.agregar_log(texto, tag)
+        self.agregar_a_caja(self.rotacion_log_box, texto, tag)
+
+    def abrir_carpeta_auto(self):
+        ruta = self.widget_get("excel_auto_entry")
+        if not ruta:
+            messagebox.showinfo("Información", "Selecciona primero un Excel de stock.")
+            return
+        self.abrir_directorio(os.path.dirname(ruta) if os.path.isfile(ruta) else ruta)
+
+    def abrir_carpeta_rotacion(self):
+        ruta = self.widget_get("folder_rot_entry")
+        if not ruta:
+            messagebox.showinfo("Información", "Selecciona primero una carpeta de destino.")
+            return
+        self.abrir_directorio(ruta)
+
+    def agregar_pedido_generado(self, numero):
+        self.pedidos_generados_box.configure(state="normal")
+        self.pedidos_generados_box.insert("end", f"{numero}\n")
+        self.pedidos_generados_box.configure(state="disabled")
+        self.pedidos_generados_box.see("end")
+
+    def limpiar_pedidos_generados(self):
+        self.pedidos_generados_box.configure(state="normal")
+        self.pedidos_generados_box.delete("1.0", "end")
+        self.pedidos_generados_box.configure(state="disabled")
+
+    def agregar_mopar_generado(self, nombre_fichero):
+        self.mopar_generados_box.configure(state="normal")
+        self.mopar_generados_box.insert("end", f"{nombre_fichero}\n")
+        self.mopar_generados_box.configure(state="disabled")
+        self.mopar_generados_box.see("end")
+
+    def limpiar_mopar_generados(self):
+        self.mopar_generados_box.configure(state="normal")
+        self.mopar_generados_box.delete("1.0", "end")
+        self.mopar_generados_box.configure(state="disabled")
 
     def abrir_log_detallado(self):
         if not os.path.exists(LOG_DETALLADO):
@@ -1096,8 +1227,9 @@ class AppIntegrada(ctk.CTk):
             return
         self.actualizar_estado("automatización en curso", ruta)
         self.btn_auto.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        self.limpiar_caja(self.auto_log_box)
         stop_event_auto.clear()
-        threading.Thread(target=ejecutar_automatizacion_task, args=(ruta, user, pwd, precio, hilos, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_auto), stop_event_auto), daemon=True).start()
+        threading.Thread(target=ejecutar_automatizacion_task, args=(ruta, user, pwd, precio, hilos, lambda t, tag=None: self.after(0, self.log_callback_auto, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_auto), stop_event_auto), daemon=True).start()
 
     def finalizar_auto(self):
         acc_color = self.color_principal
@@ -1125,13 +1257,69 @@ class AppIntegrada(ctk.CTk):
             return
         self.actualizar_estado("generando pedidos", folder)
         self.btn_pedidos.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        self.limpiar_pedidos_generados()
         stop_event_pedidos.clear()
-        threading.Thread(target=generar_pedidos_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_pedidos), stop_event_pedidos), daemon=True).start()
+        threading.Thread(target=generar_pedidos_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_pedidos), stop_event_pedidos, lambda n: self.after(0, self.agregar_pedido_generado, n)), daemon=True).start()
 
     def finalizar_pedidos(self):
         acc_color = self.color_principal
         self.actualizar_estado("pedidos generados", self.folder_pedidos_entry.get())
         self.btn_pedidos.configure(text="Generar pedidos", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+
+    def iniciar_hoja_pedidos(self, forzar=False, automatico=False):
+        global hoja_pedidos_running
+        if hoja_pedidos_running:
+            return
+        self.guardar_configuracion_ui_internal()
+        plantilla = self.widget_get("plantilla_hoja_entry")
+        carpeta = self.widget_get("carpeta_hojas_entry")
+        if not self.validar_archivo(plantilla, "Selecciona la plantilla HOJA DE PEDIDOS.xlsx."):
+            return
+        if not self.validar_carpeta(carpeta, "Selecciona la carpeta HOJAS DE PEDIDO."):
+            return
+        if not forzar and ruta_hoja_pedidos_del_dia(carpeta).exists():
+            if automatico:
+                return
+            if not messagebox.askyesno("La hoja de hoy ya existe", "Ya existe una hoja de pedidos generada hoy. ¿Quieres sustituirla por una copia en blanco de la plantilla? Se perderá lo que hayas escrito en ella."):
+                return
+            forzar = True
+        self.actualizar_estado("generando hoja de pedidos del día")
+        self.btn_hoja_pedidos.configure(text="Generando...", state="disabled")
+        threading.Thread(
+            target=generar_hoja_pedidos_task,
+            args=(plantilla, carpeta),
+            kwargs={
+                "log_callback": lambda t, tag=None: self.after(0, self.agregar_log, t, tag),
+                "progreso_callback": lambda v: self.after(0, self.actualizar_progreso, v),
+                "finalizado_callback": lambda: self.after(0, self.finalizar_hoja_pedidos, carpeta),
+                "forzar": forzar,
+            },
+            daemon=True,
+        ).start()
+
+    def finalizar_hoja_pedidos(self, carpeta):
+        acc_color = self.color_principal
+        ruta = ruta_hoja_pedidos_del_dia(carpeta)
+        self.actualizar_estado("hoja de pedidos lista", str(ruta))
+        self.btn_hoja_pedidos.configure(text="Generar hoja de hoy", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+
+    def comprobar_hoja_pedidos_al_inicio(self):
+        plantilla = self.config.get("ruta_plantilla_hojas", "")
+        carpeta = self.config.get("ruta_carpeta_hojas", "")
+        if not plantilla or not carpeta or not os.path.exists(plantilla) or not os.path.isdir(carpeta):
+            return
+        if ruta_hoja_pedidos_del_dia(carpeta).exists():
+            return
+        self.agregar_log("[HOJA PEDIDOS] No existe la hoja de hoy, generándola automáticamente...")
+        threading.Thread(
+            target=generar_hoja_pedidos_task,
+            args=(plantilla, carpeta),
+            kwargs={
+                "log_callback": lambda t, tag=None: self.after(0, self.agregar_log, t, tag),
+                "finalizado_callback": lambda: self.after(0, self.finalizar_hoja_pedidos, carpeta),
+            },
+            daemon=True,
+        ).start()
 
     def toggle_comparador(self):
         global comparador_running
@@ -1191,7 +1379,8 @@ class AppIntegrada(ctk.CTk):
         ruta_estimacion = str(Path(folder_salida) / f"{Path(ruta_quiter).stem}_ROTACION.xlsx")
         self.actualizar_estado("analizando rotación", ruta_estimacion)
         self.btn_rotacion.configure(state="disabled", text="Analizando...")
-        threading.Thread(target=filtrar_por_rotacion_task, args=(ruta_quiter, ruta_rot, folder_salida, umbral, "FF0000", lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_filtro_rotacion)), daemon=True).start()
+        self.limpiar_caja(self.rotacion_log_box)
+        threading.Thread(target=filtrar_por_rotacion_task, args=(ruta_quiter, ruta_rot, folder_salida, umbral, "FF0000", lambda t, tag=None: self.after(0, self.log_callback_rotacion, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_filtro_rotacion)), daemon=True).start()
 
     def finalizar_filtro_rotacion(self):
         ruta_quiter = self.excel_quiter_entry.get()
@@ -1228,8 +1417,9 @@ class AppIntegrada(ctk.CTk):
             messagebox.showwarning("Aviso", "Por favor selecciona una carpeta de destino.")
             return
         self.btn_mopar.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        self.limpiar_mopar_generados()
         stop_event_mopar.clear()
-        threading.Thread(target=generar_fichero_mopar_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_mopar), stop_event_mopar), daemon=True).start()
+        threading.Thread(target=generar_fichero_mopar_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_mopar), stop_event_mopar, lambda n: self.after(0, self.agregar_mopar_generado, n)), daemon=True).start()
 
     def toggle_stock_fiat(self):
         global stock_fiat_running
@@ -1270,6 +1460,8 @@ class AppIntegrada(ctk.CTk):
             "ruta_excel_auto": self.widget_get("excel_auto_entry"),
             "ruta_excel_pedidos": self.widget_get("excel_pedidos_entry"),
             "ruta_folder_pedidos": self.widget_get("folder_pedidos_entry"),
+            "ruta_plantilla_hojas": self.widget_get("plantilla_hoja_entry"),
+            "ruta_carpeta_hojas": self.widget_get("carpeta_hojas_entry"),
             "precio_min": self.widget_get("precio_entry", "0"),
             "ruta_excel_antiguo": self.widget_get("excel_old_entry"),
             "ruta_excel_nuevo": self.widget_get("excel_new_entry"),
