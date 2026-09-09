@@ -14,6 +14,7 @@ import traceback
 import shutil
 import xlrd
 import string
+import calendar
 from datetime import datetime
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -58,6 +59,7 @@ filtro_rotacion_running = False
 mopar_running = False
 stock_fiat_running = False
 hoja_pedidos_running = False
+horario_running = False
 stop_event_auto = threading.Event()
 stop_event_pedidos = threading.Event()
 stop_event_comparador = threading.Event()
@@ -612,6 +614,93 @@ def generar_hoja_pedidos_task(ruta_plantilla, carpeta_hojas, log_callback=None, 
         if finalizado_callback: finalizado_callback()
 
 # ---------------------------------------------------
+# 4ter. LÓGICA DE HORARIO MENSUAL PROPIO (CONTROL HORARIO)
+# ---------------------------------------------------
+
+def cargar_festivos_csv(ruta_csv):
+    """Lee un CSV 'date;type' con fechas DD/MM (sin año) y devuelve un set de tuplas (dia, mes)."""
+    festivos = set()
+    if not ruta_csv or not os.path.exists(ruta_csv):
+        return festivos
+    with open(ruta_csv, "r", encoding="utf-8") as f:
+        for i, fila in enumerate(csv.reader(f, delimiter=";")):
+            if i == 0 or not fila or not fila[0].strip():
+                continue
+            try:
+                dia_str, mes_str = fila[0].strip().split("/")
+                festivos.add((int(dia_str), int(mes_str)))
+            except Exception:
+                continue
+    return festivos
+
+def ruta_horario_mensual(carpeta_horario, anio, mes):
+    return Path(carpeta_horario) / f"CONTROL HORARIO {MESES_ES[mes]}.xlsx"
+
+def _archivo_horario_base(carpeta_horario):
+    """Usa el CONTROL HORARIO existente más reciente de la carpeta como base de formato (cabecera, estilos, merges)."""
+    carpeta = Path(carpeta_horario)
+    if not carpeta.is_dir():
+        return None
+    candidatos = [p for p in carpeta.iterdir() if p.is_file() and p.suffix.lower() == ".xlsx" and p.stem.upper().startswith("CONTROL HORARIO")]
+    if not candidatos:
+        return None
+    return max(candidatos, key=lambda p: p.stat().st_mtime)
+
+def generar_horario_mensual_task(carpeta_horario, ruta_festivos_csv, horario_habitual="10:00 - 18:00", horas_dia=8, log_callback=None, progreso_callback=None, finalizado_callback=None, forzar=False, anio=None, mes=None):
+    global horario_running
+    horario_running = True
+    def log(texto, tag=None):
+        if log_callback: log_callback(f"[MI HORARIO] {texto}", tag)
+    log("Generando el horario mensual...")
+    try:
+        hoy = datetime.now()
+        anio = anio or hoy.year
+        mes = mes or hoy.month
+        base = _archivo_horario_base(carpeta_horario)
+        if not base:
+            log("❌ No hay ningún CONTROL HORARIO anterior en esa carpeta que usar como base de formato.", "error")
+            return
+        ruta_final = ruta_horario_mensual(carpeta_horario, anio, mes)
+        if progreso_callback: progreso_callback(0.1)
+        if ruta_final.exists() and not forzar:
+            log(f"El horario de este mes ya existía, no se ha sobrescrito: {ruta_final}", "success")
+            if progreso_callback: progreso_callback(1)
+            return
+        ruta_final.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(base, ruta_final)
+        festivos = cargar_festivos_csv(ruta_festivos_csv)
+        wb = openpyxl.load_workbook(ruta_final)
+        ws = wb.active
+        ws.cell(row=8, column=1).value = f"MES …{MESES_ES[mes]}………{anio}"
+        num_dias = calendar.monthrange(anio, mes)[1]
+        for dia_idx in range(1, 32):
+            fila = 9 + dia_idx
+            if dia_idx > num_dias:
+                for col in (1, 3, 7, 8):
+                    ws.cell(row=fila, column=col).value = None
+                continue
+            fecha = datetime(anio, mes, dia_idx)
+            dia_semana = fecha.weekday()  # 0=lunes ... 5=sabado, 6=domingo
+            es_dia_laborable = dia_semana < 5 and (dia_idx, mes) not in festivos
+            if es_dia_laborable:
+                ws.cell(row=fila, column=1).value = fecha
+                ws.cell(row=fila, column=3).value = horario_habitual
+                ws.cell(row=fila, column=7).value = horas_dia
+                ws.cell(row=fila, column=8).value = None
+            if progreso_callback: progreso_callback(0.1 + 0.8 * dia_idx / num_dias)
+        wb.save(ruta_final)
+        wb.close()
+        if progreso_callback: progreso_callback(1)
+        log(f"✅ Horario de {MESES_ES[mes]} {anio} generado: {ruta_final}", "success")
+        log("Solo se han rellenado los días laborables; fines de semana y festivos se dejan tal cual estaban.", "success")
+    except Exception as e:
+        log(f"❌ Error: {e}", "error")
+        registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_horario_mensual_task")
+    finally:
+        horario_running = False
+        if finalizado_callback: finalizado_callback()
+
+# ---------------------------------------------------
 # 5. LÓGICA DE FICHERO MOPAR (CON NOMBRES FXXXX + LETRAS) - v13
 # ---------------------------------------------------
 
@@ -803,6 +892,7 @@ class AppIntegrada(ctk.CTk):
             except Exception: pass
         self.setup_ui()
         self.comprobar_hoja_pedidos_al_inicio()
+        self.comprobar_horario_al_inicio()
 
     def aplicar_tema_inicial(self):
         # Modo y tema fijos: interfaz clara y consistente en toda la aplicación.
@@ -888,6 +978,7 @@ class AppIntegrada(ctk.CTk):
         self.tab_mopar = self.tabview.add("Fichero Mopar")
         self.tab_stock_fiat = self.tabview.add("Stock FIAT")
         self.tab_reclamaciones_power_line = self.tabview.add("Reclamaciones")
+        self.tab_horario = self.tabview.add("Mi Horario")
         self.tab_config = self.tabview.add("Configuración")
         self.build_tab_auto(acc_color)
         self.build_tab_pedidos(acc_color)
@@ -897,6 +988,7 @@ class AppIntegrada(ctk.CTk):
         self.build_tab_stock_fiat(acc_color)
         self.reclamaciones_power_line = ModuloReclamacionesPowerLine(self, self.config)
         self.reclamaciones_power_line.construir(self.tab_reclamaciones_power_line)
+        self.build_tab_horario(acc_color)
         self.build_tab_config(acc_color)
         self.tabview.configure(command=self.actualizar_paneles_por_pestana)
 
@@ -981,6 +1073,26 @@ class AppIntegrada(ctk.CTk):
         self.crear_fila_archivo(card_hoja, "Carpeta HOJAS DE PEDIDO", "carpeta_hojas_entry", "ruta_carpeta_hojas", "Carpeta HOJAS DE PEDIDO...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_hojas_entry))
         self.btn_hoja_pedidos = self.crear_boton_principal(card_hoja, "Generar hoja de hoy", self.iniciar_hoja_pedidos)
         self.btn_hoja_pedidos.pack(padx=24, pady=(4, 24), fill="x")
+
+    def build_tab_horario(self, acc_color):
+        card = self.crear_tarjeta_tab(self.tab_horario, "Mi horario mensual", "Rellena tu CONTROL HORARIO del mes solo en los días laborables; fines de semana y festivos se dejan tal cual.")
+        self.crear_fila_archivo(card, "Carpeta CONTROL HORARIO PROPIO", "carpeta_horario_entry", "ruta_carpeta_horario", "Carpeta CONTROL HORARIO PROPIO...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_horario_entry))
+        self.crear_fila_archivo(card, "CSV de festivos", "festivos_csv_entry", "ruta_festivos_csv", "DAYOFF_Palausa.csv...", "Examinar", lambda: self.seleccionar_archivo(self.festivos_csv_entry, [("CSV files", "*.csv")]))
+        row_horario = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        row_horario.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(row_horario, text="Horario habitual", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
+        self.horario_habitual_entry = ctk.CTkEntry(row_horario, width=160, height=36, justify="center", corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.horario_habitual_entry.insert(0, self.config.get("horario_habitual", "10:00 - 18:00"))
+        self.horario_habitual_entry.pack(side="right", padx=14, pady=12)
+        row_horas = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        row_horas.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(row_horas, text="Horas por día", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
+        self.horas_dia_entry = ctk.CTkEntry(row_horas, width=120, height=36, justify="center", corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.horas_dia_entry.insert(0, str(self.config.get("horas_dia", "8")))
+        self.horas_dia_entry.pack(side="right", padx=14, pady=12)
+        self.btn_horario = self.crear_boton_principal(card, "Generar horario de este mes", self.iniciar_horario_mensual)
+        self.btn_horario.pack(padx=24, pady=(4, 8), fill="x")
+        ctk.CTkLabel(card, text="Solo se rellenan los días laborables (excluye fines de semana y los festivos del CSV). Vacaciones y la semana de fiestas se ajustan a mano después.", font=("Segoe UI", 11), text_color=self.color_texto_sec, wraplength=520, justify="left").pack(anchor="w", padx=24, pady=(0, 20))
 
     def build_tab_comparador(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_comparador, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.")
@@ -1321,6 +1433,78 @@ class AppIntegrada(ctk.CTk):
             daemon=True,
         ).start()
 
+    def iniciar_horario_mensual(self, forzar=False, automatico=False):
+        global horario_running
+        if horario_running:
+            return
+        self.guardar_configuracion_ui_internal()
+        carpeta = self.widget_get("carpeta_horario_entry")
+        csv_festivos = self.widget_get("festivos_csv_entry")
+        horario_habitual = self.widget_get("horario_habitual_entry", "10:00 - 18:00")
+        try:
+            horas_dia = float(self.widget_get("horas_dia_entry", "8"))
+        except Exception:
+            horas_dia = 8
+        if not self.validar_carpeta(carpeta, "Selecciona la carpeta CONTROL HORARIO PROPIO."):
+            return
+        if not self.validar_archivo(csv_festivos, "Selecciona el CSV de festivos (DAYOFF_Palausa.csv)."):
+            return
+        hoy = datetime.now()
+        if not forzar and ruta_horario_mensual(carpeta, hoy.year, hoy.month).exists():
+            if automatico:
+                return
+            if not messagebox.askyesno("El horario de este mes ya existe", "Ya existe un CONTROL HORARIO para este mes. ¿Quieres sustituirlo por uno nuevo en blanco? Se perderá lo que hayas escrito en él (incluida la firma)."):
+                return
+            forzar = True
+        self.actualizar_estado("generando el horario del mes")
+        self.btn_horario.configure(text="Generando...", state="disabled")
+        threading.Thread(
+            target=generar_horario_mensual_task,
+            args=(carpeta, csv_festivos),
+            kwargs={
+                "horario_habitual": horario_habitual,
+                "horas_dia": horas_dia,
+                "log_callback": lambda t, tag=None: self.after(0, self.agregar_log, t, tag),
+                "progreso_callback": lambda v: self.after(0, self.actualizar_progreso, v),
+                "finalizado_callback": lambda: self.after(0, self.finalizar_horario_mensual, carpeta),
+                "forzar": forzar,
+            },
+            daemon=True,
+        ).start()
+
+    def finalizar_horario_mensual(self, carpeta):
+        acc_color = self.color_principal
+        hoy = datetime.now()
+        ruta = ruta_horario_mensual(carpeta, hoy.year, hoy.month)
+        self.actualizar_estado("horario del mes listo", str(ruta))
+        self.btn_horario.configure(text="Generar horario de este mes", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+
+    def comprobar_horario_al_inicio(self):
+        carpeta = self.config.get("ruta_carpeta_horario", "")
+        csv_festivos = self.config.get("ruta_festivos_csv", "")
+        if not carpeta or not csv_festivos or not os.path.isdir(carpeta) or not os.path.exists(csv_festivos):
+            return
+        hoy = datetime.now()
+        if ruta_horario_mensual(carpeta, hoy.year, hoy.month).exists():
+            return
+        horario_habitual = self.config.get("horario_habitual", "10:00 - 18:00")
+        try:
+            horas_dia = float(self.config.get("horas_dia", 8))
+        except Exception:
+            horas_dia = 8
+        self.agregar_log("[MI HORARIO] No existe el horario de este mes, generándolo automáticamente...")
+        threading.Thread(
+            target=generar_horario_mensual_task,
+            args=(carpeta, csv_festivos),
+            kwargs={
+                "horario_habitual": horario_habitual,
+                "horas_dia": horas_dia,
+                "log_callback": lambda t, tag=None: self.after(0, self.agregar_log, t, tag),
+                "finalizado_callback": lambda: self.after(0, self.finalizar_horario_mensual, carpeta),
+            },
+            daemon=True,
+        ).start()
+
     def toggle_comparador(self):
         global comparador_running
         if not comparador_running:
@@ -1462,6 +1646,10 @@ class AppIntegrada(ctk.CTk):
             "ruta_folder_pedidos": self.widget_get("folder_pedidos_entry"),
             "ruta_plantilla_hojas": self.widget_get("plantilla_hoja_entry"),
             "ruta_carpeta_hojas": self.widget_get("carpeta_hojas_entry"),
+            "ruta_carpeta_horario": self.widget_get("carpeta_horario_entry"),
+            "ruta_festivos_csv": self.widget_get("festivos_csv_entry"),
+            "horario_habitual": self.widget_get("horario_habitual_entry", "10:00 - 18:00"),
+            "horas_dia": self.widget_get("horas_dia_entry", "8"),
             "precio_min": self.widget_get("precio_entry", "0"),
             "ruta_excel_antiguo": self.widget_get("excel_old_entry"),
             "ruta_excel_nuevo": self.widget_get("excel_new_entry"),
