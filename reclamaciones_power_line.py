@@ -295,6 +295,9 @@ class ModuloReclamacionesPowerLine:
         acciones.pack(padx=22, pady=(0, 18), fill="x")
         self.btn_generar = self.app.crear_boton_principal(acciones, "Generar documento", self.generar_documento)
         self.btn_generar.pack(fill="x")
+        ctk.CTkButton(acciones, text="Limpiar formulario", height=36, corner_radius=8, fg_color=self.app.color_panel_medio,
+                      text_color=self.app.color_texto, hover_color=self.app.color_panel_medio_hover, border_width=1,
+                      border_color=self.app.color_borde, command=self.limpiar_formulario).pack(fill="x", pady=(8, 0))
 
     def _crear_selector_destino(self, card):
         destino = ctk.CTkFrame(card, fg_color=self.app.color_superficie_alt, corner_radius=10)
@@ -374,6 +377,17 @@ class ModuloReclamacionesPowerLine:
         self.imagenes_preview.pop(clave, None)
         vista.configure(image=None)
         etiqueta.configure(text=titulo + "\nArrastra una imagen o selecciónala")
+
+    def limpiar_formulario(self):
+        if not messagebox.askyesno("Limpiar formulario", "¿Borrar Nº Litigio, Pedido, Referencia, descripción y las fotografías adjuntadas?"):
+            return
+        self.litigio_entry.delete(0, "end")
+        self.pedido_entry.delete(0, "end")
+        self.referencia_entry.delete(0, "end")
+        self.descripcion_text.delete("1.0", "end")
+        for clave, _ in PHOTO_FIELDS:
+            self.eliminar_foto(clave)
+        self.pdf_var.set(False)
 
     def cambiar_carpeta(self):
         ruta = filedialog.askdirectory(title="Selecciona la carpeta de guardado")
