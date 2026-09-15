@@ -1191,7 +1191,9 @@ class AppIntegrada(ctk.CTk):
             self.frame_log.pack(pady=(0, 16), padx=22, fill="both", expand=True)
 
     def build_tab_auto(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_auto, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.")
+        contenedor = ctk.CTkScrollableFrame(self.tab_auto, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        card = self.crear_tarjeta_tab(contenedor, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.")
         self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]))
         row_input = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
         row_input.pack(padx=24, pady=(0, 16), fill="x")
@@ -1207,7 +1209,9 @@ class AppIntegrada(ctk.CTk):
         ctk.CTkButton(card, text="Abrir carpeta del Excel", height=36, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.abrir_carpeta_auto).pack(padx=24, pady=(0, 24), fill="x")
 
     def build_tab_pedidos(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_pedidos, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.")
+        contenedor = ctk.CTkScrollableFrame(self.tab_pedidos, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        card = self.crear_tarjeta_tab(contenedor, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.")
         self.crear_fila_archivo(card, "Excel urgente", "excel_pedidos_entry", "ruta_excel_pedidos", "Excel URGENTE.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.excel_pedidos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_pedidos_entry", "ruta_folder_pedidos", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_pedidos_entry))
         self.btn_pedidos = self.crear_boton_principal(card, "Generar pedidos", self.toggle_pedidos)
@@ -1217,13 +1221,13 @@ class AppIntegrada(ctk.CTk):
         self.pedidos_generados_box.pack(padx=24, pady=(0, 24), fill="x")
         self.pedidos_generados_box.configure(state="disabled")
 
-        card_hoja = self.crear_tarjeta_tab(self.tab_pedidos, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.")
+        card_hoja = self.crear_tarjeta_tab(contenedor, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.")
         self.crear_fila_archivo(card_hoja, "Plantilla de hoja", "plantilla_hoja_entry", "ruta_plantilla_hojas", "HOJA DE PEDIDOS.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.plantilla_hoja_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_hoja, "Carpeta HOJAS DE PEDIDO", "carpeta_hojas_entry", "ruta_carpeta_hojas", "Carpeta HOJAS DE PEDIDO...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_hojas_entry))
         self.btn_hoja_pedidos = self.crear_boton_principal(card_hoja, "Generar hoja de hoy", self.iniciar_hoja_pedidos)
         self.btn_hoja_pedidos.pack(padx=24, pady=(4, 24), fill="x")
 
-        card_avisos = self.crear_tarjeta_tab(self.tab_pedidos, "Avisos de no suministro", "Lee la hoja de pedido ya rellenada y crea un borrador en Outlook por cliente con las referencias en NO SUMINISTRA. Nunca se envían solos.")
+        card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro", "Lee la hoja de pedido ya rellenada y crea un borrador en Outlook por cliente con las referencias en NO SUMINISTRA. Nunca se envían solos.")
         self.crear_fila_archivo(card_avisos, "Hoja de pedido a procesar", "hoja_avisos_entry", "ruta_hoja_avisos", "Hoja dd-mm-aaaa.xlsx ya rellenada...", "Examinar", lambda: self.seleccionar_archivo(self.hoja_avisos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_avisos, "Excel de clientes", "clientes_avisos_entry", "ruta_excel_clientes", "clientes.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.clientes_avisos_entry, [("Excel files", "*.xlsx")]))
         self.btn_avisos = self.crear_boton_principal(card_avisos, "Generar avisos de no suministro", self.iniciar_avisos_no_suministro)
@@ -1233,7 +1237,9 @@ class AppIntegrada(ctk.CTk):
         self.avisos_log_box.pack(padx=24, pady=(0, 24), fill="x")
 
     def build_tab_horario(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_horario, "Mi horario mensual", "Rellena el Excel de horario que te pasa la empresa solo en los días laborables; fines de semana y festivos se dejan tal cual.")
+        contenedor = ctk.CTkScrollableFrame(self.tab_horario, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        card = self.crear_tarjeta_tab(contenedor, "Mi horario mensual", "Rellena el Excel de horario que te pasa la empresa solo en los días laborables; fines de semana y festivos se dejan tal cual.")
         self.crear_fila_archivo(card, "Excel de la empresa", "excel_horario_base_entry", "ruta_excel_horario_base", "Excel de horario del mes que te pasa la empresa...", "Examinar", lambda: self.seleccionar_archivo(self.excel_horario_base_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta de destino", "carpeta_horario_entry", "ruta_carpeta_horario", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_horario_entry))
         self.crear_fila_archivo(card, "CSV de festivos", "festivos_csv_entry", "ruta_festivos_csv", "DAYOFF_Palausa.csv...", "Examinar", lambda: self.seleccionar_archivo(self.festivos_csv_entry, [("CSV files", "*.csv")]))
@@ -1254,7 +1260,9 @@ class AppIntegrada(ctk.CTk):
         ctk.CTkLabel(card, text="Solo se rellenan los días laborables (excluye fines de semana y los festivos del CSV). Vacaciones y la semana de fiestas se ajustan a mano después.", font=("Segoe UI", 11), text_color=self.color_texto_sec, wraplength=520, justify="left").pack(anchor="w", padx=24, pady=(0, 20))
 
     def build_tab_comparador(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_comparador, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.")
+        contenedor = ctk.CTkScrollableFrame(self.tab_comparador, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        card = self.crear_tarjeta_tab(contenedor, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.")
         self.crear_fila_archivo(card, "Excel antiguo", "excel_old_entry", "ruta_excel_antiguo", "Excel antiguo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_old_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Excel nuevo", "excel_new_entry", "ruta_excel_nuevo", "Excel nuevo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_new_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_comp_entry", "ruta_folder_comparador", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_comp_entry))
@@ -1268,7 +1276,9 @@ class AppIntegrada(ctk.CTk):
         self.btn_comparador.pack(padx=24, pady=(4, 24), fill="x")
 
     def build_tab_rotacion(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_rotacion, "Filtro de rotación", "Marca referencias de baja rotación en base al umbral y la propuesta de pedido.")
+        contenedor = ctk.CTkScrollableFrame(self.tab_rotacion, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        card = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación en base al umbral y la propuesta de pedido.")
         self.crear_fila_archivo(card, "Excel de Quiter", "excel_quiter_entry", "ruta_excel_quiter", "Excel de Quiter (DMS)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Archivo de propuesta", "excel_rot_entry", "ruta_excel_rotacion", "Archivo PROPUESTAPEDIDO.xls...", "Examinar", lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_rot_entry", "ruta_folder_rotacion", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_rot_entry))
@@ -1286,7 +1296,9 @@ class AppIntegrada(ctk.CTk):
         ctk.CTkButton(card, text="Abrir carpeta destino", height=36, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.abrir_carpeta_rotacion).pack(padx=24, pady=(0, 24), fill="x")
 
     def build_tab_mopar(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_mopar, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.")
+        contenedor = ctk.CTkScrollableFrame(self.tab_mopar, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_mopar_entry", "ruta_folder_mopar", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_mopar_entry))
         self.btn_mopar = self.crear_boton_principal(card, "Generar fichero Mopar", self.toggle_mopar)
@@ -1297,7 +1309,9 @@ class AppIntegrada(ctk.CTk):
         self.mopar_generados_box.configure(state="disabled")
 
     def build_tab_stock_fiat(self, acc_color):
-        card = self.crear_tarjeta_tab(self.tab_stock_fiat, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.")
+        contenedor = ctk.CTkScrollableFrame(self.tab_stock_fiat, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        card = self.crear_tarjeta_tab(contenedor, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_stock_fiat_entry", "ruta_folder_stock_fiat", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_stock_fiat_entry))
         self.btn_stock_fiat = self.crear_boton_principal(card, "Generar Stock FIAT", self.toggle_stock_fiat)
