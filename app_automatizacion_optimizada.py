@@ -60,6 +60,7 @@ mopar_running = False
 stock_fiat_running = False
 hoja_pedidos_running = False
 horario_running = False
+avisos_running = False
 stop_event_auto = threading.Event()
 stop_event_pedidos = threading.Event()
 stop_event_comparador = threading.Event()
@@ -614,6 +615,165 @@ def generar_hoja_pedidos_task(ruta_plantilla, carpeta_hojas, log_callback=None, 
         if finalizado_callback: finalizado_callback()
 
 # ---------------------------------------------------
+# 4bis-2. AVISOS A CLIENTES DE REFERENCIAS QUE NO SUMINISTRAN
+# ---------------------------------------------------
+
+def _normalizar_texto_estado(valor):
+    return " ".join(str(valor).strip().upper().split())
+
+def _normalizar_cliente_dms(valor):
+    if valor is None:
+        return ""
+    if isinstance(valor, float) and valor.is_integer():
+        return str(int(valor))
+    return str(valor).strip()
+
+def cargar_clientes_excel(ruta_clientes):
+    """Lee clientes.xlsx (A=num_cliente, B=nombre, C=email, varios separados por ';') -> {num_cliente: {"nombre", "email"}}."""
+    clientes = {}
+    wb = openpyxl.load_workbook(ruta_clientes, data_only=True)
+    ws = wb.active
+    for fila in ws.iter_rows(min_row=2, values_only=True):
+        if not fila or fila[0] is None:
+            continue
+        num = _normalizar_cliente_dms(fila[0])
+        if not num:
+            continue
+        nombre = str(fila[1]).strip() if len(fila) > 1 and fila[1] not in (None, "") else ""
+        email = str(fila[2]).strip() if len(fila) > 2 and fila[2] not in (None, "") else ""
+        clientes[num] = {"nombre": nombre, "email": email}
+    wb.close()
+    return clientes
+
+def extraer_no_suministradas(ruta_hoja, log=lambda *a, **k: None):
+    """Recorre todas las pestañas de la hoja de pedido y agrupa por cliente DMS las referencias con ESTADO 'NO SUMINISTRA'."""
+    wb = openpyxl.load_workbook(ruta_hoja, data_only=True)
+    agrupado = {}
+    for ws in wb.worksheets:
+        pedido = ws.cell(row=2, column=5).value
+        encontradas = 0
+        for fila in range(5, ws.max_row + 1):
+            referencia = ws.cell(row=fila, column=2).value
+            estado = ws.cell(row=fila, column=5).value
+            cliente = ws.cell(row=fila, column=8).value
+            if not referencia or not estado:
+                continue
+            if "NO SUMINISTRA" not in _normalizar_texto_estado(estado):
+                continue
+            cliente_norm = _normalizar_cliente_dms(cliente)
+            if not cliente_norm:
+                continue
+            agrupado.setdefault(cliente_norm, []).append(str(referencia).strip())
+            encontradas += 1
+        if encontradas:
+            log(f"Pestaña '{ws.title}' (pedido {pedido}): {encontradas} referencia(s) NO SUMINISTRA.")
+    wb.close()
+    return agrupado
+
+def construir_cuerpo_aviso(referencias, fecha_str):
+    if len(referencias) == 1:
+        return (
+            "Buenas tardes.\n\n"
+            f"La referencia {referencias[0]} correspondiente al pedido del día {fecha_str} no suministra.\n\n"
+            "Gracias por su atención,"
+        )
+    lineas = "\n".join(f"- {ref}" for ref in referencias)
+    return (
+        "Buenas tardes.\n\n"
+        f"Las siguientes referencias correspondientes al pedido del día {fecha_str} no suministran:\n\n"
+        f"{lineas}\n\n"
+        "Gracias por su atención,"
+    )
+
+def crear_borrador_outlook(outlook, destinatarios, asunto, cuerpo_texto):
+    """Crea un borrador en Outlook de escritorio (no lo envía) respetando la firma por defecto del usuario.
+    'outlook' es la aplicación Outlook ya conectada (COM ya inicializado en el hilo llamante)."""
+    mail = outlook.CreateItem(0)  # olMailItem
+    mail.Subject = asunto
+    if destinatarios:
+        mail.To = destinatarios
+    mail.GetInspector  # fuerza a Outlook a cargar la firma por defecto de "mensaje nuevo"
+    firma_html = mail.HTMLBody or ""
+    cuerpo_html = cuerpo_texto.replace("\n", "<br>")
+    mail.HTMLBody = f"<div style=\"font-family:Calibri,Arial,sans-serif;font-size:11pt\">{cuerpo_html}</div><br>{firma_html}"
+    mail.Save()
+
+def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, log_callback=None, progreso_callback=None, finalizado_callback=None, resultado_callback=None):
+    global avisos_running
+    avisos_running = True
+    def log(texto, tag=None):
+        if log_callback: log_callback(f"[AVISOS] {texto}", tag)
+    log("Analizando la hoja de pedido en busca de referencias que no suministran...")
+    resultado = {"generados": [], "sin_correo": [], "error": None}
+    try:
+        match = re.search(r"\d{2}-\d{2}-\d{4}", Path(ruta_hoja).stem)
+        fecha_str = match.group(0) if match else Path(ruta_hoja).stem
+        try:
+            clientes = cargar_clientes_excel(ruta_clientes)
+        except Exception as e:
+            log(f"❌ No se pudo leer el Excel de clientes: {e}", "error")
+            registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_clientes")
+            resultado["error"] = str(e)
+            return
+        try:
+            agrupado = extraer_no_suministradas(ruta_hoja, log)
+        except Exception as e:
+            log(f"❌ No se pudo leer la hoja de pedido: {e}", "error")
+            registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_hoja")
+            resultado["error"] = str(e)
+            return
+        if not agrupado:
+            log("No se han encontrado referencias con estado NO SUMINISTRA.", "success")
+            return
+        import pythoncom
+        import win32com.client
+        pythoncom.CoInitialize()
+        try:
+            try:
+                outlook = win32com.client.Dispatch("Outlook.Application")
+            except Exception as e:
+                log(f"❌ No se pudo conectar con Outlook: {e}", "error")
+                registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_outlook")
+                resultado["error"] = str(e)
+                return
+            total = len(agrupado)
+            hecho = 0
+            for cliente_num, referencias in agrupado.items():
+                info = clientes.get(cliente_num)
+                nombre = info["nombre"] if info else ""
+                email = info["email"] if info else ""
+                asunto = f"Aviso referencia no suministrada {fecha_str}"
+                cuerpo = construir_cuerpo_aviso(referencias, fecha_str)
+                try:
+                    crear_borrador_outlook(outlook, email, asunto, cuerpo)
+                except Exception as e:
+                    log(f"❌ Error creando el borrador para el cliente {cliente_num}: {e}", "error")
+                    registrar_error_detallado(str(e), traceback.format_exc(), ref=f"generar_avisos_no_suministro_task_{cliente_num}")
+                    hecho += 1
+                    if progreso_callback: progreso_callback(hecho / total)
+                    continue
+                entrada = {"cliente": cliente_num, "nombre": nombre, "email": email, "referencias": referencias}
+                if email:
+                    resultado["generados"].append(entrada)
+                    log(f"✅ Borrador creado para {nombre or cliente_num} ({len(referencias)} ref.)", "success")
+                else:
+                    resultado["sin_correo"].append(entrada)
+                    log(f"⚠️ Cliente {cliente_num} sin email en el Excel de clientes; borrador creado sin destinatario.", "error")
+                hecho += 1
+                if progreso_callback: progreso_callback(hecho / total)
+            log(f"✨ Proceso completado: {len(resultado['generados'])} borrador(es) con destinatario, {len(resultado['sin_correo'])} sin email.", "success")
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        resultado["error"] = str(e)
+        log(f"❌ Error: {e}", "error")
+        registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task")
+    finally:
+        avisos_running = False
+        if resultado_callback: resultado_callback(resultado)
+        if finalizado_callback: finalizado_callback()
+
+# ---------------------------------------------------
 # 4ter. LÓGICA DE HORARIO MENSUAL PROPIO (CONTROL HORARIO)
 # ---------------------------------------------------
 
@@ -1063,6 +1223,15 @@ class AppIntegrada(ctk.CTk):
         self.btn_hoja_pedidos = self.crear_boton_principal(card_hoja, "Generar hoja de hoy", self.iniciar_hoja_pedidos)
         self.btn_hoja_pedidos.pack(padx=24, pady=(4, 24), fill="x")
 
+        card_avisos = self.crear_tarjeta_tab(self.tab_pedidos, "Avisos de no suministro", "Lee la hoja de pedido ya rellenada y crea un borrador en Outlook por cliente con las referencias en NO SUMINISTRA. Nunca se envían solos.")
+        self.crear_fila_archivo(card_avisos, "Hoja de pedido a procesar", "hoja_avisos_entry", "ruta_hoja_avisos", "Hoja dd-mm-aaaa.xlsx ya rellenada...", "Examinar", lambda: self.seleccionar_archivo(self.hoja_avisos_entry, [("Excel files", "*.xlsx")]))
+        self.crear_fila_archivo(card_avisos, "Excel de clientes", "clientes_avisos_entry", "ruta_excel_clientes", "clientes.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.clientes_avisos_entry, [("Excel files", "*.xlsx")]))
+        self.btn_avisos = self.crear_boton_principal(card_avisos, "Generar avisos de no suministro", self.iniciar_avisos_no_suministro)
+        self.btn_avisos.pack(padx=24, pady=(4, 16), fill="x")
+        ctk.CTkLabel(card_avisos, text="Registro de avisos", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
+        self.avisos_log_box = self.crear_caja_log(card_avisos, alto=110)
+        self.avisos_log_box.pack(padx=24, pady=(0, 24), fill="x")
+
     def build_tab_horario(self, acc_color):
         card = self.crear_tarjeta_tab(self.tab_horario, "Mi horario mensual", "Rellena el Excel de horario que te pasa la empresa solo en los días laborables; fines de semana y festivos se dejan tal cual.")
         self.crear_fila_archivo(card, "Excel de la empresa", "excel_horario_base_entry", "ruta_excel_horario_base", "Excel de horario del mes que te pasa la empresa...", "Examinar", lambda: self.seleccionar_archivo(self.excel_horario_base_entry, [("Excel files", "*.xlsx")]))
@@ -1423,6 +1592,60 @@ class AppIntegrada(ctk.CTk):
             daemon=True,
         ).start()
 
+    def log_callback_avisos(self, texto, tag=None):
+        self.agregar_log(texto, tag)
+        self.agregar_a_caja(self.avisos_log_box, texto, tag)
+
+    def iniciar_avisos_no_suministro(self):
+        global avisos_running
+        if avisos_running:
+            return
+        self.guardar_configuracion_ui_internal()
+        ruta_hoja = self.widget_get("hoja_avisos_entry")
+        ruta_clientes = self.widget_get("clientes_avisos_entry")
+        if not self.validar_archivo(ruta_hoja, "Selecciona la hoja de pedido (dd-mm-aaaa.xlsx) ya rellenada."):
+            return
+        if not self.validar_archivo(ruta_clientes, "Selecciona el Excel de clientes (clientes.xlsx)."):
+            return
+        if not messagebox.askyesno("Generar avisos", "Se creará un borrador en Outlook por cada cliente con referencias en NO SUMINISTRA. Se guardan en Borradores sin enviarse. ¿Continuar?"):
+            return
+        self.actualizar_estado("generando avisos de no suministro")
+        self.btn_avisos.configure(text="Generando...", state="disabled")
+        self.limpiar_caja(self.avisos_log_box)
+        threading.Thread(
+            target=generar_avisos_no_suministro_task,
+            args=(ruta_hoja, ruta_clientes),
+            kwargs={
+                "log_callback": lambda t, tag=None: self.after(0, self.log_callback_avisos, t, tag),
+                "progreso_callback": lambda v: self.after(0, self.actualizar_progreso, v),
+                "finalizado_callback": lambda: self.after(0, self.finalizar_avisos_no_suministro),
+                "resultado_callback": lambda r: self.after(0, self.mostrar_resultado_avisos, r),
+            },
+            daemon=True,
+        ).start()
+
+    def finalizar_avisos_no_suministro(self):
+        acc_color = self.color_principal
+        self.actualizar_estado("avisos de no suministro procesados")
+        self.btn_avisos.configure(text="Generar avisos de no suministro", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+
+    def mostrar_resultado_avisos(self, resultado):
+        if resultado.get("error"):
+            return
+        generados = resultado.get("generados", [])
+        sin_correo = resultado.get("sin_correo", [])
+        if not generados and not sin_correo:
+            return
+        lineas = [f"Borradores generados: {len(generados)}"]
+        for entrada in generados:
+            lineas.append(f"  • {entrada['nombre'] or entrada['cliente']} ({entrada['cliente']}): {', '.join(entrada['referencias'])}")
+        if sin_correo:
+            lineas.append("")
+            lineas.append(f"Sin email en el Excel de clientes ({len(sin_correo)}), borrador creado sin destinatario:")
+            for entrada in sin_correo:
+                lineas.append(f"  • Cliente {entrada['cliente']}: {', '.join(entrada['referencias'])}")
+        messagebox.showinfo("Avisos de no suministro", "\n".join(lineas))
+
     def iniciar_horario_mensual(self, forzar=False, automatico=False):
         global horario_running
         if horario_running:
@@ -1640,6 +1863,8 @@ class AppIntegrada(ctk.CTk):
             "ruta_folder_pedidos": self.widget_get("folder_pedidos_entry"),
             "ruta_plantilla_hojas": self.widget_get("plantilla_hoja_entry"),
             "ruta_carpeta_hojas": self.widget_get("carpeta_hojas_entry"),
+            "ruta_hoja_avisos": self.widget_get("hoja_avisos_entry"),
+            "ruta_excel_clientes": self.widget_get("clientes_avisos_entry"),
             "ruta_excel_horario_base": self.widget_get("excel_horario_base_entry"),
             "ruta_carpeta_horario": self.widget_get("carpeta_horario_entry"),
             "ruta_festivos_csv": self.widget_get("festivos_csv_entry"),
