@@ -1222,31 +1222,53 @@ class AppIntegrada(ctk.CTk):
         self.comprobar_hoja_pedidos_al_inicio()
 
     def aplicar_tema_inicial(self):
-        # Modo y tema fijos: interfaz clara y consistente en toda la aplicación.
-        ctk.set_appearance_mode("Light")
+        modo = self.config.get("modo_apariencia", "Light")
+        ctk.set_appearance_mode("Dark" if modo == "Dark" else "Light")
         ctk.set_default_color_theme("blue")
         self.accent_color = None
         self.hover_color = None
 
     def aplicar_estilos_ui(self):
-        # Paleta única, neutra y profesional (sustituye al antiguo sistema de temas/regiones).
-        self.color_principal = "#2563eb"       # Acento primario (acciones principales)
-        self.color_hover = "#1d4ed8"
-        self.color_superficie = "#ffffff"      # Fondo de tarjetas/paneles
-        self.color_superficie_alt = "#f1f4f9"  # Fondo de sub-secciones dentro de una tarjeta
-        self.color_borde = "#dbe1ea"
-        self.color_texto = "#1e2733"
-        self.color_texto_sec = "#64748b"
-        self.color_panel_oscuro = "#eef2f8"    # Secciones destacadas de fondo claro
-        self.color_panel_medio = "#eef1f6"     # Fondo de botones secundarios
-        self.color_panel_medio_hover = "#dfe4ec"
-        self.color_panel_claro = "#f5f6f9"     # Fondo general de la ventana
-        self.color_acento_azul = "#0ea5e9"
-        self.color_ok = "#16a34a"
-        self.color_warn = "#d97706"
-        self.color_peligro = "#dc2626"
-        self.color_peligro_hover = "#b91c1c"
-        self.color_pokedex_luz = "#0f172a"     # Texto de énfasis (estado, porcentaje)
+        # Paleta clara u oscura según configuración (modo_apariencia).
+        modo_oscuro = self.config.get("modo_apariencia", "Light") == "Dark"
+        if modo_oscuro:
+            self.color_principal = "#3b82f6"       # Acento primario (acciones principales)
+            self.color_hover = "#2563eb"
+            self.color_superficie = "#1e293b"      # Fondo de tarjetas/paneles
+            self.color_superficie_alt = "#26374d"  # Fondo de sub-secciones dentro de una tarjeta
+            self.color_campo = "#16202f"           # Fondo de campos de texto
+            self.color_borde = "#334155"
+            self.color_texto = "#e2e8f0"
+            self.color_texto_sec = "#94a3b8"
+            self.color_panel_oscuro = "#0f172a"    # Secciones destacadas de fondo oscuro
+            self.color_panel_medio = "#2b3a4f"     # Fondo de botones secundarios
+            self.color_panel_medio_hover = "#374763"
+            self.color_panel_claro = "#0f172a"     # Fondo general de la ventana
+            self.color_acento_azul = "#38bdf8"
+            self.color_ok = "#22c55e"
+            self.color_warn = "#f59e0b"
+            self.color_peligro = "#f87171"
+            self.color_peligro_hover = "#ef4444"
+            self.color_pokedex_luz = "#f1f5f9"     # Texto de énfasis (estado, porcentaje)
+        else:
+            self.color_principal = "#2563eb"       # Acento primario (acciones principales)
+            self.color_hover = "#1d4ed8"
+            self.color_superficie = "#ffffff"      # Fondo de tarjetas/paneles
+            self.color_superficie_alt = "#f1f4f9"  # Fondo de sub-secciones dentro de una tarjeta
+            self.color_campo = "#ffffff"           # Fondo de campos de texto
+            self.color_borde = "#dbe1ea"
+            self.color_texto = "#1e2733"
+            self.color_texto_sec = "#64748b"
+            self.color_panel_oscuro = "#eef2f8"    # Secciones destacadas de fondo claro
+            self.color_panel_medio = "#eef1f6"     # Fondo de botones secundarios
+            self.color_panel_medio_hover = "#dfe4ec"
+            self.color_panel_claro = "#f5f6f9"     # Fondo general de la ventana
+            self.color_acento_azul = "#0ea5e9"
+            self.color_ok = "#16a34a"
+            self.color_warn = "#d97706"
+            self.color_peligro = "#dc2626"
+            self.color_peligro_hover = "#b91c1c"
+            self.color_pokedex_luz = "#0f172a"     # Texto de énfasis (estado, porcentaje)
 
     def crear_tarjeta_tab(self, tab, titulo, subtitulo):
         card = ctk.CTkFrame(tab, fg_color=self.color_superficie, corner_radius=12, border_width=1, border_color=self.color_borde)
@@ -1260,7 +1282,7 @@ class AppIntegrada(ctk.CTk):
         ctk.CTkLabel(parent, text=label_text, font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(padx=24, pady=(0, 16), fill="x")
-        entry = ctk.CTkEntry(row, placeholder_text=placeholder, height=38, corner_radius=8, border_width=1, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        entry = ctk.CTkEntry(row, placeholder_text=placeholder, height=38, corner_radius=8, border_width=1, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
         entry.insert(0, self.config.get(config_key, ""))
         entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
         setattr(self, entry_attr, entry)
@@ -1287,7 +1309,6 @@ class AppIntegrada(ctk.CTk):
 
         self.tabview = ctk.CTkTabview(
             self,
-            height=460,
             corner_radius=10,
             segmented_button_selected_color=acc_color,
             segmented_button_selected_hover_color=self.color_hover,
@@ -1297,13 +1318,13 @@ class AppIntegrada(ctk.CTk):
             fg_color=self.color_panel_claro,
             border_width=0,
         )
-        self.tabview.pack(pady=(16, 8), padx=22, fill="x")
+        self.tabview.pack(pady=(16, 8), padx=22, fill="both", expand=True)
         self.tab_auto = self.tabview.add("Automatización")
         self.tab_pedidos = self.tabview.add("Pedidos")
         self.tab_comparador = self.tabview.add("Comparador")
         self.tab_mopar = self.tabview.add("Fichero Mopar")
         self.tab_stock_fiat = self.tabview.add("Stock FIAT")
-        self.tab_madd = self.tabview.add("Facturas MADD")
+        self.tab_madd = self.tabview.add("Facturas")
         self.tab_reclamaciones_power_line = self.tabview.add("Reclamaciones")
         self.tab_config = self.tabview.add("Configuración")
         self.build_tab_auto(acc_color)
@@ -1345,7 +1366,7 @@ class AppIntegrada(ctk.CTk):
         self.frame_log = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=10, border_width=1, border_color=self.color_borde)
         self.frame_log.pack(pady=(0, 16), padx=22, fill="both", expand=True)
         ctk.CTkLabel(self.frame_log, text="Registro de actividad", font=("Segoe UI", 13, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(12, 8))
-        self.log_box = ctk.CTkTextbox(self.frame_log, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color="#ffffff", text_color=self.color_texto)
+        self.log_box = ctk.CTkTextbox(self.frame_log, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color=self.color_campo, text_color=self.color_texto)
         self.log_box.pack(padx=16, pady=(0, 16), fill="both", expand=True)
         self.log_box.tag_config("success", foreground=self.color_ok)
         self.log_box.tag_config("error", foreground=self.color_peligro)
@@ -1358,7 +1379,7 @@ class AppIntegrada(ctk.CTk):
                 panel.pack_forget()
             self.tabview.pack_configure(fill="both", expand=True, pady=(16, 16))
             return
-        self.tabview.pack_configure(fill="x", expand=False, pady=(16, 8))
+        self.tabview.pack_configure(fill="both", expand=True, pady=(16, 8))
         if not self.frame_progreso.winfo_manager():
             self.frame_progreso.pack(pady=(0, 8), padx=22, fill="x", before=self.frame_estado)
         if not self.frame_estado.winfo_manager():
@@ -1374,7 +1395,7 @@ class AppIntegrada(ctk.CTk):
         row_input = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
         row_input.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(row_input, text="Precio mínimo (EUR)", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.precio_entry = ctk.CTkEntry(row_input, width=120, height=36, justify="center", corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.precio_entry = ctk.CTkEntry(row_input, width=120, height=36, justify="center", corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
         self.precio_entry.insert(0, self.config.get("precio_min", "0"))
         self.precio_entry.pack(side="right", padx=14, pady=12)
         self.btn_auto = self.crear_boton_principal(card, "Iniciar automatización", self.toggle_auto)
@@ -1391,7 +1412,7 @@ class AppIntegrada(ctk.CTk):
         row_umbral = ctk.CTkFrame(card_rotacion, fg_color=self.color_superficie_alt, corner_radius=10)
         row_umbral.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(row_umbral, text="Umbral mínimo", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.umbral_entry = ctk.CTkEntry(row_umbral, width=120, justify="center", height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.umbral_entry = ctk.CTkEntry(row_umbral, width=120, justify="center", height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
         self.umbral_entry.insert(0, self.config.get("umbral_rotacion", "0.08"))
         self.umbral_entry.pack(side="right", padx=14, pady=12)
         self.btn_rotacion = self.crear_boton_principal(card_rotacion, "Resaltar por rotación", self.iniciar_filtro_rotacion)
@@ -1410,7 +1431,7 @@ class AppIntegrada(ctk.CTk):
         self.btn_pedidos = self.crear_boton_principal(card, "Generar pedidos", self.toggle_pedidos)
         self.btn_pedidos.pack(padx=24, pady=(4, 16), fill="x")
         ctk.CTkLabel(card, text="Números de pedido generados", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
-        self.pedidos_generados_box = ctk.CTkTextbox(card, height=90, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color="#ffffff", text_color=self.color_texto)
+        self.pedidos_generados_box = ctk.CTkTextbox(card, height=90, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color=self.color_campo, text_color=self.color_texto)
         self.pedidos_generados_box.pack(padx=24, pady=(0, 24), fill="x")
         self.pedidos_generados_box.configure(state="disabled")
 
@@ -1454,7 +1475,7 @@ class AppIntegrada(ctk.CTk):
         self.btn_mopar = self.crear_boton_principal(card, "Generar fichero Mopar", self.toggle_mopar)
         self.btn_mopar.pack(padx=24, pady=(4, 16), fill="x")
         ctk.CTkLabel(card, text="Ficheros Mopar generados", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
-        self.mopar_generados_box = ctk.CTkTextbox(card, height=90, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color="#ffffff", text_color=self.color_texto)
+        self.mopar_generados_box = ctk.CTkTextbox(card, height=90, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color=self.color_campo, text_color=self.color_texto)
         self.mopar_generados_box.pack(padx=24, pady=(0, 24), fill="x")
         self.mopar_generados_box.configure(state="disabled")
 
@@ -1474,11 +1495,11 @@ class AppIntegrada(ctk.CTk):
         frame_creds_madd = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
         frame_creds_madd.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(frame_creds_madd, text="Usuario MADD", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=0, column=0, padx=18, pady=12, sticky="w")
-        self.usuario_madd_entry = ctk.CTkEntry(frame_creds_madd, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.usuario_madd_entry = ctk.CTkEntry(frame_creds_madd, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
         self.usuario_madd_entry.insert(0, self.config.get("usuario_madd", ""))
         self.usuario_madd_entry.grid(row=0, column=1, padx=18, pady=12, sticky="ew")
         ctk.CTkLabel(frame_creds_madd, text="Contraseña MADD", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=1, column=0, padx=18, pady=12, sticky="w")
-        self.password_madd_entry = ctk.CTkEntry(frame_creds_madd, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto, show="*")
+        self.password_madd_entry = ctk.CTkEntry(frame_creds_madd, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto, show="*")
         self.password_madd_entry.insert(0, self.config.get("password_madd", ""))
         self.password_madd_entry.grid(row=1, column=1, padx=18, pady=12, sticky="ew")
         frame_creds_madd.grid_columnconfigure(1, weight=1)
@@ -1486,13 +1507,13 @@ class AppIntegrada(ctk.CTk):
         row_email = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
         row_email.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(row_email, text="Correo diario de facturas", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(10, 2))
-        self.email_facturas_madd_entry = ctk.CTkEntry(row_email, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.email_facturas_madd_entry = ctk.CTkEntry(row_email, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
         self.email_facturas_madd_entry.insert(0, self.config.get("email_facturas_madd", ""))
         self.email_facturas_madd_entry.pack(padx=16, pady=(0, 10), fill="x")
         row_email_fallo = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
         row_email_fallo.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(row_email_fallo, text="Correo de aviso si falla", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(10, 2))
-        self.email_aviso_fallo_madd_entry = ctk.CTkEntry(row_email_fallo, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.email_aviso_fallo_madd_entry = ctk.CTkEntry(row_email_fallo, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
         self.email_aviso_fallo_madd_entry.insert(0, self.config.get("email_aviso_fallo_madd", ""))
         self.email_aviso_fallo_madd_entry.pack(padx=16, pady=(0, 10), fill="x")
         row_filtro = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
@@ -1522,11 +1543,11 @@ class AppIntegrada(ctk.CTk):
         frame_creds = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
         frame_creds.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(frame_creds, text="Usuario", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=0, column=0, padx=18, pady=12, sticky="w")
-        self.user_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.user_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
         self.user_entry.insert(0, self.config.get("usuario", ""))
         self.user_entry.grid(row=0, column=1, padx=18, pady=12, sticky="ew")
         ctk.CTkLabel(frame_creds, text="Contraseña", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=1, column=0, padx=18, pady=12, sticky="w")
-        self.pass_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto, show="*")
+        self.pass_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto, show="*")
         self.pass_entry.insert(0, self.config.get("password", ""))
         self.pass_entry.grid(row=1, column=1, padx=18, pady=12, sticky="ew")
         frame_creds.grid_columnconfigure(1, weight=1)
@@ -1536,6 +1557,12 @@ class AppIntegrada(ctk.CTk):
         self.hilos_option = ctk.CTkOptionMenu(frame_perf, values=["1", "2", "3", "4", "5"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
         self.hilos_option.set(str(self.config.get("num_hilos", "3")))
         self.hilos_option.pack(side="right", padx=14, pady=12)
+        frame_apariencia = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        frame_apariencia.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(frame_apariencia, text="Apariencia", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
+        self.modo_option = ctk.CTkOptionMenu(frame_apariencia, values=["Claro", "Oscuro"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover, command=self.cambiar_modo_apariencia)
+        self.modo_option.set("Oscuro" if self.config.get("modo_apariencia", "Light") == "Dark" else "Claro")
+        self.modo_option.pack(side="right", padx=14, pady=12)
         self.reclamaciones_power_line.construir_ajustes(card)
         ctk.CTkButton(card, text="Guardar configuración", height=42, corner_radius=8, fg_color=acc_color, hover_color=self.color_hover, command=self.guardar_config_ui).pack(padx=24, pady=(4, 24), fill="x")
 
@@ -1569,7 +1596,7 @@ class AppIntegrada(ctk.CTk):
         self.log_box.delete("1.0", "end")
 
     def crear_caja_log(self, parent, alto=110):
-        caja = ctk.CTkTextbox(parent, height=alto, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color="#ffffff", text_color=self.color_texto)
+        caja = ctk.CTkTextbox(parent, height=alto, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color=self.color_campo, text_color=self.color_texto)
         caja.tag_config("success", foreground=self.color_ok)
         caja.tag_config("error", foreground=self.color_peligro)
         caja.configure(state="disabled")
@@ -1675,6 +1702,27 @@ class AppIntegrada(ctk.CTk):
         self.guardar_configuracion_ui_internal()
         if not silent:
             messagebox.showinfo("Éxito", "Configuración guardada.")
+
+    def cambiar_modo_apariencia(self, valor=None):
+        self.guardar_configuracion_ui_internal()
+        self.reconstruir_interfaz()
+
+    def reconstruir_interfaz(self):
+        pestana_actual = None
+        if hasattr(self, "tabview"):
+            try:
+                pestana_actual = self.tabview.get()
+            except Exception:
+                pestana_actual = None
+        for widget in self.winfo_children():
+            widget.destroy()
+        self.aplicar_tema_inicial()
+        self.setup_ui()
+        if pestana_actual:
+            try:
+                self.tabview.set(pestana_actual)
+            except Exception:
+                pass
 
     def toggle_auto(self):
         global automation_running
@@ -2102,7 +2150,7 @@ class AppIntegrada(ctk.CTk):
             "email_aviso_fallo_madd": self.widget_get("email_aviso_fallo_madd_entry", ""),
             "filtro_dia_facturas_madd": self.widget_get("filtro_dia_madd_option", "Ayer"),
             "color_resaltado": self.widget_get("color_optionmenu", "Amarillo"),
-            "modo_apariencia": self.widget_get("modo_option", self.config.get("modo_apariencia", "Dark")),
+            "modo_apariencia": "Dark" if self.widget_get("modo_option", "Claro" if self.config.get("modo_apariencia", "Light") != "Dark" else "Oscuro") == "Oscuro" else "Light",
             "mopar_fecha": self.config.get("mopar_fecha"),
             "mopar_numero": self.config.get("mopar_numero"),
             "stock_fiat_fecha": self.config.get("stock_fiat_fecha"),

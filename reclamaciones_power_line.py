@@ -281,7 +281,7 @@ class ModuloReclamacionesPowerLine:
         self._crear_selector_destino(card)
         ctk.CTkLabel(card, text="Descripción del problema", font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(2, 4))
         self.descripcion_text = ctk.CTkTextbox(card, height=46, corner_radius=12, border_width=2, border_color=self.app.color_borde,
-                                               fg_color="#ffffff", text_color=self.app.color_texto)
+                                               fg_color=self.app.color_campo, text_color=self.app.color_texto)
         self.descripcion_text.pack(padx=22, pady=(0, 8), fill="x")
         ctk.CTkLabel(card, text="Fotografías *", font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(2, 4))
         fotos_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -306,7 +306,7 @@ class ModuloReclamacionesPowerLine:
         destino_fila = ctk.CTkFrame(destino, fg_color="transparent")
         destino_fila.pack(padx=12, pady=(0, 8), fill="x")
         self.destino_entry = ctk.CTkEntry(destino_fila, height=36, corner_radius=8, border_width=1, border_color=self.app.color_borde,
-                                           fg_color="#ffffff", text_color=self.app.color_texto)
+                                           fg_color=self.app.color_campo, text_color=self.app.color_texto)
         self.destino_entry.insert(0, self.configuracion.get("power_line_ruta_guardado", ""))
         self.destino_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         ctk.CTkButton(destino_fila, text="Elegir carpeta", width=122, height=36, corner_radius=8, fg_color=self.app.color_principal,
@@ -315,7 +315,7 @@ class ModuloReclamacionesPowerLine:
     def _campo(self, parent, texto):
         ctk.CTkLabel(parent, text=texto, font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(2, 3))
         entrada = ctk.CTkEntry(parent, height=32, corner_radius=8, border_width=1, border_color=self.app.color_borde,
-                                fg_color="#ffffff", text_color=self.app.color_texto)
+                                fg_color=self.app.color_campo, text_color=self.app.color_texto)
         entrada.pack(padx=22, pady=(0, 6), fill="x")
         return entrada
 
@@ -407,16 +407,16 @@ class ModuloReclamacionesPowerLine:
         fila = ctk.CTkFrame(card, fg_color="transparent")
         fila.pack(padx=22, pady=(0, 10), fill="x")
         self.busqueda_entry = ctk.CTkEntry(fila, placeholder_text="Nº litigio, referencia o pedido SAP...", height=36, corner_radius=8,
-                                            border_width=1, border_color=self.app.color_borde, fg_color="#ffffff", text_color=self.app.color_texto)
+                                            border_width=1, border_color=self.app.color_borde, fg_color=self.app.color_campo, text_color=self.app.color_texto)
         self.busqueda_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.busqueda_entry.bind("<KeyRelease>", lambda _event: self.actualizar_historial())
         ctk.CTkButton(fila, text="Buscar", width=76, height=36, corner_radius=8, fg_color=self.app.color_panel_medio,
                       text_color=self.app.color_texto, hover_color=self.app.color_panel_medio_hover, command=self.actualizar_historial).pack(side="right")
-        tabla_frame = ctk.CTkFrame(card, fg_color="#ffffff", corner_radius=8, border_width=1, border_color=self.app.color_borde)
+        tabla_frame = ctk.CTkFrame(card, fg_color=self.app.color_campo, corner_radius=8, border_width=1, border_color=self.app.color_borde)
         tabla_frame.pack(padx=22, pady=(0, 10), fill="both", expand=True)
         estilo = ttk.Style()
         estilo.theme_use("clam")
-        estilo.configure("PowerLine.Treeview", background="#ffffff", fieldbackground="#ffffff",
+        estilo.configure("PowerLine.Treeview", background=self.app.color_campo, fieldbackground=self.app.color_campo,
                           foreground=self.app.color_texto, rowheight=28, borderwidth=0, font=("Segoe UI", 11))
         estilo.configure("PowerLine.Treeview.Heading", background=self.app.color_panel_medio, foreground=self.app.color_texto,
                           font=("Segoe UI", 11, "bold"), relief="flat", borderwidth=0)
@@ -570,7 +570,7 @@ class ModuloReclamacionesPowerLine:
         fila = ctk.CTkFrame(parent, fg_color="transparent")
         fila.pack(padx=18, pady=5, fill="x")
         ctk.CTkLabel(fila, text=texto, width=180, anchor="w", font=("Segoe UI", 11), text_color=self.app.color_texto).pack(side="left")
-        entrada = ctk.CTkEntry(fila, height=32, corner_radius=8, border_color=self.app.color_borde, fg_color="#ffffff", text_color=self.app.color_texto)
+        entrada = ctk.CTkEntry(fila, height=32, corner_radius=8, border_color=self.app.color_borde, fg_color=self.app.color_campo, text_color=self.app.color_texto)
         entrada.insert(0, self.configuracion.get(clave, ""))
         entrada.pack(side="left", fill="x", expand=True, padx=6)
         ctk.CTkButton(fila, text="Examinar", width=80, height=32, corner_radius=8, fg_color=self.app.color_panel_medio, text_color=self.app.color_texto, hover_color=self.app.color_panel_medio_hover, command=comando).pack(side="right")
