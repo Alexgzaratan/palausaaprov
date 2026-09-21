@@ -874,6 +874,13 @@ MADD_PERFIL_TEXTO = "Piezas de recambio"
 LOG_FACTURAS_MADD = "log_facturas_madd.txt"
 MADD_PAGINAS_MAX = 10  # 100 docs/página -> hasta 1000 documentos más recientes revisados
 
+def _dia_laborable_anterior(fecha):
+    """Día laborable anterior a 'fecha', saltando sábados y domingos (los lunes devuelve el viernes)."""
+    anterior = fecha - timedelta(days=1)
+    while anterior.weekday() >= 5:  # 5=sábado, 6=domingo
+        anterior -= timedelta(days=1)
+    return anterior
+
 def registrar_log_facturas_madd(fecha_objetivo, resultado):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FACTURAS_MADD, "a", encoding="utf-8") as f:
@@ -1070,7 +1077,7 @@ def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email
         if log_callback: log_callback(f"[FACTURAS MADD] {texto}", tag)
     log("Iniciando descarga de facturas Stellantis MADD...")
     hoy = datetime.now().date()
-    fecha_objetivo = hoy if filtro_dia == "Hoy" else hoy - timedelta(days=1)
+    fecha_objetivo = hoy if filtro_dia == "Hoy" else _dia_laborable_anterior(hoy)
     resultado = {"facturas": [], "error": None, "paso_fallido": None}
     try:
         resultado = ejecutar_descarga_facturas_madd(usuario, password, carpeta_destino, {fecha_objetivo}, log)
