@@ -14,7 +14,8 @@ import traceback
 import shutil
 import xlrd
 import string
-from datetime import datetime
+import subprocess
+from datetime import datetime, timedelta
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 from tkinter import filedialog, messagebox
@@ -59,6 +60,7 @@ mopar_running = False
 stock_fiat_running = False
 hoja_pedidos_running = False
 avisos_running = False
+madd_running = False
 stop_event_auto = threading.Event()
 stop_event_pedidos = threading.Event()
 stop_event_comparador = threading.Event()
@@ -861,6 +863,252 @@ def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, pr
         if finalizado_callback: finalizado_callback()
 
 # ---------------------------------------------------
+# 5bis. LÓGICA DE FACTURAS STELLANTIS MADD (DESCARGA DIARIA)
+# ---------------------------------------------------
+# Estructura de la web confirmada por el usuario el 2026-09-21 (login SSO en
+# idfed.mpsa.com, selector de perfil ng-select, tabla de documentos "eDoc-Partners").
+# Solo lectura y descarga: nunca se pulsan los botones de estado (leído/impreso/etc).
+
+MADD_URL_DOCUMENTOS = "https://www.madd.stellantis.com/documents"
+MADD_PERFIL_TEXTO = "Piezas de recambio"
+LOG_FACTURAS_MADD = "log_facturas_madd.txt"
+MADD_PAGINAS_MAX = 3  # 100 docs/página -> hasta 300 documentos más recientes revisados
+
+def registrar_log_facturas_madd(fecha_objetivo, resultado):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_FACTURAS_MADD, "a", encoding="utf-8") as f:
+        f.write(f"--- EJECUCIÓN [{timestamp}] ---\n")
+        f.write(f"Fecha objetivo: {fecha_objetivo.isoformat()}\n")
+        f.write(f"Nº facturas descargadas: {len(resultado.get('facturas', []))}\n")
+        if resultado.get("error"):
+            f.write(f"Error: {resultado['error']} (paso: {resultado.get('paso_fallido') or 'desconocido'})\n")
+        else:
+            f.write("Sin errores.\n")
+        f.write("-" * 30 + "\n\n")
+
+def _madd_login(page, usuario, password):
+    page.goto(MADD_URL_DOCUMENTOS, timeout=45000)
+    page.wait_for_selector("#username", timeout=30000)
+    page.fill("#username", usuario)
+    page.fill("#password", password)
+    page.click("#signOnButton")
+    page.wait_for_load_state("networkidle", timeout=30000)
+
+def _madd_seleccionar_perfil(page):
+    selector_perfil = page.locator('ng-select[formcontrolname="profile"]')
+    # Si ya hay un perfil activo de una sesión previa, esta pantalla no aparece.
+    if selector_perfil.count() == 0 or not selector_perfil.first.is_visible():
+        return
+    selector_perfil.first.click()
+    opcion = page.locator(".ng-dropdown-panel .ng-option", has_text=MADD_PERFIL_TEXTO).first
+    opcion.wait_for(state="visible", timeout=10000)
+    opcion.click()
+    boton_confirmar = page.locator('button:has(i.bi-check-circle):not([disabled])').first
+    boton_confirmar.wait_for(state="visible", timeout=10000)
+    boton_confirmar.click()
+    page.wait_for_selector("tr.border-bottom", timeout=20000)
+
+def _madd_listar_facturas_del_dia(page, fechas_objetivo, log):
+    try:
+        page.select_option('select[name="pageSize"]', label="100 elementos por página")
+        page.wait_for_timeout(1000)
+    except Exception:
+        log("No se pudo ampliar el tamaño de página, se sigue con el valor por defecto.", "error")
+    coincidencias = []
+    for pagina in range(1, MADD_PAGINAS_MAX + 1):
+        filas = page.locator("tr.border-bottom")
+        total_filas = filas.count()
+        for i in range(total_filas):
+            fila = filas.nth(i)
+            try:
+                texto_titulo = fila.locator("a").first.inner_text(timeout=3000).strip()
+            except Exception:
+                continue
+            match = re.search(r"Factura\s+(\S+)\s+(\d{2}/\d{2}/\d{4})", texto_titulo)
+            if not match:
+                continue
+            numero, fecha_str = match.group(1), match.group(2)
+            dia, mes, anio = fecha_str.split("/")
+            fecha_factura = datetime(int(anio), int(mes), int(dia)).date()
+            if fecha_factura in fechas_objetivo:
+                coincidencias.append((i, numero, fecha_factura))
+        if pagina >= MADD_PAGINAS_MAX:
+            break
+        boton_siguiente = page.locator('a[aria-label="Next"]')
+        if boton_siguiente.count() == 0:
+            break
+        li_padre = boton_siguiente.first.locator("xpath=..")
+        if "disabled" in (li_padre.get_attribute("class") or ""):
+            break
+        boton_siguiente.first.click()
+        page.wait_for_timeout(1500)
+    return coincidencias
+
+def _madd_descargar_factura(page, indice_fila, numero, fecha_factura, carpeta_destino):
+    nombre_archivo = f"Factura_{numero}_{fecha_factura.isoformat()}.pdf"
+    ruta_destino = Path(carpeta_destino) / nombre_archivo
+    if ruta_destino.exists():
+        return ruta_destino, True
+    fila = page.locator("tr.border-bottom").nth(indice_fila)
+    boton_descarga = fila.locator("td.text-center button").first
+    with page.expect_download(timeout=30000) as info_descarga:
+        boton_descarga.click()
+    descarga = info_descarga.value
+    descarga.save_as(str(ruta_destino))
+    return ruta_destino, False
+
+def ejecutar_descarga_facturas_madd(usuario, password, carpeta_destino, fechas_objetivo, log):
+    Path(carpeta_destino).mkdir(parents=True, exist_ok=True)
+    resultado = {"facturas": [], "error": None, "paso_fallido": None}
+    ultimo_error = None
+    for intento in range(3):
+        resultado["paso_fallido"] = None
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=["--disable-gpu", "--disable-dev-shm-usage"])
+                try:
+                    context = browser.new_context(accept_downloads=True)
+                    page = context.new_page()
+                    try:
+                        _madd_login(page, usuario, password)
+                    except Exception:
+                        resultado["paso_fallido"] = "acceso/login"
+                        raise
+                    try:
+                        _madd_seleccionar_perfil(page)
+                    except Exception:
+                        resultado["paso_fallido"] = "cambio de perfil"
+                        raise
+                    try:
+                        coincidencias = _madd_listar_facturas_del_dia(page, fechas_objetivo, log)
+                    except Exception:
+                        resultado["paso_fallido"] = "listado de documentos"
+                        raise
+                    log(f"Encontradas {len(coincidencias)} factura(s) para la fecha objetivo.")
+                    facturas_descargadas = []
+                    for indice_fila, numero, fecha_factura in coincidencias:
+                        try:
+                            ruta, ya_existia = _madd_descargar_factura(page, indice_fila, numero, fecha_factura, carpeta_destino)
+                            facturas_descargadas.append(str(ruta))
+                            if ya_existia:
+                                log(f"Ya existía {ruta.name}, no se ha vuelto a descargar.", "success")
+                            else:
+                                log(f"✅ Descargada: {ruta.name}", "success")
+                        except Exception:
+                            resultado["paso_fallido"] = f"descarga de la factura {numero}"
+                            raise
+                    resultado["facturas"] = facturas_descargadas
+                    return resultado
+                finally:
+                    browser.close()
+        except Exception as e:
+            ultimo_error = e
+            log(f"⚠️ Intento {intento + 1}/3 fallido en '{resultado['paso_fallido']}': {e}", "error")
+            registrar_error_detallado(str(e), traceback.format_exc(), ref="facturas_madd")
+            if intento < 2:
+                time.sleep(5)
+    resultado["error"] = str(ultimo_error)
+    return resultado
+
+def enviar_correo_outlook_madd(outlook, destinatarios, asunto, cuerpo_texto, adjuntos=None):
+    """Crea y ENVÍA (Send, no Save) un correo desde Outlook de escritorio, respetando la firma por defecto."""
+    mail = outlook.CreateItem(0)  # olMailItem
+    mail.Subject = asunto
+    if destinatarios:
+        mail.To = destinatarios
+    mail.GetInspector  # fuerza a Outlook a cargar la firma por defecto de "mensaje nuevo"
+    firma_html = mail.HTMLBody or ""
+    cuerpo_html = cuerpo_texto.replace("\n", "<br>")
+    mail.HTMLBody = f"<div style=\"font-family:Calibri,Arial,sans-serif;font-size:11pt\">{cuerpo_html}</div><br>{firma_html}"
+    if adjuntos:
+        for ruta in adjuntos:
+            mail.Attachments.Add(str(ruta))
+    mail.Send()
+
+def _madd_enviar_correo_resultado(email_destino, fecha_objetivo, rutas_facturas, log):
+    fecha_str = fecha_objetivo.strftime("%Y-%m-%d")
+    asunto = f"Facturas Stellantis del {fecha_str}"
+    if rutas_facturas:
+        cuerpo = f"Adjunto las facturas del día {fecha_str}. Total: {len(rutas_facturas)} facturas."
+    else:
+        cuerpo = f"No hay facturas del día {fecha_str}"
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    try:
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        enviar_correo_outlook_madd(outlook, email_destino, asunto, cuerpo, adjuntos=rutas_facturas or None)
+        log(f"✅ Correo enviado a {email_destino} ({len(rutas_facturas)} factura(s) adjuntas).", "success")
+    finally:
+        pythoncom.CoUninitialize()
+
+def _madd_enviar_aviso_fallo(email_aviso, fecha_objetivo, resultado, log):
+    if not email_aviso:
+        log("No hay correo de aviso de fallo configurado; no se envía ningún aviso.", "error")
+        return
+    fecha_str = fecha_objetivo.strftime("%Y-%m-%d")
+    paso = resultado.get("paso_fallido") or "desconocido"
+    error = resultado.get("error") or "error desconocido"
+    asunto = f"[AVISO] Fallo en descarga de facturas Stellantis del {fecha_str}"
+    cuerpo = f"La descarga automática de facturas Stellantis del día {fecha_str} ha fallado tras 3 intentos.\n\nPaso que falló: {paso}\nError: {error}"
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    try:
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        enviar_correo_outlook_madd(outlook, email_aviso, asunto, cuerpo)
+        log(f"✅ Aviso de fallo enviado a {email_aviso}.", "error")
+    finally:
+        pythoncom.CoUninitialize()
+
+def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email_aviso_fallo, filtro_dia="Ayer", log_callback=None, finalizado_callback=None, resultado_callback=None):
+    global madd_running
+    madd_running = True
+    def log(texto, tag=None):
+        if log_callback: log_callback(f"[FACTURAS MADD] {texto}", tag)
+    log("Iniciando descarga de facturas Stellantis MADD...")
+    hoy = datetime.now().date()
+    fecha_objetivo = hoy if filtro_dia == "Hoy" else hoy - timedelta(days=1)
+    resultado = {"facturas": [], "error": None, "paso_fallido": None}
+    try:
+        resultado = ejecutar_descarga_facturas_madd(usuario, password, carpeta_destino, {fecha_objetivo}, log)
+        registrar_log_facturas_madd(fecha_objetivo, resultado)
+        if resultado.get("error"):
+            log(f"❌ Fallo tras 3 intentos en el paso '{resultado.get('paso_fallido')}': {resultado['error']}", "error")
+            _madd_enviar_aviso_fallo(email_aviso_fallo, fecha_objetivo, resultado, log)
+            return
+        _madd_enviar_correo_resultado(email_destino, fecha_objetivo, resultado["facturas"], log)
+        log(f"✨ Proceso completado: {len(resultado['facturas'])} factura(s) del {fecha_objetivo.isoformat()}.", "success")
+    except Exception as e:
+        resultado["error"] = str(e)
+        resultado["paso_fallido"] = resultado.get("paso_fallido") or "envío de correo"
+        log(f"❌ Error crítico: {e}", "error")
+        registrar_error_detallado(str(e), traceback.format_exc(), ref="tarea_facturas_madd")
+        registrar_log_facturas_madd(fecha_objetivo, resultado)
+        try:
+            _madd_enviar_aviso_fallo(email_aviso_fallo, fecha_objetivo, resultado, log)
+        except Exception as e2:
+            log(f"❌ No se pudo enviar el aviso de fallo: {e2}", "error")
+    finally:
+        madd_running = False
+        if resultado_callback: resultado_callback(resultado)
+        if finalizado_callback: finalizado_callback()
+
+def ejecutar_tarea_madd_standalone():
+    """Punto de entrada para la tarea programada de Windows (--tarea-madd), sin GUI."""
+    config = cargar_configuracion()
+    usuario = config.get("usuario_madd", "")
+    password = config.get("password_madd", "")
+    carpeta = config.get("ruta_carpeta_facturas_madd", "")
+    email_destino = config.get("email_facturas_madd", "")
+    email_aviso = config.get("email_aviso_fallo_madd", "")
+    filtro_dia = config.get("filtro_dia_facturas_madd", "Ayer")
+    if not usuario or not password or not carpeta or not email_destino:
+        registrar_error_detallado("Configuración incompleta para la tarea MADD (usuario/password/carpeta/email).", "", ref="madd_standalone")
+        return
+    tarea_facturas_madd(usuario, password, carpeta, email_destino, email_aviso, filtro_dia=filtro_dia, log_callback=None)
+
+# ---------------------------------------------------
 # 6. INTERFAZ GRÁFICA
 # ---------------------------------------------------
 
@@ -1046,6 +1294,7 @@ class AppIntegrada(ctk.CTk):
         self.tab_comparador = self.tabview.add("Comparador")
         self.tab_mopar = self.tabview.add("Fichero Mopar")
         self.tab_stock_fiat = self.tabview.add("Stock FIAT")
+        self.tab_madd = self.tabview.add("Facturas MADD")
         self.tab_reclamaciones_power_line = self.tabview.add("Reclamaciones")
         self.tab_config = self.tabview.add("Configuración")
         self.build_tab_auto(acc_color)
@@ -1053,6 +1302,7 @@ class AppIntegrada(ctk.CTk):
         self.build_tab_comparador(acc_color)
         self.build_tab_mopar(acc_color)
         self.build_tab_stock_fiat(acc_color)
+        self.build_tab_madd(acc_color)
         self.reclamaciones_power_line = ModuloReclamacionesPowerLine(self, self.config)
         self.reclamaciones_power_line.construir(self.tab_reclamaciones_power_line)
         self.build_tab_config(acc_color)
@@ -1207,6 +1457,54 @@ class AppIntegrada(ctk.CTk):
         self.crear_fila_archivo(card, "Carpeta destino", "folder_stock_fiat_entry", "ruta_folder_stock_fiat", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_stock_fiat_entry))
         self.btn_stock_fiat = self.crear_boton_principal(card, "Generar Stock FIAT", self.toggle_stock_fiat)
         self.btn_stock_fiat.pack(padx=24, pady=(4, 24), fill="x")
+
+    def build_tab_madd(self, acc_color):
+        contenedor = ctk.CTkScrollableFrame(self.tab_madd, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        card = self.crear_tarjeta_tab(contenedor, "Facturas Stellantis MADD", "Descarga diaria de facturas desde el portal MADD (www.madd.stellantis.com) y envía un correo con los PDF adjuntos.")
+        frame_creds_madd = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        frame_creds_madd.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(frame_creds_madd, text="Usuario MADD", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=0, column=0, padx=18, pady=12, sticky="w")
+        self.usuario_madd_entry = ctk.CTkEntry(frame_creds_madd, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.usuario_madd_entry.insert(0, self.config.get("usuario_madd", ""))
+        self.usuario_madd_entry.grid(row=0, column=1, padx=18, pady=12, sticky="ew")
+        ctk.CTkLabel(frame_creds_madd, text="Contraseña MADD", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=1, column=0, padx=18, pady=12, sticky="w")
+        self.password_madd_entry = ctk.CTkEntry(frame_creds_madd, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto, show="*")
+        self.password_madd_entry.insert(0, self.config.get("password_madd", ""))
+        self.password_madd_entry.grid(row=1, column=1, padx=18, pady=12, sticky="ew")
+        frame_creds_madd.grid_columnconfigure(1, weight=1)
+        self.crear_fila_archivo(card, "Carpeta de facturas", "carpeta_facturas_madd_entry", "ruta_carpeta_facturas_madd", "Carpeta donde guardar las facturas...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_facturas_madd_entry))
+        row_email = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        row_email.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(row_email, text="Correo diario de facturas", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(10, 2))
+        self.email_facturas_madd_entry = ctk.CTkEntry(row_email, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.email_facturas_madd_entry.insert(0, self.config.get("email_facturas_madd", ""))
+        self.email_facturas_madd_entry.pack(padx=16, pady=(0, 10), fill="x")
+        row_email_fallo = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        row_email_fallo.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(row_email_fallo, text="Correo de aviso si falla", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(10, 2))
+        self.email_aviso_fallo_madd_entry = ctk.CTkEntry(row_email_fallo, height=36, corner_radius=8, border_color=self.color_borde, fg_color="#ffffff", text_color=self.color_texto)
+        self.email_aviso_fallo_madd_entry.insert(0, self.config.get("email_aviso_fallo_madd", ""))
+        self.email_aviso_fallo_madd_entry.pack(padx=16, pady=(0, 10), fill="x")
+        row_filtro = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        row_filtro.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(row_filtro, text="Facturas de", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
+        self.filtro_dia_madd_option = ctk.CTkOptionMenu(row_filtro, values=["Ayer", "Hoy"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
+        self.filtro_dia_madd_option.set(self.config.get("filtro_dia_facturas_madd", "Ayer"))
+        self.filtro_dia_madd_option.pack(side="right", padx=14, pady=12)
+        self.btn_madd = self.crear_boton_principal(card, "Ejecutar ahora (prueba manual)", self.iniciar_facturas_madd)
+        self.btn_madd.pack(padx=24, pady=(4, 16), fill="x")
+        ctk.CTkLabel(card, text="Registro de la ejecución", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
+        self.madd_log_box = self.crear_caja_log(card, alto=140)
+        self.madd_log_box.pack(padx=24, pady=(0, 24), fill="x")
+
+        card_prog = self.crear_tarjeta_tab(contenedor, "Programación diaria", "Cuando compruebes que la ejecución manual funciona bien, activa la tarea de Windows para que corra sola todos los días laborables a las 08:00.")
+        fila_prog = ctk.CTkFrame(card_prog, fg_color="transparent")
+        fila_prog.pack(padx=24, pady=(0, 20), fill="x")
+        self.btn_activar_tarea_madd = ctk.CTkButton(fila_prog, text="Activar tarea programada (08:00 L-V)", height=40, corner_radius=8, fg_color=acc_color, hover_color=self.color_hover, command=self.activar_tarea_programada_madd)
+        self.btn_activar_tarea_madd.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.btn_desactivar_tarea_madd = ctk.CTkButton(fila_prog, text="Desactivar", height=40, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.desactivar_tarea_programada_madd)
+        self.btn_desactivar_tarea_madd.pack(side="right")
 
     def build_tab_config(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_config, fg_color="transparent")
@@ -1682,6 +1980,77 @@ class AppIntegrada(ctk.CTk):
         stop_event_stock_fiat.clear()
         threading.Thread(target=generar_fichero_stock_fiat_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_stock_fiat), stop_event_stock_fiat), daemon=True).start()
 
+    def log_callback_madd(self, texto, tag=None):
+        self.agregar_log(texto, tag)
+        self.agregar_a_caja(self.madd_log_box, texto, tag)
+
+    def iniciar_facturas_madd(self):
+        global madd_running
+        if madd_running:
+            return
+        self.guardar_configuracion_ui_internal()
+        usuario = self.widget_get("usuario_madd_entry")
+        password = self.widget_get("password_madd_entry")
+        carpeta = self.widget_get("carpeta_facturas_madd_entry")
+        email_destino = self.widget_get("email_facturas_madd_entry")
+        email_aviso = self.widget_get("email_aviso_fallo_madd_entry")
+        filtro_dia = self.widget_get("filtro_dia_madd_option", "Ayer")
+        if not usuario or not password:
+            messagebox.showwarning("Aviso", "Completa el usuario y la contraseña de MADD antes de continuar.")
+            return
+        if not self.validar_carpeta(carpeta, "Selecciona la carpeta donde guardar las facturas."):
+            return
+        if not email_destino:
+            messagebox.showwarning("Aviso", "Introduce el correo de destino de las facturas.")
+            return
+        if not messagebox.askyesno("Ejecutar prueba manual", "Esto iniciará sesión en MADD, descargará las facturas del día seleccionado y ENVIARÁ un correo real con los adjuntos (o el aviso de 'sin facturas'). ¿Continuar?"):
+            return
+        self.actualizar_estado("descargando facturas MADD")
+        self.btn_madd.configure(text="Ejecutando...", state="disabled")
+        self.limpiar_caja(self.madd_log_box)
+        threading.Thread(
+            target=tarea_facturas_madd,
+            args=(usuario, password, carpeta, email_destino, email_aviso),
+            kwargs={
+                "filtro_dia": filtro_dia,
+                "log_callback": lambda t, tag=None: self.after(0, self.log_callback_madd, t, tag),
+                "finalizado_callback": lambda: self.after(0, self.finalizar_facturas_madd),
+            },
+            daemon=True,
+        ).start()
+
+    def finalizar_facturas_madd(self):
+        acc_color = self.color_principal
+        self.actualizar_estado("descarga de facturas MADD finalizada", self.widget_get("carpeta_facturas_madd_entry"))
+        self.btn_madd.configure(text="Ejecutar ahora (prueba manual)", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+
+    def activar_tarea_programada_madd(self):
+        if not getattr(sys, "frozen", False):
+            messagebox.showwarning("Aviso", "La tarea programada solo se puede activar desde el .exe compilado (dist/), no ejecutando el código fuente con python.")
+            return
+        if not messagebox.askyesno("Activar tarea programada", "Esto crea una tarea en el Programador de tareas de Windows que ejecutará la descarga de facturas MADD todos los días laborables a las 08:00, aunque la app esté cerrada. ¿Confirmas que ya has probado la ejecución manual y ha funcionado bien?"):
+            return
+        ruta_exe = sys.executable
+        comando = f'schtasks /create /tn "PalausaFacturasMADD" /tr "\\"{ruta_exe}\\" --tarea-madd" /sc weekly /d MON,TUE,WED,THU,FRI /st 08:00 /f'
+        try:
+            resultado = subprocess.run(comando, shell=True, capture_output=True, text=True)
+            if resultado.returncode == 0:
+                messagebox.showinfo("Éxito", "Tarea programada activada: se ejecutará todos los días laborables a las 08:00.")
+            else:
+                messagebox.showerror("Error", f"No se pudo crear la tarea programada:\n{resultado.stderr or resultado.stdout}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo crear la tarea programada: {e}")
+
+    def desactivar_tarea_programada_madd(self):
+        try:
+            resultado = subprocess.run('schtasks /delete /tn "PalausaFacturasMADD" /f', shell=True, capture_output=True, text=True)
+            if resultado.returncode == 0:
+                messagebox.showinfo("Hecho", "Tarea programada desactivada.")
+            else:
+                messagebox.showinfo("Aviso", "No había ninguna tarea programada activa (o ya se había desactivado).")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo desactivar la tarea: {e}")
+
     def guardar_configuracion_ui_internal(self):
         config = {
             "usuario": self.widget_get("user_entry"),
@@ -1706,6 +2075,12 @@ class AppIntegrada(ctk.CTk):
             "ruta_folder_mopar": self.widget_get("folder_mopar_entry"),
             "ruta_excel_stock_fiat": self.widget_get("excel_stock_fiat_entry"),
             "ruta_folder_stock_fiat": self.widget_get("folder_stock_fiat_entry"),
+            "usuario_madd": self.widget_get("usuario_madd_entry"),
+            "password_madd": self.widget_get("password_madd_entry"),
+            "ruta_carpeta_facturas_madd": self.widget_get("carpeta_facturas_madd_entry"),
+            "email_facturas_madd": self.widget_get("email_facturas_madd_entry", ""),
+            "email_aviso_fallo_madd": self.widget_get("email_aviso_fallo_madd_entry", ""),
+            "filtro_dia_facturas_madd": self.widget_get("filtro_dia_madd_option", "Ayer"),
             "color_resaltado": self.widget_get("color_optionmenu", "Amarillo"),
             "modo_apariencia": self.widget_get("modo_option", self.config.get("modo_apariencia", "Dark")),
             "mopar_fecha": self.config.get("mopar_fecha"),
@@ -1729,5 +2104,8 @@ class AppIntegrada(ctk.CTk):
         self.btn_stock_fiat.configure(text="Generar Stock FIAT", fg_color=acc_color, hover_color=self.color_hover, state="normal")
 
 if __name__ == "__main__":
+    if "--tarea-madd" in sys.argv:
+        ejecutar_tarea_madd_standalone()
+        sys.exit(0)
     app = AppIntegrada()
     app.mainloop()
