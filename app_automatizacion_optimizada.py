@@ -872,7 +872,7 @@ def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, pr
 MADD_URL_DOCUMENTOS = "https://www.madd.stellantis.com/documents"
 MADD_PERFIL_TEXTO = "Piezas de recambio"
 LOG_FACTURAS_MADD = "log_facturas_madd.txt"
-MADD_PAGINAS_MAX = 3  # 100 docs/página -> hasta 300 documentos más recientes revisados
+MADD_PAGINAS_MAX = 10  # 100 docs/página -> hasta 1000 documentos más recientes revisados
 
 def registrar_log_facturas_madd(fecha_objetivo, resultado):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -908,54 +908,70 @@ def _madd_seleccionar_perfil(page):
     boton_confirmar.click()
     page.wait_for_selector("tr.border-bottom", timeout=20000)
 
-def _madd_listar_facturas_del_dia(page, fechas_objetivo, log):
+def _madd_procesar_facturas_del_dia(page, fechas_objetivo, carpeta_destino, log):
+    """Recorre las páginas de resultados, filtra solo por los títulos reales 'Factura ...' (ignora
+    cualquier otro elemento/fila duplicada del DOM) y descarga cada factura en el momento en que se
+    encuentra, para no depender de índices que quedarían obsoletos tras cambiar de página."""
     try:
         page.select_option('select[name="pageSize"]', label="100 elementos por página")
         page.wait_for_timeout(1000)
     except Exception:
         log("No se pudo ampliar el tamaño de página, se sigue con el valor por defecto.", "error")
-    coincidencias = []
+    patron = re.compile(r"Factura\s+(\S+)\s+(\d{2}/\d{2}/\d{4})")
+    facturas_descargadas = []
     for pagina in range(1, MADD_PAGINAS_MAX + 1):
-        filas = page.locator("tr.border-bottom")
-        total_filas = filas.count()
-        for i in range(total_filas):
-            fila = filas.nth(i)
+        titulos = page.locator("a").filter(has_text=re.compile(r"^Factura\s"))
+        total_titulos = titulos.count()
+        log(f"Página {pagina}/{MADD_PAGINAS_MAX}: {total_titulos} factura(s) en la página, revisando...")
+        coincidencias_pagina = 0
+        for i in range(total_titulos):
+            enlace = titulos.nth(i)
             try:
-                texto_titulo = fila.locator("a").first.inner_text(timeout=3000).strip()
+                texto_titulo = enlace.inner_text(timeout=3000).strip()
             except Exception:
                 continue
-            match = re.search(r"Factura\s+(\S+)\s+(\d{2}/\d{2}/\d{4})", texto_titulo)
+            match = patron.search(texto_titulo)
             if not match:
                 continue
             numero, fecha_str = match.group(1), match.group(2)
             dia, mes, anio = fecha_str.split("/")
             fecha_factura = datetime(int(anio), int(mes), int(dia)).date()
-            if fecha_factura in fechas_objetivo:
-                coincidencias.append((i, numero, fecha_factura))
+            if fecha_factura not in fechas_objetivo:
+                continue
+            coincidencias_pagina += 1
+            nombre_archivo = f"Factura_{numero}_{fecha_factura.isoformat()}.pdf"
+            ruta_destino = Path(carpeta_destino) / nombre_archivo
+            if ruta_destino.exists():
+                facturas_descargadas.append(str(ruta_destino))
+                log(f"Ya existía {nombre_archivo}, no se ha vuelto a descargar.", "success")
+                continue
+            try:
+                fila = enlace.locator("xpath=ancestor::tr[1]")
+                boton_descarga = fila.locator("td.text-center button").first
+                with page.expect_download(timeout=30000) as info_descarga:
+                    boton_descarga.click()
+                descarga = info_descarga.value
+                descarga.save_as(str(ruta_destino))
+                facturas_descargadas.append(str(ruta_destino))
+                log(f"✅ Descargada: {nombre_archivo}", "success")
+            except Exception as e:
+                log(f"❌ Error descargando {nombre_archivo}: {e}", "error")
+                raise
+        log(f"Página {pagina}/{MADD_PAGINAS_MAX} revisada. {coincidencias_pagina} coincidencia(s) en esta página.")
         if pagina >= MADD_PAGINAS_MAX:
             break
         boton_siguiente = page.locator('a[aria-label="Next"]')
         if boton_siguiente.count() == 0:
+            log("No hay botón 'Next', se detiene la paginación.")
             break
         li_padre = boton_siguiente.first.locator("xpath=..")
         if "disabled" in (li_padre.get_attribute("class") or ""):
+            log("Botón 'Next' deshabilitado (última página), se detiene la paginación.")
             break
+        log(f"Pasando a la página {pagina + 1}...")
         boton_siguiente.first.click()
         page.wait_for_timeout(1500)
-    return coincidencias
-
-def _madd_descargar_factura(page, indice_fila, numero, fecha_factura, carpeta_destino):
-    nombre_archivo = f"Factura_{numero}_{fecha_factura.isoformat()}.pdf"
-    ruta_destino = Path(carpeta_destino) / nombre_archivo
-    if ruta_destino.exists():
-        return ruta_destino, True
-    fila = page.locator("tr.border-bottom").nth(indice_fila)
-    boton_descarga = fila.locator("td.text-center button").first
-    with page.expect_download(timeout=30000) as info_descarga:
-        boton_descarga.click()
-    descarga = info_descarga.value
-    descarga.save_as(str(ruta_destino))
-    return ruta_destino, False
+    return facturas_descargadas
 
 def ejecutar_descarga_facturas_madd(usuario, password, carpeta_destino, fechas_objetivo, log):
     Path(carpeta_destino).mkdir(parents=True, exist_ok=True)
@@ -980,24 +996,10 @@ def ejecutar_descarga_facturas_madd(usuario, password, carpeta_destino, fechas_o
                         resultado["paso_fallido"] = "cambio de perfil"
                         raise
                     try:
-                        coincidencias = _madd_listar_facturas_del_dia(page, fechas_objetivo, log)
+                        resultado["facturas"] = _madd_procesar_facturas_del_dia(page, fechas_objetivo, carpeta_destino, log)
                     except Exception:
-                        resultado["paso_fallido"] = "listado de documentos"
+                        resultado["paso_fallido"] = resultado["paso_fallido"] or "listado/descarga de documentos"
                         raise
-                    log(f"Encontradas {len(coincidencias)} factura(s) para la fecha objetivo.")
-                    facturas_descargadas = []
-                    for indice_fila, numero, fecha_factura in coincidencias:
-                        try:
-                            ruta, ya_existia = _madd_descargar_factura(page, indice_fila, numero, fecha_factura, carpeta_destino)
-                            facturas_descargadas.append(str(ruta))
-                            if ya_existia:
-                                log(f"Ya existía {ruta.name}, no se ha vuelto a descargar.", "success")
-                            else:
-                                log(f"✅ Descargada: {ruta.name}", "success")
-                        except Exception:
-                            resultado["paso_fallido"] = f"descarga de la factura {numero}"
-                            raise
-                    resultado["facturas"] = facturas_descargadas
                     return resultado
                 finally:
                     browser.close()

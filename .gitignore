@@ -5,6 +5,7 @@ dist/
 *.db
 *.db-journal
 error_log_detallado.txt
+log_facturas_madd.txt
 errores_capturas/
 _docx_qa/
 config.json
