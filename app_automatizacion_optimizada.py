@@ -1507,10 +1507,10 @@ class AppIntegrada(ctk.CTk):
         self.madd_log_box = self.crear_caja_log(card, alto=140)
         self.madd_log_box.pack(padx=24, pady=(0, 24), fill="x")
 
-        card_prog = self.crear_tarjeta_tab(contenedor, "Programación diaria", "Cuando compruebes que la ejecución manual funciona bien, activa la tarea de Windows para que corra sola todos los días laborables a las 08:00.")
+        card_prog = self.crear_tarjeta_tab(contenedor, "Programación diaria", "Cuando compruebes que la ejecución manual funciona bien, activa la tarea de Windows para que corra sola todos los días laborables a las 07:00 (despierta el PC si está en suspensión).")
         fila_prog = ctk.CTkFrame(card_prog, fg_color="transparent")
         fila_prog.pack(padx=24, pady=(0, 20), fill="x")
-        self.btn_activar_tarea_madd = ctk.CTkButton(fila_prog, text="Activar tarea programada (08:00 L-V)", height=40, corner_radius=8, fg_color=acc_color, hover_color=self.color_hover, command=self.activar_tarea_programada_madd)
+        self.btn_activar_tarea_madd = ctk.CTkButton(fila_prog, text="Activar tarea programada (07:00 L-V)", height=40, corner_radius=8, fg_color=acc_color, hover_color=self.color_hover, command=self.activar_tarea_programada_madd)
         self.btn_activar_tarea_madd.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.btn_desactivar_tarea_madd = ctk.CTkButton(fila_prog, text="Desactivar", height=40, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.desactivar_tarea_programada_madd)
         self.btn_desactivar_tarea_madd.pack(side="right")
@@ -2037,14 +2037,25 @@ class AppIntegrada(ctk.CTk):
         if not getattr(sys, "frozen", False):
             messagebox.showwarning("Aviso", "La tarea programada solo se puede activar desde el .exe compilado (dist/), no ejecutando el código fuente con python.")
             return
-        if not messagebox.askyesno("Activar tarea programada", "Esto crea una tarea en el Programador de tareas de Windows que ejecutará la descarga de facturas MADD todos los días laborables a las 08:00, aunque la app esté cerrada. ¿Confirmas que ya has probado la ejecución manual y ha funcionado bien?"):
+        if not messagebox.askyesno("Activar tarea programada", "Esto crea una tarea en el Programador de tareas de Windows que ejecutará la descarga de facturas MADD todos los días laborables a las 07:00, despertando el PC de la suspensión si hace falta (no de un apagado completo). ¿Confirmas que ya has probado la ejecución manual y ha funcionado bien?"):
             return
         ruta_exe = sys.executable
-        comando = f'schtasks /create /tn "PalausaFacturasMADD" /tr "\\"{ruta_exe}\\" --tarea-madd" /sc weekly /d MON,TUE,WED,THU,FRI /st 08:00 /f'
+        ps_script = (
+            f"$accion = New-ScheduledTaskAction -Execute '{ruta_exe}' -Argument '--tarea-madd'; "
+            "$disparador = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 07:00; "
+            "$config = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable; "
+            "Register-ScheduledTask -TaskName 'PalausaFacturasMADD' -Action $accion -Trigger $disparador -Settings $config -Force"
+        )
         try:
-            resultado = subprocess.run(comando, shell=True, capture_output=True, text=True)
+            resultado = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script], capture_output=True, text=True)
             if resultado.returncode == 0:
-                messagebox.showinfo("Éxito", "Tarea programada activada: se ejecutará todos los días laborables a las 08:00.")
+                messagebox.showinfo(
+                    "Éxito",
+                    "Tarea programada activada: se ejecutará todos los días laborables a las 07:00, despertando el PC si está en suspensión (no si está apagado del todo).\n\n"
+                    "Importante: comprueba también que en Windows está activado \"Permitir temporizadores de reactivación\" para tu plan de energía "
+                    "(Panel de control > Opciones de energía > Cambiar configuración avanzada > Suspender > Permitir temporizadores de reactivación). "
+                    "Sin eso, algunos equipos ignoran la reactivación aunque la tarea esté bien configurada. Te recomiendo probarlo una noche antes de confiar en ello del todo."
+                )
             else:
                 messagebox.showerror("Error", f"No se pudo crear la tarea programada:\n{resultado.stderr or resultado.stdout}")
         except Exception as e:
@@ -2052,7 +2063,7 @@ class AppIntegrada(ctk.CTk):
 
     def desactivar_tarea_programada_madd(self):
         try:
-            resultado = subprocess.run('schtasks /delete /tn "PalausaFacturasMADD" /f', shell=True, capture_output=True, text=True)
+            resultado = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Unregister-ScheduledTask -TaskName 'PalausaFacturasMADD' -Confirm:$false"], capture_output=True, text=True)
             if resultado.returncode == 0:
                 messagebox.showinfo("Hecho", "Tarea programada desactivada.")
             else:
