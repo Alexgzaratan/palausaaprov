@@ -670,6 +670,33 @@ def extraer_no_suministradas(ruta_hoja, log=lambda *a, **k: None):
     wb.close()
     return agrupado
 
+def extraer_sustituciones(ruta_hoja, log=lambda *a, **k: None):
+    """Recorre todas las pestañas de la hoja de pedido y agrupa por cliente DMS las referencias con la casilla SUSTITUCIÓN rellena
+    (y que no estén marcadas como NO SUMINISTRA). Cada entrada es (referencia_original, referencia_sustituta)."""
+    wb = openpyxl.load_workbook(ruta_hoja, data_only=True)
+    agrupado = {}
+    for ws in wb.worksheets:
+        pedido = ws.cell(row=2, column=5).value
+        encontradas = 0
+        for fila in range(5, ws.max_row + 1):
+            referencia = ws.cell(row=fila, column=2).value
+            estado = ws.cell(row=fila, column=5).value
+            sustitucion = ws.cell(row=fila, column=6).value
+            cliente = ws.cell(row=fila, column=8).value
+            if not referencia or sustitucion in (None, ""):
+                continue
+            if "NO SUMINISTRA" in _normalizar_texto_estado(estado):
+                continue
+            cliente_norm = _normalizar_cliente_dms(cliente)
+            if not cliente_norm:
+                continue
+            agrupado.setdefault(cliente_norm, []).append((str(referencia).strip(), str(sustitucion).strip()))
+            encontradas += 1
+        if encontradas:
+            log(f"Pestaña '{ws.title}' (pedido {pedido}): {encontradas} referencia(s) sustituida(s).")
+    wb.close()
+    return agrupado
+
 def construir_cuerpo_aviso(referencias, fecha_str):
     if len(referencias) == 1:
         return (
@@ -681,6 +708,22 @@ def construir_cuerpo_aviso(referencias, fecha_str):
     return (
         "Buenas tardes.\n\n"
         f"Las siguientes referencias correspondientes al pedido del día {fecha_str} no suministran:\n\n"
+        f"{lineas}\n\n"
+        "Gracias por su atención,"
+    )
+
+def construir_cuerpo_sustitucion(sustituciones, fecha_str):
+    if len(sustituciones) == 1:
+        original, final = sustituciones[0]
+        return (
+            "Buenas tardes.\n\n"
+            f"La referencia {original} correspondiente al pedido del día {fecha_str} ha sido sustituida por la referencia {final}.\n\n"
+            "Gracias por su atención,"
+        )
+    lineas = "\n".join(f"- {original} → {final}" for original, final in sustituciones)
+    return (
+        "Buenas tardes.\n\n"
+        f"Las siguientes referencias correspondientes al pedido del día {fecha_str} han sido sustituidas:\n\n"
         f"{lineas}\n\n"
         "Gracias por su atención,"
     )
@@ -698,13 +741,29 @@ def crear_borrador_outlook(outlook, destinatarios, asunto, cuerpo_texto):
     mail.HTMLBody = f"<div style=\"font-family:Calibri,Arial,sans-serif;font-size:11pt\">{cuerpo_html}</div><br>{firma_html}"
     mail.Save()
 
-def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, log_callback=None, progreso_callback=None, finalizado_callback=None, resultado_callback=None):
+def enviar_correo_outlook_aviso(outlook, destinatarios, asunto, cuerpo_texto):
+    """Igual que crear_borrador_outlook pero envía el correo directamente (olMailItem.Send)."""
+    mail = outlook.CreateItem(0)  # olMailItem
+    mail.Subject = asunto
+    if destinatarios:
+        mail.To = destinatarios
+    mail.GetInspector  # fuerza a Outlook a cargar la firma por defecto de "mensaje nuevo"
+    firma_html = mail.HTMLBody or ""
+    cuerpo_html = cuerpo_texto.replace("\n", "<br>")
+    mail.HTMLBody = f"<div style=\"font-family:Calibri,Arial,sans-serif;font-size:11pt\">{cuerpo_html}</div><br>{firma_html}"
+    mail.Send()
+
+def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automaticamente=False, log_callback=None, progreso_callback=None, finalizado_callback=None, resultado_callback=None):
     global avisos_running
     avisos_running = True
     def log(texto, tag=None):
         if log_callback: log_callback(f"[AVISOS] {texto}", tag)
-    log("Analizando la hoja de pedido en busca de referencias que no suministran...")
-    resultado = {"generados": [], "sin_correo": [], "error": None}
+    log("Analizando la hoja de pedido en busca de referencias que no suministran o han sido sustituidas...")
+    resultado = {
+        "no_suministra": {"enviados": [], "borradores": [], "sin_correo": []},
+        "sustitucion": {"enviados": [], "borradores": [], "sin_correo": []},
+        "error": None,
+    }
     try:
         match = re.search(r"\d{2}-\d{2}-\d{4}", Path(ruta_hoja).stem)
         fecha_str = match.group(0) if match else Path(ruta_hoja).stem
@@ -716,14 +775,15 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, log_callback=Non
             resultado["error"] = str(e)
             return
         try:
-            agrupado = extraer_no_suministradas(ruta_hoja, log)
+            agrupado_no_suministra = extraer_no_suministradas(ruta_hoja, log)
+            agrupado_sustituciones = extraer_sustituciones(ruta_hoja, log)
         except Exception as e:
             log(f"❌ No se pudo leer la hoja de pedido: {e}", "error")
             registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_hoja")
             resultado["error"] = str(e)
             return
-        if not agrupado:
-            log("No se han encontrado referencias con estado NO SUMINISTRA.", "success")
+        if not agrupado_no_suministra and not agrupado_sustituciones:
+            log("No se han encontrado referencias con estado NO SUMINISTRA ni sustituciones.", "success")
             return
         import pythoncom
         import win32com.client
@@ -736,32 +796,64 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, log_callback=Non
                 registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_outlook")
                 resultado["error"] = str(e)
                 return
-            total = len(agrupado)
+            total = len(agrupado_no_suministra) + len(agrupado_sustituciones)
             hecho = 0
-            for cliente_num, referencias in agrupado.items():
+
+            def procesar_cliente(cliente_num, email, nombre, asunto, cuerpo, detalle, bucket, tipo_label, ref_sufijo):
+                nonlocal hecho
+                enviar_directo = enviar_automaticamente and bool(email)
+                try:
+                    if enviar_directo:
+                        enviar_correo_outlook_aviso(outlook, email, asunto, cuerpo)
+                    else:
+                        crear_borrador_outlook(outlook, email, asunto, cuerpo)
+                except Exception as e:
+                    accion = "enviando el correo" if enviar_directo else "creando el borrador"
+                    log(f"❌ Error {accion} ({tipo_label}) para el cliente {cliente_num}: {e}", "error")
+                    registrar_error_detallado(str(e), traceback.format_exc(), ref=f"generar_avisos_no_suministro_task_{ref_sufijo}_{cliente_num}")
+                    hecho += 1
+                    if progreso_callback: progreso_callback(hecho / total)
+                    return
+                entrada = {"cliente": cliente_num, "nombre": nombre, "email": email, "detalle": detalle}
+                if enviar_directo:
+                    bucket["enviados"].append(entrada)
+                    log(f"✅ Correo enviado ({tipo_label}) a {nombre or cliente_num} ({len(detalle)} ref.)", "success")
+                elif email:
+                    bucket["borradores"].append(entrada)
+                    log(f"✅ Borrador creado ({tipo_label}) para {nombre or cliente_num} ({len(detalle)} ref.)", "success")
+                else:
+                    bucket["sin_correo"].append(entrada)
+                    log(f"⚠️ Cliente {cliente_num} sin email en el Excel de clientes ({tipo_label}); borrador creado sin destinatario.", "error")
+                hecho += 1
+                if progreso_callback: progreso_callback(hecho / total)
+
+            for cliente_num, referencias in agrupado_no_suministra.items():
                 info = clientes.get(cliente_num)
                 nombre = info["nombre"] if info else ""
                 email = info["email"] if info else ""
                 asunto = f"Aviso referencia no suministrada {fecha_str}"
                 cuerpo = construir_cuerpo_aviso(referencias, fecha_str)
-                try:
-                    crear_borrador_outlook(outlook, email, asunto, cuerpo)
-                except Exception as e:
-                    log(f"❌ Error creando el borrador para el cliente {cliente_num}: {e}", "error")
-                    registrar_error_detallado(str(e), traceback.format_exc(), ref=f"generar_avisos_no_suministro_task_{cliente_num}")
-                    hecho += 1
-                    if progreso_callback: progreso_callback(hecho / total)
-                    continue
-                entrada = {"cliente": cliente_num, "nombre": nombre, "email": email, "referencias": referencias}
-                if email:
-                    resultado["generados"].append(entrada)
-                    log(f"✅ Borrador creado para {nombre or cliente_num} ({len(referencias)} ref.)", "success")
-                else:
-                    resultado["sin_correo"].append(entrada)
-                    log(f"⚠️ Cliente {cliente_num} sin email en el Excel de clientes; borrador creado sin destinatario.", "error")
-                hecho += 1
-                if progreso_callback: progreso_callback(hecho / total)
-            log(f"✨ Proceso completado: {len(resultado['generados'])} borrador(es) con destinatario, {len(resultado['sin_correo'])} sin email.", "success")
+                procesar_cliente(cliente_num, email, nombre, asunto, cuerpo, referencias, resultado["no_suministra"], "no suministra", "nosum")
+
+            for cliente_num, sustituciones in agrupado_sustituciones.items():
+                info = clientes.get(cliente_num)
+                nombre = info["nombre"] if info else ""
+                email = info["email"] if info else ""
+                asunto = f"Aviso referencia sustituida {fecha_str}"
+                cuerpo = construir_cuerpo_sustitucion(sustituciones, fecha_str)
+                detalle = [f"{original} → {final}" for original, final in sustituciones]
+                procesar_cliente(cliente_num, email, nombre, asunto, cuerpo, detalle, resultado["sustitucion"], "sustitución", "sust")
+
+            for etiqueta, bucket in (("no suministra", resultado["no_suministra"]), ("sustitución", resultado["sustitucion"])):
+                partes = []
+                if bucket["enviados"]:
+                    partes.append(f"{len(bucket['enviados'])} correo(s) enviado(s)")
+                if bucket["borradores"]:
+                    partes.append(f"{len(bucket['borradores'])} borrador(es) con destinatario")
+                if bucket["sin_correo"]:
+                    partes.append(f"{len(bucket['sin_correo'])} sin email (borrador sin destinatario)")
+                if partes:
+                    log(f"✨ {etiqueta}: {', '.join(partes)}.", "success")
         finally:
             pythoncom.CoUninitialize()
     except Exception as e:
@@ -1441,9 +1533,11 @@ class AppIntegrada(ctk.CTk):
         self.btn_hoja_pedidos = self.crear_boton_principal(card_hoja, "Generar hoja de hoy", self.iniciar_hoja_pedidos)
         self.btn_hoja_pedidos.pack(padx=24, pady=(4, 24), fill="x")
 
-        card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro", "Lee la hoja de pedido ya rellenada y crea un borrador en Outlook por cliente con las referencias en NO SUMINISTRA. Nunca se envían solos.")
+        card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.")
         self.crear_fila_archivo(card_avisos, "Hoja de pedido a procesar", "hoja_avisos_entry", "ruta_hoja_avisos", "Hoja dd-mm-aaaa.xlsx ya rellenada...", "Examinar", lambda: self.seleccionar_archivo(self.hoja_avisos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_avisos, "Excel de clientes", "clientes_avisos_entry", "ruta_excel_clientes", "clientes.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.clientes_avisos_entry, [("Excel files", "*.xlsx")]))
+        self.avisos_auto_var = ctk.BooleanVar(value=self.config.get("avisos_envio_automatico", True))
+        ctk.CTkCheckBox(card_avisos, text="Enviar automáticamente si el cliente tiene email (si no, se guarda como borrador)", variable=self.avisos_auto_var, fg_color=self.color_principal, hover_color=self.color_hover, text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 16))
         self.btn_avisos = self.crear_boton_principal(card_avisos, "Generar avisos de no suministro", self.iniciar_avisos_no_suministro)
         self.btn_avisos.pack(padx=24, pady=(4, 16), fill="x")
         ctk.CTkLabel(card_avisos, text="Registro de avisos", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
@@ -1867,7 +1961,12 @@ class AppIntegrada(ctk.CTk):
             return
         if not self.validar_archivo(ruta_clientes, "Selecciona el Excel de clientes (clientes.xlsx)."):
             return
-        if not messagebox.askyesno("Generar avisos", "Se creará un borrador en Outlook por cada cliente con referencias en NO SUMINISTRA. Se guardan en Borradores sin enviarse. ¿Continuar?"):
+        envio_automatico = self.avisos_auto_var.get()
+        if envio_automatico:
+            mensaje = "Se generará un aviso por cada cliente con referencias en NO SUMINISTRA y otro por cada cliente con referencias SUSTITUIDAS. Los que tengan email registrado en el Excel de clientes se ENVIARÁN automáticamente; los que no tengan email se guardarán como borrador para completarlos a mano. ¿Continuar?"
+        else:
+            mensaje = "Se creará un borrador en Outlook por cada cliente con referencias en NO SUMINISTRA y otro por cada cliente con referencias SUSTITUIDAS. Se guardan en Borradores sin enviarse. ¿Continuar?"
+        if not messagebox.askyesno("Generar avisos", mensaje):
             return
         self.actualizar_estado("generando avisos de no suministro")
         self.btn_avisos.configure(text="Generando...", state="disabled")
@@ -1876,6 +1975,7 @@ class AppIntegrada(ctk.CTk):
             target=generar_avisos_no_suministro_task,
             args=(ruta_hoja, ruta_clientes),
             kwargs={
+                "enviar_automaticamente": envio_automatico,
                 "log_callback": lambda t, tag=None: self.after(0, self.log_callback_avisos, t, tag),
                 "progreso_callback": lambda v: self.after(0, self.actualizar_progreso, v),
                 "finalizado_callback": lambda: self.after(0, self.finalizar_avisos_no_suministro),
@@ -1892,18 +1992,37 @@ class AppIntegrada(ctk.CTk):
     def mostrar_resultado_avisos(self, resultado):
         if resultado.get("error"):
             return
-        generados = resultado.get("generados", [])
-        sin_correo = resultado.get("sin_correo", [])
-        if not generados and not sin_correo:
+        no_suministra = resultado.get("no_suministra", {})
+        sustitucion = resultado.get("sustitucion", {})
+        if not any(no_suministra.get(k) for k in ("enviados", "borradores", "sin_correo")) and \
+           not any(sustitucion.get(k) for k in ("enviados", "borradores", "sin_correo")):
             return
-        lineas = [f"Borradores generados: {len(generados)}"]
-        for entrada in generados:
-            lineas.append(f"  • {entrada['nombre'] or entrada['cliente']} ({entrada['cliente']}): {', '.join(entrada['referencias'])}")
-        if sin_correo:
-            lineas.append("")
-            lineas.append(f"Sin email en el Excel de clientes ({len(sin_correo)}), borrador creado sin destinatario:")
-            for entrada in sin_correo:
-                lineas.append(f"  • Cliente {entrada['cliente']}: {', '.join(entrada['referencias'])}")
+        lineas = []
+
+        def volcar_bloque(titulo, bucket):
+            enviados = bucket.get("enviados", [])
+            borradores = bucket.get("borradores", [])
+            sin_correo = bucket.get("sin_correo", [])
+            if not enviados and not borradores and not sin_correo:
+                return
+            if lineas:
+                lineas.append("")
+            lineas.append(f"== {titulo} ==")
+            if enviados:
+                lineas.append(f"Correos enviados: {len(enviados)}")
+                for entrada in enviados:
+                    lineas.append(f"  • {entrada['nombre'] or entrada['cliente']} ({entrada['cliente']}): {', '.join(entrada['detalle'])}")
+            if borradores:
+                lineas.append(f"Borradores generados: {len(borradores)}")
+                for entrada in borradores:
+                    lineas.append(f"  • {entrada['nombre'] or entrada['cliente']} ({entrada['cliente']}): {', '.join(entrada['detalle'])}")
+            if sin_correo:
+                lineas.append(f"Sin email en el Excel de clientes ({len(sin_correo)}), borrador creado sin destinatario:")
+                for entrada in sin_correo:
+                    lineas.append(f"  • Cliente {entrada['cliente']}: {', '.join(entrada['detalle'])}")
+
+        volcar_bloque("No suministra", no_suministra)
+        volcar_bloque("Sustituidas", sustitucion)
         messagebox.showinfo("Avisos de no suministro", "\n".join(lineas))
 
     def toggle_comparador(self):
@@ -2131,6 +2250,7 @@ class AppIntegrada(ctk.CTk):
             "ruta_carpeta_hojas": self.widget_get("carpeta_hojas_entry"),
             "ruta_hoja_avisos": self.widget_get("hoja_avisos_entry"),
             "ruta_excel_clientes": self.widget_get("clientes_avisos_entry"),
+            "avisos_envio_automatico": bool(self.avisos_auto_var.get()) if hasattr(self, "avisos_auto_var") else self.config.get("avisos_envio_automatico", True),
             "precio_min": self.widget_get("precio_entry", "0"),
             "ruta_excel_antiguo": self.widget_get("excel_old_entry"),
             "ruta_excel_nuevo": self.widget_get("excel_new_entry"),
