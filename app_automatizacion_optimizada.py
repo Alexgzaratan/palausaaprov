@@ -2207,8 +2207,9 @@ class AppIntegrada(ctk.CTk):
         if not messagebox.askyesno("Activar tarea programada", "Esto crea una tarea en el Programador de tareas de Windows que ejecutará la descarga de facturas MADD todos los días laborables a las 07:00, despertando el PC de la suspensión si hace falta (no de un apagado completo). ¿Confirmas que ya has probado la ejecución manual y ha funcionado bien?"):
             return
         ruta_exe = sys.executable
+        carpeta_exe = os.path.dirname(ruta_exe)
         ps_script = (
-            f"$accion = New-ScheduledTaskAction -Execute '{ruta_exe}' -Argument '--tarea-madd'; "
+            f"$accion = New-ScheduledTaskAction -Execute '{ruta_exe}' -Argument '--tarea-madd' -WorkingDirectory '{carpeta_exe}'; "
             "$disparador = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 07:00; "
             "$config = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable; "
             "Register-ScheduledTask -TaskName 'PalausaFacturasMADD' -Action $accion -Trigger $disparador -Settings $config -Force"
