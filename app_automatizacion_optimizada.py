@@ -753,7 +753,7 @@ def enviar_correo_outlook_aviso(outlook, destinatarios, asunto, cuerpo_texto):
     mail.HTMLBody = f"<div style=\"font-family:Calibri,Arial,sans-serif;font-size:11pt\">{cuerpo_html}</div><br>{firma_html}"
     mail.Send()
 
-def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automaticamente=False, log_callback=None, progreso_callback=None, finalizado_callback=None, resultado_callback=None):
+def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automaticamente=False, emails_companeros="", log_callback=None, progreso_callback=None, finalizado_callback=None, resultado_callback=None):
     global avisos_running
     avisos_running = True
     def log(texto, tag=None):
@@ -762,6 +762,7 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
     resultado = {
         "no_suministra": {"enviados": [], "borradores": [], "sin_correo": []},
         "sustitucion": {"enviados": [], "borradores": [], "sin_correo": []},
+        "hoja_companeros_enviada": False,
         "error": None,
     }
     try:
@@ -782,9 +783,6 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
             registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_hoja")
             resultado["error"] = str(e)
             return
-        if not agrupado_no_suministra and not agrupado_sustituciones:
-            log("No se han encontrado referencias con estado NO SUMINISTRA ni sustituciones.", "success")
-            return
         import pythoncom
         import win32com.client
         pythoncom.CoInitialize()
@@ -795,6 +793,18 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
                 log(f"❌ No se pudo conectar con Outlook: {e}", "error")
                 registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_outlook")
                 resultado["error"] = str(e)
+                return
+            if emails_companeros:
+                try:
+                    cuerpo_companeros = "Buenas tardes.\n\nAdjunto hoja de pedido.\n\n"
+                    enviar_correo_outlook_madd(outlook, emails_companeros, f"Hoja de pedido del día {fecha_str}", cuerpo_companeros, adjuntos=[ruta_hoja])
+                    resultado["hoja_companeros_enviada"] = True
+                    log("✅ Hoja de pedido enviada a los compañeros.", "success")
+                except Exception as e:
+                    log(f"❌ Error enviando la hoja de pedido a los compañeros: {e}", "error")
+                    registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_companeros")
+            if not agrupado_no_suministra and not agrupado_sustituciones:
+                log("No se han encontrado referencias con estado NO SUMINISTRA ni sustituciones.", "success")
                 return
             total = len(agrupado_no_suministra) + len(agrupado_sustituciones)
             hecho = 0
@@ -1536,6 +1546,12 @@ class AppIntegrada(ctk.CTk):
         card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.")
         self.crear_fila_archivo(card_avisos, "Hoja de pedido a procesar", "hoja_avisos_entry", "ruta_hoja_avisos", "Hoja dd-mm-aaaa.xlsx ya rellenada...", "Examinar", lambda: self.seleccionar_archivo(self.hoja_avisos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_avisos, "Excel de clientes", "clientes_avisos_entry", "ruta_excel_clientes", "clientes.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.clientes_avisos_entry, [("Excel files", "*.xlsx")]))
+        row_companeros = ctk.CTkFrame(card_avisos, fg_color=self.color_superficie_alt, corner_radius=10)
+        row_companeros.pack(padx=24, pady=(0, 16), fill="x")
+        ctk.CTkLabel(row_companeros, text="Correo(s) de compañeros (se les envía la hoja de pedido completa)", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(10, 2))
+        self.email_companeros_avisos_entry = ctk.CTkEntry(row_companeros, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto, placeholder_text="correo1@palausa.es; correo2@palausa.es")
+        self.email_companeros_avisos_entry.insert(0, self.config.get("email_companeros_avisos", ""))
+        self.email_companeros_avisos_entry.pack(padx=16, pady=(0, 10), fill="x")
         self.avisos_auto_var = ctk.BooleanVar(value=self.config.get("avisos_envio_automatico", True))
         ctk.CTkCheckBox(card_avisos, text="Enviar automáticamente si el cliente tiene email (si no, se guarda como borrador)", variable=self.avisos_auto_var, fg_color=self.color_principal, hover_color=self.color_hover, text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 16))
         self.btn_avisos = self.crear_boton_principal(card_avisos, "Generar avisos de no suministro", self.iniciar_avisos_no_suministro)
@@ -1962,10 +1978,14 @@ class AppIntegrada(ctk.CTk):
         if not self.validar_archivo(ruta_clientes, "Selecciona el Excel de clientes (clientes.xlsx)."):
             return
         envio_automatico = self.avisos_auto_var.get()
+        emails_companeros = self.widget_get("email_companeros_avisos_entry")
         if envio_automatico:
-            mensaje = "Se generará un aviso por cada cliente con referencias en NO SUMINISTRA y otro por cada cliente con referencias SUSTITUIDAS. Los que tengan email registrado en el Excel de clientes se ENVIARÁN automáticamente; los que no tengan email se guardarán como borrador para completarlos a mano. ¿Continuar?"
+            mensaje = "Se generará un aviso por cada cliente con referencias en NO SUMINISTRA y otro por cada cliente con referencias SUSTITUIDAS. Los que tengan email registrado en el Excel de clientes se ENVIARÁN automáticamente; los que no tengan email se guardarán como borrador para completarlos a mano."
         else:
-            mensaje = "Se creará un borrador en Outlook por cada cliente con referencias en NO SUMINISTRA y otro por cada cliente con referencias SUSTITUIDAS. Se guardan en Borradores sin enviarse. ¿Continuar?"
+            mensaje = "Se creará un borrador en Outlook por cada cliente con referencias en NO SUMINISTRA y otro por cada cliente con referencias SUSTITUIDAS. Se guardan en Borradores sin enviarse."
+        if emails_companeros:
+            mensaje += f"\n\nAdemás se enviará la hoja de pedido completa a: {emails_companeros}."
+        mensaje += "\n\n¿Continuar?"
         if not messagebox.askyesno("Generar avisos", mensaje):
             return
         self.actualizar_estado("generando avisos de no suministro")
@@ -1976,6 +1996,7 @@ class AppIntegrada(ctk.CTk):
             args=(ruta_hoja, ruta_clientes),
             kwargs={
                 "enviar_automaticamente": envio_automatico,
+                "emails_companeros": emails_companeros,
                 "log_callback": lambda t, tag=None: self.after(0, self.log_callback_avisos, t, tag),
                 "progreso_callback": lambda v: self.after(0, self.actualizar_progreso, v),
                 "finalizado_callback": lambda: self.after(0, self.finalizar_avisos_no_suministro),
@@ -2251,6 +2272,7 @@ class AppIntegrada(ctk.CTk):
             "ruta_carpeta_hojas": self.widget_get("carpeta_hojas_entry"),
             "ruta_hoja_avisos": self.widget_get("hoja_avisos_entry"),
             "ruta_excel_clientes": self.widget_get("clientes_avisos_entry"),
+            "email_companeros_avisos": self.widget_get("email_companeros_avisos_entry"),
             "avisos_envio_automatico": bool(self.avisos_auto_var.get()) if hasattr(self, "avisos_auto_var") else self.config.get("avisos_envio_automatico", True),
             "precio_min": self.widget_get("precio_entry", "0"),
             "ruta_excel_antiguo": self.widget_get("excel_old_entry"),
