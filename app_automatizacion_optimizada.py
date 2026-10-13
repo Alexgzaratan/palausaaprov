@@ -64,6 +64,7 @@ hoja_pedidos_running = False
 avisos_running = False
 madd_running = False
 auto_completada_ok = False
+auto_resultado = "error"  # "completa", "incompleta", "detenida" o "error"
 stop_event_auto = threading.Event()
 stop_event_pedidos = threading.Event()
 stop_event_comparador = threading.Event()
@@ -476,9 +477,10 @@ def repartir_filas(filas, num_hilos):
     return [filas[i::hilos] for i in range(hilos)]
 
 def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, num_hilos, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None):
-    global automation_running, auto_completada_ok
+    global automation_running, auto_completada_ok, auto_resultado
     automation_running = True
     auto_completada_ok = False
+    auto_resultado = "error"
     cierre_notificado = False
     if stop_event:
         stop_event.clear()
@@ -499,6 +501,7 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
         total_tareas = len(filas)
         if total_tareas == 0:
             auto_completada_ok = True
+            auto_resultado = "completa"
             log_callback(f"Ninguna referencia alcanza el precio mínimo ({precio_minimo:g} EUR): no hay nada que consultar.", "success")
             return
 
@@ -527,11 +530,14 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
             for i, chunk in enumerate(chunks):
                 executor.submit(worker_playwright, i + 1, chunk, ruta_excel, usuario, password, log_callback, update_progress, stop_event)
         if stop_event.is_set():
+            auto_resultado = "detenida"
             return
         if procesadas >= total_tareas:
             auto_completada_ok = True
+            auto_resultado = "completa"
             log_callback("Automatizacion MULTI-HILO completada con exito.", "success")
         else:
+            auto_resultado = "incompleta"
             log_callback(f"Automatización terminada con incidencias: se han procesado {procesadas} de {total_tareas} referencias (revisa los errores del registro).", "error")
     except Exception as e:
         log_callback(f"Error general: {e}", "error")
@@ -2006,9 +2012,10 @@ class AppIntegrada(ctk.CTk):
         try:
             self.guardar_configuracion_ui_internal()
             ruta = self.widget_get("excel_auto_entry")
-            user = self.widget_get("user_entry")
-            pwd = self.widget_get("pass_entry")
-            hilos = int(self.widget_get("hilos_option", "3"))
+            # Usuario, contraseña e hilos viven en la pestaña Configuración, que puede no estar construida todavía
+            user = self.valor_widget_o_config("user_entry", "usuario", "")
+            pwd = self.valor_widget_o_config("pass_entry", "password", "")
+            hilos = int(self.valor_widget_o_config("hilos_option", "num_hilos", "3"))
             precio = float(self.widget_get("precio_entry", "0"))
         except Exception as e:
             registrar_error_detallado(str(e), traceback.format_exc())
@@ -2037,7 +2044,7 @@ class AppIntegrada(ctk.CTk):
             finally:
                 automation_running = False
             if al_terminar:
-                self.after(0, al_terminar, auto_completada_ok and not stop_event_auto.is_set())
+                self.after(0, al_terminar, "detenida" if stop_event_auto.is_set() else auto_resultado)
 
         threading.Thread(target=correr, daemon=True).start()
         return True
@@ -2071,9 +2078,16 @@ class AppIntegrada(ctk.CTk):
         if not self.iniciar_auto(al_terminar=self.continuar_flujo_tras_auto):
             self.btn_flujo.configure(state="normal")
 
-    def continuar_flujo_tras_auto(self, correcto):
-        if not correcto:
-            self.log_callback_rotacion("Flujo completo detenido: la automatización no terminó correctamente, no se lanza la rotación.", "error")
+    def continuar_flujo_tras_auto(self, estado):
+        if estado == "incompleta":
+            if not messagebox.askyesno("Flujo completo", "La automatización terminó con incidencias: no se han consultado todas las referencias (revisa el registro de la automatización).\n\n¿Quieres lanzar igualmente el filtro de rotación?"):
+                self.log_callback_rotacion("Flujo completo detenido por decisión del usuario tras una automatización con incidencias.", "error")
+                self.btn_flujo.configure(state="normal")
+                return
+        elif estado != "completa":
+            motivo = "se detuvo" if estado == "detenida" else "falló"
+            self.log_callback_rotacion(f"Flujo completo detenido: la automatización {motivo}, no se lanza la rotación.", "error")
+            messagebox.showwarning("Flujo completo", f"La automatización {motivo}, así que no se ha lanzado el filtro de rotación. Revisa el registro de la automatización.")
             self.btn_flujo.configure(state="normal")
             return
         self.log_callback_rotacion("Automatización terminada, lanzando el filtro de rotación...", "success")

@@ -5,9 +5,19 @@ import sys
 from pathlib import Path
 
 
+def es_modo_carpeta():
+    """True si es un .exe en modo carpeta (el ejecutable está junto a su subcarpeta _internal)."""
+    if not getattr(sys, "frozen", False):
+        return False
+    interna = getattr(sys, "_MEIPASS", None)
+    return bool(interna) and Path(interna).resolve().parent == Path(sys.executable).resolve().parent
+
+
 def carpeta_programa():
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        carpeta_exe = Path(sys.executable).resolve().parent
+        # En modo carpeta los datos van un nivel por encima: al recompilar se borra la carpeta del programa
+        return carpeta_exe.parent if es_modo_carpeta() else carpeta_exe
     return Path(__file__).resolve().parent
 
 

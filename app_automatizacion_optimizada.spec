@@ -1,12 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Por defecto genera un único .exe (dist/app_automatizacion_optimizada.exe).
-# Con la variable de entorno PALAUSA_ONEDIR=1 genera una carpeta (solo para pruebas de arranque).
+# Por defecto genera una carpeta (dist/programa/), que arranca en 1-3 s. El nombre es corto a propósito:
+# con uno largo, alguna ruta interna de Playwright supera los 260 caracteres de Windows.
+# Con la variable de entorno PALAUSA_ONEFILE=1 genera un único .exe (arranca en ~10 s).
+# El lanzador (lanzador.spec) mantiene en dist/ el .exe histórico que usan los accesos directos y la tarea programada.
 import os
 
 from PyInstaller.utils.hooks import collect_data_files
 
 dnd_datas = collect_data_files('tkinterdnd2')
-SOLO_CARPETA = os.environ.get('PALAUSA_ONEDIR') == '1'
+SOLO_CARPETA = os.environ.get('PALAUSA_ONEFILE') != '1'
 
 
 a = Analysis(
@@ -58,7 +60,7 @@ if SOLO_CARPETA:
         disable_windowed_traceback=False,
         icon=['ultraball.ico'],
     )
-    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='app_automatizacion_optimizada')
+    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='programa')
 else:
     exe = EXE(
         pyz,

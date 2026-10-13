@@ -16,6 +16,11 @@ pytest==9.1.1
 # Notas:
 #   - El .exe incluye el navegador de Playwright (chromium_headless_shell); en un equipo nuevo hay que
 #     ejecutar una vez "python -m playwright install chromium-headless-shell" antes de compilar.
-#   - Compilar:  python -m PyInstaller --noconfirm app_automatizacion_optimizada.spec
+#   - Compilar (con la app cerrada), en este orden:
+#       python -m PyInstaller --noconfirm app_automatizacion_optimizada.spec                       -> dist\programa\ (la app)
+#       python -m PyInstaller --noconfirm --workpath build_lanzador lanzador.spec                 -> dist\app_automatizacion_optimizada.exe (lanzador)
+#     El lanzador mantiene la ruta que usan los accesos directos y la tarea programada. La carpeta se llama "programa"
+#     para que ninguna ruta interna pase de 260 caracteres. Para un único .exe: PALAUSA_ONEFILE=1 en el primer comando.
+#     Los datos (configuración, base de datos, logs) viven en dist\, fuera de dist\programa\, que se borra al recompilar.
 #   - Tests:     python -m pytest tests
 #   - Comprobar el navegador de un .exe recién compilado:  app_automatizacion_optimizada.exe --probar-navegador

@@ -156,3 +156,24 @@ def test_guardar_resultado_excel_escribe_columna_18(tmp_path):
     wb.save(ruta)
     app.guardar_resultado_excel(str(ruta), 2, "Pieza disponible")
     assert openpyxl.load_workbook(ruta).active.cell(row=2, column=18).value == "Pieza disponible"
+
+
+# ---------- modo carpeta ----------
+
+def test_modo_carpeta_guarda_los_datos_un_nivel_por_encima(tmp_path, monkeypatch):
+    dist = tmp_path / "dist"
+    carpeta_exe = dist / "app"
+    (carpeta_exe / "_internal").mkdir(parents=True)
+    monkeypatch.setattr(rutas_app.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(rutas_app.sys, "executable", str(carpeta_exe / "app.exe"))
+    monkeypatch.setattr(rutas_app.sys, "_MEIPASS", str(carpeta_exe / "_internal"), raising=False)
+    assert rutas_app.es_modo_carpeta() is True
+    assert rutas_app.carpeta_programa() == dist.resolve()
+
+
+def test_un_solo_exe_guarda_los_datos_junto_al_ejecutable(tmp_path, monkeypatch):
+    monkeypatch.setattr(rutas_app.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(rutas_app.sys, "executable", str(tmp_path / "dist" / "app.exe"))
+    monkeypatch.setattr(rutas_app.sys, "_MEIPASS", str(tmp_path / "temp" / "_MEI123"), raising=False)
+    assert rutas_app.es_modo_carpeta() is False
+    assert rutas_app.carpeta_programa() == (tmp_path / "dist").resolve()
