@@ -61,6 +61,7 @@ stock_fiat_running = False
 hoja_pedidos_running = False
 avisos_running = False
 madd_running = False
+auto_completada_ok = False
 stop_event_auto = threading.Event()
 stop_event_pedidos = threading.Event()
 stop_event_comparador = threading.Event()
@@ -229,7 +230,7 @@ def filtrar_por_disponibilidad_task(ruta_excel_quiter, ruta_salida_folder, color
     finally:
         if finalizado_callback: finalizado_callback()
 
-def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida_folder, umbral_media, color_resaltado, log_callback=None, progreso_callback=None, finalizado_callback=None):
+def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida_folder, umbral_media, color_resaltado, precio_minimo=0.0, log_callback=None, progreso_callback=None, finalizado_callback=None):
     def log(texto, tag=None):
         if log_callback: log_callback(f"[ROTACIÓN] {texto}", tag)
     log(f"📊 Iniciando análisis de rotación...")
@@ -262,7 +263,16 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
         total_filas = max(ws.max_row - 1, 1)
         filas_baja_rotacion = 0
         filas_no_disponibles = 0
+        filas_bajo_precio = 0
         for i in range(2, ws.max_row + 1):
+            try:
+                precio_num = float(str(ws.cell(row=i, column=6).value).replace(",", "."))
+            except Exception:
+                precio_num = None
+            if precio_num is not None and precio_num < precio_minimo:
+                filas_bajo_precio += 1
+                if progreso_callback: progreso_callback((i - 1) / total_filas)
+                continue
             ref = str(ws.cell(row=i, column=2).value).strip().replace('2/', '')
             resultado_busqueda = ws.cell(row=i, column=18).value
             resultado_normalizado = "" if resultado_busqueda is None else " ".join(str(resultado_busqueda).strip().lower().split())
@@ -284,7 +294,7 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
         
         wb.save(ruta_final)
         wb.close()
-        log(f"Resumen rotacion: rojas por umbral {filas_baja_rotacion}, amarillas por disponibilidad {filas_no_disponibles}.", "success")
+        log(f"Resumen rotacion: rojas por umbral {filas_baja_rotacion}, amarillas por disponibilidad {filas_no_disponibles}, sin marcar por precio inferior a {precio_minimo:g} EUR {filas_bajo_precio}.", "success")
         log(f"✅ Análisis completado. Guardado en: {ruta_final}", "success")
         if progreso_callback: progreso_callback(1)
     except Exception as e:
@@ -444,8 +454,9 @@ def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, preci
         log(f"Error critico en hilo: {e}", "error")
 
 def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, num_hilos, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None):
-    global automation_running
+    global automation_running, auto_completada_ok
     automation_running = True
+    auto_completada_ok = False
     if stop_event:
         stop_event.clear()
     try:
@@ -490,6 +501,7 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
             for i, chunk in enumerate(chunks):
                 executor.submit(worker_playwright, i + 1, chunk, ruta_excel, usuario, password, precio_minimo, log_callback, update_progress, stop_event)
         if not stop_event.is_set():
+            auto_completada_ok = True
             log_callback("Automatizacion MULTI-HILO completada con exito.", "success")
     except Exception as e:
         log_callback(f"Error general: {e}", "error")
@@ -1501,13 +1513,15 @@ class AppIntegrada(ctk.CTk):
         self.precio_entry.insert(0, self.config.get("precio_min", "0"))
         self.precio_entry.pack(side="right", padx=14, pady=12)
         self.btn_auto = self.crear_boton_principal(card, "Iniciar automatización", self.toggle_auto)
-        self.btn_auto.pack(padx=24, pady=(4, 16), fill="x")
+        self.btn_auto.pack(padx=24, pady=(4, 8), fill="x")
+        self.btn_flujo = ctk.CTkButton(card, text="Flujo completo: automatización + filtro de rotación", height=40, corner_radius=8, font=("Segoe UI", 13, "bold"), fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.iniciar_flujo_completo)
+        self.btn_flujo.pack(padx=24, pady=(0, 16), fill="x")
         ctk.CTkLabel(card, text="Referencias consultadas", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
         self.auto_log_box = self.crear_caja_log(card, alto=140)
         self.auto_log_box.pack(padx=24, pady=(0, 12), fill="x")
         ctk.CTkButton(card, text="Abrir carpeta del Excel", height=36, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.abrir_carpeta_auto).pack(padx=24, pady=(0, 24), fill="x")
 
-        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación en base al umbral y la propuesta de pedido.")
+        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación en base al umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.")
         self.crear_fila_archivo(card_rotacion, "Excel de Quiter", "excel_quiter_entry", "ruta_excel_quiter", "Excel de Quiter (DMS)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_rotacion, "Archivo de propuesta", "excel_rot_entry", "ruta_excel_rotacion", "Archivo PROPUESTAPEDIDO.xls...", "Examinar", lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")]))
         self.crear_fila_archivo(card_rotacion, "Carpeta destino", "folder_rot_entry", "ruta_folder_rotacion", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_rot_entry))
@@ -1842,11 +1856,11 @@ class AppIntegrada(ctk.CTk):
         else:
             self.iniciar_auto()
 
-    def iniciar_auto(self):
+    def iniciar_auto(self, al_terminar=None):
         activa = tarea_activa()
         if activa:
             messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
-            return
+            return False
         try:
             self.guardar_configuracion_ui_internal()
             ruta = self.widget_get("excel_auto_entry")
@@ -1857,20 +1871,63 @@ class AppIntegrada(ctk.CTk):
         except Exception as e:
             registrar_error_detallado(str(e), traceback.format_exc())
             messagebox.showerror("Error", "La automatizacion no pudo iniciarse por un problema interno de la interfaz.")
-            return
+            return False
         if precio < 0:
             messagebox.showwarning("Aviso", "Introduce un precio minimo valido.")
-            return
+            return False
         if not self.validar_archivo(ruta, "Selecciona un Excel valido para la automatizacion."):
-            return
+            return False
         if not user or not pwd:
             messagebox.showwarning("Aviso", "Completa usuario y contrasena antes de continuar.")
-            return
+            return False
         self.actualizar_estado("automatización en curso", ruta)
         self.btn_auto.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         self.limpiar_caja(self.auto_log_box)
         stop_event_auto.clear()
-        threading.Thread(target=ejecutar_automatizacion_task, args=(ruta, user, pwd, precio, hilos, lambda t, tag=None: self.after(0, self.log_callback_auto, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_auto), stop_event_auto), daemon=True).start()
+
+        def correr():
+            ejecutar_automatizacion_task(ruta, user, pwd, precio, hilos, lambda t, tag=None: self.after(0, self.log_callback_auto, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_auto), stop_event_auto)
+            if al_terminar:
+                self.after(0, al_terminar, auto_completada_ok and not stop_event_auto.is_set())
+
+        threading.Thread(target=correr, daemon=True).start()
+        return True
+
+    def iniciar_flujo_completo(self):
+        activa = tarea_activa()
+        if activa:
+            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+            return
+        ruta_auto = self.widget_get("excel_auto_entry")
+        ruta_rot = self.widget_get("excel_rot_entry")
+        folder_salida = self.widget_get("folder_rot_entry")
+        if not self.validar_archivo(ruta_auto, "Selecciona el Excel de stock (se usará para la automatización y para la rotación)."):
+            return
+        if not self.validar_archivo(ruta_rot, "Selecciona el archivo de propuesta (filtro de rotación)."):
+            return
+        if not self.validar_carpeta(folder_salida, "Selecciona la carpeta destino del filtro de rotación."):
+            return
+        try:
+            float(self.widget_get("umbral_entry"))
+        except Exception:
+            messagebox.showwarning("Aviso", "Introduce un umbral de rotación válido.")
+            return
+        if not messagebox.askyesno("Flujo completo", "Se ejecutará la automatización sobre el Excel de stock y, si termina bien, el filtro de rotación sobre ese mismo Excel. ¿Continuar?"):
+            return
+        self.excel_quiter_entry.delete(0, "end")
+        self.excel_quiter_entry.insert(0, ruta_auto)
+        self.btn_flujo.configure(state="disabled")
+        if not self.iniciar_auto(al_terminar=self.continuar_flujo_tras_auto):
+            self.btn_flujo.configure(state="normal")
+
+    def continuar_flujo_tras_auto(self, correcto):
+        if not correcto:
+            self.log_callback_rotacion("Flujo completo detenido: la automatización no terminó correctamente, no se lanza la rotación.", "error")
+            self.btn_flujo.configure(state="normal")
+            return
+        self.log_callback_rotacion("Automatización terminada, lanzando el filtro de rotación...", "success")
+        if not self.iniciar_filtro_rotacion():
+            self.btn_flujo.configure(state="normal")
 
     def finalizar_auto(self):
         acc_color = self.color_principal
@@ -2085,7 +2142,7 @@ class AppIntegrada(ctk.CTk):
         activa = tarea_activa()
         if activa:
             messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
-            return
+            return False
         self.guardar_configuracion_ui_internal()
         ruta_quiter = self.excel_quiter_entry.get()
         ruta_rot = self.excel_rot_entry.get()
@@ -2094,18 +2151,24 @@ class AppIntegrada(ctk.CTk):
             umbral = float(self.umbral_entry.get())
         except Exception:
             messagebox.showwarning("Aviso", "Introduce un umbral de rotación válido.")
-            return
+            return False
+        try:
+            precio_minimo = float(self.precio_entry.get().replace(",", "."))
+        except Exception:
+            messagebox.showwarning("Aviso", "Introduce un precio mínimo válido en la pestaña Automatización (se usa también en el filtro de rotación).")
+            return False
         if not self.validar_archivo(ruta_quiter, "Selecciona el Excel de Quiter."):
-            return
+            return False
         if not self.validar_archivo(ruta_rot, "Selecciona el archivo de propuesta."):
-            return
+            return False
         if not self.validar_carpeta(folder_salida, "Selecciona una carpeta de salida para rotación."):
-            return
+            return False
         ruta_estimacion = str(Path(folder_salida) / f"{Path(ruta_quiter).stem}_ROTACION.xlsx")
         self.actualizar_estado("analizando rotación", ruta_estimacion)
         self.btn_rotacion.configure(state="disabled", text="Analizando...")
         self.limpiar_caja(self.rotacion_log_box)
-        threading.Thread(target=filtrar_por_rotacion_task, args=(ruta_quiter, ruta_rot, folder_salida, umbral, "FF0000", lambda t, tag=None: self.after(0, self.log_callback_rotacion, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_filtro_rotacion)), daemon=True).start()
+        threading.Thread(target=filtrar_por_rotacion_task, args=(ruta_quiter, ruta_rot, folder_salida, umbral, "FF0000", precio_minimo, lambda t, tag=None: self.after(0, self.log_callback_rotacion, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_filtro_rotacion)), daemon=True).start()
+        return True
 
     def finalizar_filtro_rotacion(self):
         ruta_quiter = self.excel_quiter_entry.get()
@@ -2113,6 +2176,7 @@ class AppIntegrada(ctk.CTk):
             ruta_final = str(Path(self.folder_rot_entry.get()) / f"{Path(ruta_quiter).stem}_ROTACION.xlsx")
             self.actualizar_estado("rotación completada", ruta_final)
         self.btn_rotacion.configure(state="normal", text="Resaltar por rotación")
+        self.btn_flujo.configure(state="normal")
 
     def toggle_mopar(self):
         global mopar_running
