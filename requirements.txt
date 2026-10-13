@@ -1,0 +1,21 @@
+# Dependencias de la aplicación (versiones con las que está probada; Python 3.14, Windows)
+customtkinter==5.2.2
+openpyxl==3.1.5
+pandas==3.0.1
+numpy==2.4.2
+xlrd==2.0.2
+playwright==1.58.0
+pywin32==312
+tkinterdnd2==0.6.2
+pillow==12.1.1
+
+# Para compilar el .exe y ejecutar los tests
+pyinstaller==6.19.0
+pytest==9.1.1
+
+# Notas:
+#   - El .exe incluye el navegador de Playwright (chromium_headless_shell); en un equipo nuevo hay que
+#     ejecutar una vez "python -m playwright install chromium-headless-shell" antes de compilar.
+#   - Compilar:  python -m PyInstaller --noconfirm app_automatizacion_optimizada.spec
+#   - Tests:     python -m pytest tests
+#   - Comprobar el navegador de un .exe recién compilado:  app_automatizacion_optimizada.exe --probar-navegador

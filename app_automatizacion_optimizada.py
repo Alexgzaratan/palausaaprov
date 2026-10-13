@@ -6,7 +6,6 @@ import openpyxl
 from openpyxl import load_workbook
 import csv
 import re
-import json
 import ctypes
 import pandas as pd
 import time
@@ -25,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from reclamaciones_power_line import ModuloReclamacionesPowerLine
 import estilo
 from rutas_app import ruta_datos
-from configuracion import CONFIG_FILE, LOG_DETALLADO, cargar_configuracion, guardar_configuracion, registrar_error_detallado
+from configuracion import LOG_DETALLADO, cargar_configuracion, guardar_configuracion, registrar_error_detallado
 
 # --- CONFIGURACIÓN DE WINDOWS PARA ICONO EN BARRA DE TAREAS ---
 try:
@@ -68,7 +67,6 @@ auto_completada_ok = False
 stop_event_auto = threading.Event()
 stop_event_pedidos = threading.Event()
 stop_event_comparador = threading.Event()
-stop_event_filtro = threading.Event()
 stop_event_mopar = threading.Event()
 stop_event_stock_fiat = threading.Event()
 
@@ -225,42 +223,6 @@ def obtener_ruta_para_contador(carpeta_base, contador):
 # ---------------------------------------------------
 # 1. LÓGICA DE FILTRO DE ROTACIÓN
 # ---------------------------------------------------
-
-def filtrar_por_disponibilidad_task(ruta_excel_quiter, ruta_salida_folder, color_resaltado="FFFF00", log_callback=None, progreso_callback=None, finalizado_callback=None):
-    def log(texto, tag=None):
-        if log_callback: log_callback(f"[ROTACION] {texto}", tag)
-    log("Iniciando analisis de disponibilidad...")
-    try:
-        wb = load_workbook(ruta_excel_quiter)
-        ws = wb.active
-        fill_color = PatternFill(start_color=color_resaltado, end_color=color_resaltado, fill_type="solid")
-        total_filas = max(ws.max_row - 1, 1)
-        filas_resaltadas = 0
-        for i in range(2, ws.max_row + 1):
-            resultado_busqueda = ws.cell(row=i, column=18).value
-            resultado_normalizado = "" if resultado_busqueda is None else " ".join(str(resultado_busqueda).strip().lower().split())
-            if resultado_normalizado and resultado_normalizado not in ("pieza disponible", "disponible"):
-                for cell in ws[i]:
-                    cell.fill = fill_color
-                filas_resaltadas += 1
-            if progreso_callback: progreso_callback((i - 1) / total_filas)
-
-        nombre_base = os.path.splitext(os.path.basename(ruta_excel_quiter))[0]
-        nombre_archivo = f"{nombre_base}_ROTACION.xlsx"
-        ruta_final = os.path.join(ruta_salida_folder, nombre_archivo)
-
-        ws.delete_rows(1)
-        ws.delete_cols(8, 10)
-
-        wb.save(ruta_final)
-        wb.close()
-        log(f"Analisis completado. Filas resaltadas: {filas_resaltadas}. Guardado en: {ruta_final}", "success")
-        if progreso_callback: progreso_callback(1)
-    except Exception as e:
-        log(f"Error: {e}", "error")
-        registrar_error_detallado(str(e), traceback.format_exc())
-    finally:
-        if finalizado_callback: finalizado_callback()
 
 def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida_folder, umbral_media, color_resaltado, precio_minimo=0.0, log_callback=None, progreso_callback=None, finalizado_callback=None):
     global filtro_rotacion_running
