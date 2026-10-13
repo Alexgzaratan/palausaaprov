@@ -15,6 +15,7 @@ import shutil
 import xlrd
 import string
 import subprocess
+import tkinter
 from datetime import datetime, timedelta
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -34,6 +35,8 @@ except Exception:
 
 # --- CONFIGURACIÓN GLOBAL ---
 ICONO_NOMBRE = "ultraball.ico"
+LOG_MAX_LINEAS = 2000
+LOG_LINEAS_A_RECORTAR = 500
 ERROR_FOLDER = ruta_datos("errores_capturas")
 
 # Bloqueo para escritura segura en Excel desde múltiples hilos
@@ -67,6 +70,40 @@ stop_event_comparador = threading.Event()
 stop_event_filtro = threading.Event()
 stop_event_mopar = threading.Event()
 stop_event_stock_fiat = threading.Event()
+
+# (clave en config, atributo del widget, valor por defecto, conversor opcional)
+CAMPOS_CONFIG = (
+    ("usuario", "user_entry", ""),
+    ("password", "pass_entry", ""),
+    ("num_hilos", "hilos_option", "3", int),
+    ("ruta_excel_auto", "excel_auto_entry", ""),
+    ("ruta_excel_pedidos", "excel_pedidos_entry", ""),
+    ("ruta_folder_pedidos", "folder_pedidos_entry", ""),
+    ("ruta_plantilla_hojas", "plantilla_hoja_entry", ""),
+    ("ruta_carpeta_hojas", "carpeta_hojas_entry", ""),
+    ("ruta_hoja_avisos", "hoja_avisos_entry", ""),
+    ("ruta_excel_clientes", "clientes_avisos_entry", ""),
+    ("email_companeros_avisos", "email_companeros_avisos_entry", ""),
+    ("precio_min", "precio_entry", "0"),
+    ("ruta_excel_antiguo", "excel_old_entry", ""),
+    ("ruta_excel_nuevo", "excel_new_entry", ""),
+    ("ruta_folder_comparador", "folder_comp_entry", ""),
+    ("ruta_excel_quiter", "excel_quiter_entry", ""),
+    ("ruta_excel_rotacion", "excel_rot_entry", ""),
+    ("ruta_folder_rotacion", "folder_rot_entry", ""),
+    ("umbral_rotacion", "umbral_entry", "0.08"),
+    ("ruta_excel_mopar", "excel_mopar_entry", ""),
+    ("ruta_folder_mopar", "folder_mopar_entry", ""),
+    ("ruta_excel_stock_fiat", "excel_stock_fiat_entry", ""),
+    ("ruta_folder_stock_fiat", "folder_stock_fiat_entry", ""),
+    ("usuario_madd", "usuario_madd_entry", ""),
+    ("password_madd", "password_madd_entry", ""),
+    ("ruta_carpeta_facturas_madd", "carpeta_facturas_madd_entry", ""),
+    ("email_facturas_madd", "email_facturas_madd_entry", ""),
+    ("email_aviso_fallo_madd", "email_aviso_fallo_madd_entry", ""),
+    ("filtro_dia_facturas_madd", "filtro_dia_madd_option", "Ayer"),
+    ("color_resaltado", "color_optionmenu", "Amarillo"),
+)
 
 def tarea_activa():
     """Nombre de la tarea en curso que trabaja con ficheros o envía correos, o None si no hay ninguna."""
@@ -353,7 +390,7 @@ def guardar_resultado_excel(ruta_excel, fila_idx, resultado, intentos=4, espera=
                 raise
             time.sleep(espera)
 
-def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, precio_minimo, log_callback, update_global_progress, stop_event):
+def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, log_callback, update_global_progress, stop_event):
     def log(texto, tag=None):
         log_callback(f"[HILO {worker_id}] {texto}", tag)
 
@@ -401,17 +438,9 @@ def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, preci
                     campo_ref.fill("")
                     return campo_ref
 
-                for fila_idx, referencia, valor_precio in sub_filas:
+                for fila_idx, referencia in sub_filas:
                     if stop_event.is_set():
                         break
-                    try:
-                        precio_num = float(str(valor_precio).replace(",", "."))
-                        if precio_num < precio_minimo:
-                            update_global_progress()
-                            continue
-                    except Exception:
-                        update_global_progress()
-                        continue
                     log(f"Consultando: {referencia}")
                     try:
                         ultimo_error = None
@@ -462,10 +491,27 @@ def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, preci
     except Exception as e:
         log(f"Error critico en hilo: {e}", "error")
 
+def filas_a_consultar(filas_trabajo, precio_minimo):
+    """De (fila, referencia, precio) deja solo las filas con precio válido y no inferior al mínimo, como (fila, referencia)."""
+    resultado = []
+    for fila_idx, referencia, valor_precio in filas_trabajo:
+        try:
+            if float(str(valor_precio).replace(",", ".")) >= precio_minimo:
+                resultado.append((fila_idx, referencia))
+        except Exception:
+            continue
+    return resultado
+
+def repartir_filas(filas, num_hilos):
+    """Reparte las filas de forma alternada entre los hilos para que todos tengan una carga parecida."""
+    hilos = max(1, min(num_hilos, len(filas)))
+    return [filas[i::hilos] for i in range(hilos)]
+
 def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, num_hilos, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None):
     global automation_running, auto_completada_ok
     automation_running = True
     auto_completada_ok = False
+    cierre_notificado = False
     if stop_event:
         stop_event.clear()
     try:
@@ -477,14 +523,18 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
             pre = sheet.cell(row=r, column=6).value
             if ref:
                 filas_trabajo.append((r, ref, pre))
-        total_tareas = len(filas_trabajo)
+        wb.close()
+        if not filas_trabajo:
+            log_callback("No hay referencias en el Excel.", "error")
+            return
+        filas = filas_a_consultar(filas_trabajo, precio_minimo)
+        total_tareas = len(filas)
         if total_tareas == 0:
-            if finalizado_callback:
-                finalizado_callback()
+            auto_completada_ok = True
+            log_callback(f"Ninguna referencia alcanza el precio mínimo ({precio_minimo:g} EUR): no hay nada que consultar.", "success")
             return
 
         procesadas = 0
-        cierre_notificado = False
         progreso_lock = threading.Lock()
 
         def update_progress():
@@ -503,17 +553,21 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
                 if finalizado_callback:
                     finalizado_callback()
 
-        chunk_size = (total_tareas // num_hilos) + 1
-        chunks = [filas_trabajo[i:i + chunk_size] for i in range(0, total_tareas, chunk_size)]
-        log_callback(f"[SISTEMA] Iniciando con {len(chunks)} hilos paralelos...")
-        with ThreadPoolExecutor(max_workers=num_hilos) as executor:
+        chunks = repartir_filas(filas, num_hilos)
+        log_callback(f"[SISTEMA] Consultando {total_tareas} de {len(filas_trabajo)} referencias (precio mínimo {precio_minimo:g} EUR) con {len(chunks)} hilos paralelos...")
+        with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
             for i, chunk in enumerate(chunks):
-                executor.submit(worker_playwright, i + 1, chunk, ruta_excel, usuario, password, precio_minimo, log_callback, update_progress, stop_event)
-        if not stop_event.is_set():
+                executor.submit(worker_playwright, i + 1, chunk, ruta_excel, usuario, password, log_callback, update_progress, stop_event)
+        if stop_event.is_set():
+            return
+        if procesadas >= total_tareas:
             auto_completada_ok = True
             log_callback("Automatizacion MULTI-HILO completada con exito.", "success")
+        else:
+            log_callback(f"Automatización terminada con incidencias: se han procesado {procesadas} de {total_tareas} referencias (revisa los errores del registro).", "error")
     except Exception as e:
         log_callback(f"Error general: {e}", "error")
+        registrar_error_detallado(str(e), traceback.format_exc(), ref="ejecutar_automatizacion_task")
     finally:
         automation_running = False
         if finalizado_callback and not cierre_notificado:
@@ -1324,6 +1378,7 @@ class AppIntegrada(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.config = cargar_configuracion()
+        self._ultimo_porcentaje = -1
         self.aplicar_tema_inicial()
         self.title("Palausa Aprovisionamiento")
         self.geometry("1000x980")
@@ -1408,6 +1463,7 @@ class AppIntegrada(ctk.CTk):
         return ctk.CTkButton(parent, text=text, height=44, corner_radius=8, font=("Segoe UI", 13, "bold"), fg_color=self.color_principal, text_color="#ffffff", hover_color=self.color_hover, command=command)
 
     def setup_ui(self):
+        self._ultimo_porcentaje = -1
         self.aplicar_estilos_ui()
         acc_color = self.color_principal
         self.ultima_ruta_generada = ""
@@ -1433,24 +1489,23 @@ class AppIntegrada(ctk.CTk):
             border_width=0,
         )
         self.tabview.pack(pady=(16, 8), padx=22, fill="both", expand=True)
-        self.tab_auto = self.tabview.add("Automatización")
-        self.tab_pedidos = self.tabview.add("Pedidos")
-        self.tab_comparador = self.tabview.add("Comparador")
-        self.tab_mopar = self.tabview.add("Fichero Mopar")
-        self.tab_stock_fiat = self.tabview.add("Stock FIAT")
-        self.tab_madd = self.tabview.add("Facturas")
-        self.tab_reclamaciones_power_line = self.tabview.add("Reclamaciones")
-        self.tab_config = self.tabview.add("Configuración")
-        self.build_tab_auto(acc_color)
-        self.build_tab_pedidos(acc_color)
-        self.build_tab_comparador(acc_color)
-        self.build_tab_mopar(acc_color)
-        self.build_tab_stock_fiat(acc_color)
-        self.build_tab_madd(acc_color)
+        # Las pestañas se construyen la primera vez que se abren (arranque más rápido)
+        self.constructores_pestanas = {
+            "Automatización": ("tab_auto", self.build_tab_auto),
+            "Pedidos": ("tab_pedidos", self.build_tab_pedidos),
+            "Comparador": ("tab_comparador", self.build_tab_comparador),
+            "Fichero Mopar": ("tab_mopar", self.build_tab_mopar),
+            "Stock FIAT": ("tab_stock_fiat", self.build_tab_stock_fiat),
+            "Facturas": ("tab_madd", self.build_tab_madd),
+            "Reclamaciones": ("tab_reclamaciones_power_line", self.build_tab_reclamaciones),
+            "Configuración": ("tab_config", self.build_tab_config),
+        }
+        self.pestanas_construidas = set()
+        for nombre, (atributo, _) in self.constructores_pestanas.items():
+            setattr(self, atributo, self.tabview.add(nombre))
         self.reclamaciones_power_line = ModuloReclamacionesPowerLine(self, self.config)
-        self.reclamaciones_power_line.construir(self.tab_reclamaciones_power_line)
-        self.build_tab_config(acc_color)
-        self.tabview.configure(command=self.actualizar_paneles_por_pestana)
+        self.construir_pestana(self.tabview.get())
+        self.tabview.configure(command=self.al_cambiar_pestana)
 
         self.frame_progreso = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=10, border_width=1, border_color=self.color_borde)
         self.frame_progreso.pack(pady=(0, 8), padx=22, fill="x")
@@ -1484,6 +1539,19 @@ class AppIntegrada(ctk.CTk):
         self.log_box.pack(padx=16, pady=(0, 16), fill="both", expand=True)
         self.log_box.tag_config("success", foreground=self.color_ok)
         self.log_box.tag_config("error", foreground=self.color_peligro)
+
+    def build_tab_reclamaciones(self, acc_color):
+        self.reclamaciones_power_line.construir(self.tab_reclamaciones_power_line)
+
+    def construir_pestana(self, nombre):
+        if nombre in self.pestanas_construidas:
+            return
+        self.pestanas_construidas.add(nombre)
+        self.constructores_pestanas[nombre][1](self.color_principal)
+
+    def al_cambiar_pestana(self):
+        self.construir_pestana(self.tabview.get())
+        self.actualizar_paneles_por_pestana()
 
     def actualizar_paneles_por_pestana(self):
         ocultar_paneles = self.tabview.get() == "Reclamaciones"
@@ -1702,13 +1770,24 @@ class AppIntegrada(ctk.CTk):
             entry.delete(0, "end")
             entry.insert(0, ruta)
 
+    def recortar_log(self, caja):
+        """Mantiene el registro en un tamaño razonable: al pasar del máximo borra las líneas más antiguas."""
+        lineas = int(caja.index("end-1c").split(".")[0])
+        if lineas > LOG_MAX_LINEAS:
+            caja.delete("1.0", f"{lineas - LOG_MAX_LINEAS + LOG_LINEAS_A_RECORTAR}.0")
+
     def agregar_log(self, texto, tag=None):
         self.log_box.insert("end", f"{texto}\n", tag)
+        self.recortar_log(self.log_box)
         self.log_box.see("end")
 
     def actualizar_progreso(self, valor):
+        porcentaje = int(valor * 100)
+        if porcentaje == self._ultimo_porcentaje and valor < 1:
+            return
+        self._ultimo_porcentaje = porcentaje
         self.progreso_var.set(valor)
-        self.porcentaje_label.configure(text=f"{int(valor * 100)}%")
+        self.porcentaje_label.configure(text=f"{porcentaje}%")
 
     def actualizar_estado(self, texto, ruta=""):
         self.estado_label.configure(text=f"Estado: {texto}")
@@ -1729,6 +1808,7 @@ class AppIntegrada(ctk.CTk):
     def agregar_a_caja(self, caja, texto, tag=None):
         caja.configure(state="normal")
         caja.insert("end", f"{texto}\n", tag)
+        self.recortar_log(caja)
         caja.configure(state="disabled")
         caja.see("end")
 
@@ -1841,6 +1921,11 @@ class AppIntegrada(ctk.CTk):
             messagebox.showinfo("Éxito", "Configuración guardada.")
 
     def cambiar_modo_apariencia(self, valor=None):
+        activa = tarea_activa()
+        if activa:
+            messagebox.showwarning("Aviso", f"No se puede cambiar la apariencia mientras hay una tarea en curso ({activa}). Espera a que termine.")
+            self.modo_option.set("Oscuro" if self.config.get("modo_apariencia", "Light") == "Dark" else "Claro")
+            return
         self.guardar_configuracion_ui_internal()
         self.reconstruir_interfaz()
 
@@ -1853,11 +1938,17 @@ class AppIntegrada(ctk.CTk):
                 pestana_actual = None
         for widget in self.winfo_children():
             widget.destroy()
+        # Se eliminan las referencias a widgets/variables destruidos: las pestañas se reconstruyen bajo demanda
+        for nombre, valor in list(vars(self).items()):
+            if isinstance(valor, (tkinter.Misc, tkinter.Variable)) and valor is not self:
+                delattr(self, nombre)
         self.aplicar_tema_inicial()
         self.setup_ui()
         if pestana_actual:
             try:
                 self.tabview.set(pestana_actual)
+                self.construir_pestana(pestana_actual)
+                self.actualizar_paneles_por_pestana()
             except Exception:
                 pass
 
@@ -2020,7 +2111,9 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         ruta = ruta_hoja_pedidos_del_dia(carpeta)
         self.actualizar_estado("hoja de pedidos lista", str(ruta))
-        self.btn_hoja_pedidos.configure(text="Generar hoja de hoy", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        boton = getattr(self, "btn_hoja_pedidos", None)
+        if boton is not None:
+            boton.configure(text="Generar hoja de hoy", fg_color=acc_color, hover_color=self.color_hover, state="normal")
 
     def comprobar_hoja_pedidos_al_inicio(self):
         plantilla = self.config.get("ruta_plantilla_hojas", "")
@@ -2345,41 +2438,28 @@ class AppIntegrada(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo desactivar la tarea: {e}")
 
+    def valor_widget_o_config(self, atributo, clave, defecto):
+        """Valor actual del widget; si su pestaña aún no se ha construido (o se destruyó) se usa el valor guardado."""
+        widget = getattr(self, atributo, None)
+        if widget is not None:
+            try:
+                return widget.get()
+            except Exception:
+                pass
+        return self.config.get(clave, defecto)
+
     def guardar_configuracion_ui_internal(self):
-        config = {
-            "usuario": self.widget_get("user_entry"),
-            "password": self.widget_get("pass_entry"),
-            "num_hilos": int(self.widget_get("hilos_option", "3")),
-            "ruta_excel_auto": self.widget_get("excel_auto_entry"),
-            "ruta_excel_pedidos": self.widget_get("excel_pedidos_entry"),
-            "ruta_folder_pedidos": self.widget_get("folder_pedidos_entry"),
-            "ruta_plantilla_hojas": self.widget_get("plantilla_hoja_entry"),
-            "ruta_carpeta_hojas": self.widget_get("carpeta_hojas_entry"),
-            "ruta_hoja_avisos": self.widget_get("hoja_avisos_entry"),
-            "ruta_excel_clientes": self.widget_get("clientes_avisos_entry"),
-            "email_companeros_avisos": self.widget_get("email_companeros_avisos_entry"),
-            "avisos_envio_automatico": bool(self.avisos_auto_var.get()) if hasattr(self, "avisos_auto_var") else self.config.get("avisos_envio_automatico", True),
-            "precio_min": self.widget_get("precio_entry", "0"),
-            "ruta_excel_antiguo": self.widget_get("excel_old_entry"),
-            "ruta_excel_nuevo": self.widget_get("excel_new_entry"),
-            "ruta_folder_comparador": self.widget_get("folder_comp_entry"),
-            "ruta_excel_quiter": self.widget_get("excel_quiter_entry"),
-            "ruta_excel_rotacion": self.widget_get("excel_rot_entry"),
-            "ruta_folder_rotacion": self.widget_get("folder_rot_entry"),
-            "umbral_rotacion": self.widget_get("umbral_entry", "0.08"),
-            "ruta_excel_mopar": self.widget_get("excel_mopar_entry"),
-            "ruta_folder_mopar": self.widget_get("folder_mopar_entry"),
-            "ruta_excel_stock_fiat": self.widget_get("excel_stock_fiat_entry"),
-            "ruta_folder_stock_fiat": self.widget_get("folder_stock_fiat_entry"),
-            "usuario_madd": self.widget_get("usuario_madd_entry"),
-            "password_madd": self.widget_get("password_madd_entry"),
-            "ruta_carpeta_facturas_madd": self.widget_get("carpeta_facturas_madd_entry"),
-            "email_facturas_madd": self.widget_get("email_facturas_madd_entry", ""),
-            "email_aviso_fallo_madd": self.widget_get("email_aviso_fallo_madd_entry", ""),
-            "filtro_dia_facturas_madd": self.widget_get("filtro_dia_madd_option", "Ayer"),
-            "color_resaltado": self.widget_get("color_optionmenu", "Amarillo"),
-            "modo_apariencia": "Dark" if self.widget_get("modo_option", "Claro" if self.config.get("modo_apariencia", "Light") != "Dark" else "Oscuro") == "Oscuro" else "Light",
-        }
+        config = {}
+        for clave, atributo, defecto, *convertir in CAMPOS_CONFIG:
+            valor = self.valor_widget_o_config(atributo, clave, defecto)
+            config[clave] = convertir[0](valor) if convertir else valor
+        variable_avisos = getattr(self, "avisos_auto_var", None)
+        config["avisos_envio_automatico"] = bool(variable_avisos.get()) if variable_avisos is not None else self.config.get("avisos_envio_automatico", True)
+        selector_modo = getattr(self, "modo_option", None)
+        if selector_modo is not None:
+            config["modo_apariencia"] = "Dark" if selector_modo.get() == "Oscuro" else "Light"
+        else:
+            config["modo_apariencia"] = self.config.get("modo_apariencia", "Light")
         if hasattr(self, "reclamaciones_power_line"):
             config.update(self.reclamaciones_power_line.obtener_configuracion())
         # Se fusiona con lo que hay en disco para no pisar claves que escriben otros procesos (contadores de Mopar/Stock FIAT)
@@ -2398,9 +2478,31 @@ class AppIntegrada(ctk.CTk):
         self.actualizar_estado("Stock FIAT generado", self.folder_stock_fiat_entry.get())
         self.btn_stock_fiat.configure(text="Generar Stock FIAT", fg_color=acc_color, hover_color=self.color_hover, state="normal")
 
+def probar_navegador():
+    """Comprueba que el Chromium incluido arranca (sirve para verificar un .exe recién compilado).
+    El resultado se escribe en diagnostico_navegador.txt, junto al programa."""
+    ruta = ruta_datos("diagnostico_navegador.txt", migrar=False)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--disable-gpu", "--disable-dev-shm-usage"])
+            try:
+                page = browser.new_page()
+                page.set_content("<title>navegador-ok</title><p>hola</p>")
+                resultado = f"OK {page.title()}"
+            finally:
+                browser.close()
+    except Exception as e:
+        resultado = f"ERROR {e}"
+    with open(ruta, "w", encoding="utf-8") as f:
+        f.write(resultado + "\n")
+    return resultado
+
 if __name__ == "__main__":
     if "--tarea-madd" in sys.argv:
         ejecutar_tarea_madd_standalone()
+        sys.exit(0)
+    if "--probar-navegador" in sys.argv:
+        probar_navegador()
         sys.exit(0)
     app = AppIntegrada()
     app.mainloop()
