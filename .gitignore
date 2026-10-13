@@ -10,3 +10,7 @@ errores_capturas/
 _docx_qa/
 config.json
 config_palausa_aprovisionamiento.json
+config_palausa_aprovisionamiento.json.bak
+config_palausa_aprovisionamiento.json.tmp
+error_log_detallado.txt.1
+.pytest_cache/

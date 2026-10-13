@@ -14,9 +14,11 @@ import customtkinter as ctk
 from PIL import Image
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+from rutas_app import ruta_datos
 
-DATABASE_FILE = "reclamaciones_power_line.db"
-ERROR_LOG_FILE = "error_log_detallado.txt"
+
+DATABASE_FILE = ruta_datos("reclamaciones_power_line.db")
+ERROR_LOG_FILE = ruta_datos("error_log_detallado.txt", migrar=False)
 PHOTO_FIELDS = (
     ("bulto", "Fotografía bulto completo"),
     ("deterioro", "Fotografía detalle del deterioro"),

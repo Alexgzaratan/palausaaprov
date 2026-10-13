@@ -22,6 +22,8 @@ from tkinter import filedialog, messagebox
 from openpyxl.styles import PatternFill
 from concurrent.futures import ThreadPoolExecutor
 from reclamaciones_power_line import ModuloReclamacionesPowerLine
+from rutas_app import ruta_datos
+from configuracion import CONFIG_FILE, LOG_DETALLADO, cargar_configuracion, guardar_configuracion, registrar_error_detallado
 
 # --- CONFIGURACIÓN DE WINDOWS PARA ICONO EN BARRA DE TAREAS ---
 try:
@@ -31,10 +33,8 @@ except Exception:
     pass
 
 # --- CONFIGURACIÓN GLOBAL ---
-CONFIG_FILE = "config_palausa_aprovisionamiento.json"
 ICONO_NOMBRE = "ultraball.ico"
-ERROR_FOLDER = "errores_capturas"
-LOG_DETALLADO = "error_log_detallado.txt"
+ERROR_FOLDER = ruta_datos("errores_capturas")
 
 # Bloqueo para escritura segura en Excel desde múltiples hilos
 excel_lock = threading.Lock()
@@ -48,8 +48,7 @@ def resource_path(relative_path):
 
 ICONO_PATH = resource_path(ICONO_NOMBRE)
 
-if not os.path.exists(ERROR_FOLDER):
-    os.makedirs(ERROR_FOLDER)
+os.makedirs(ERROR_FOLDER, exist_ok=True)
 
 # Variables globales para control de ejecución
 automation_running = False
@@ -70,44 +69,33 @@ stop_event_mopar = threading.Event()
 stop_event_stock_fiat = threading.Event()
 
 def tarea_activa():
-    """Nombre de la tarea en curso que escribe sobre un Excel, o None si no hay ninguna."""
-    if automation_running:
-        return "Automatizacion"
-    if pedidos_running:
-        return "Generacion de pedidos"
-    if comparador_running:
-        return "Comparador de Excel"
-    if mopar_running:
-        return "Fichero MOPAR"
-    if stock_fiat_running:
-        return "Stock FIAT"
+    """Nombre de la tarea en curso que trabaja con ficheros o envía correos, o None si no hay ninguna."""
+    for activa, nombre in (
+        (automation_running, "Automatizacion"),
+        (filtro_rotacion_running, "Filtro de rotacion"),
+        (pedidos_running, "Generacion de pedidos"),
+        (hoja_pedidos_running, "Hoja de pedidos del dia"),
+        (avisos_running, "Avisos de no suministro"),
+        (comparador_running, "Comparador de Excel"),
+        (mopar_running, "Fichero MOPAR"),
+        (stock_fiat_running, "Stock FIAT"),
+        (madd_running, "Facturas MADD"),
+    ):
+        if activa:
+            return nombre
     return None
 
-def cargar_configuracion():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            registrar_error_detallado(str(e), traceback.format_exc(), ref="cargar_configuracion")
-            return {}
-    return {}
-
-def guardar_configuracion(config_dict):
+def archivo_bloqueado(ruta):
+    """True si el fichero existe y otro programa (normalmente Excel) lo tiene abierto y no se puede escribir."""
+    if not ruta or not os.path.exists(ruta):
+        return False
     try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config_dict, f, indent=4)
-    except Exception as e:
-        registrar_error_detallado(str(e), traceback.format_exc(), ref="guardar_configuracion")
-
-def registrar_error_detallado(error_msg, traceback_str, ref=None):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(LOG_DETALLADO, "a", encoding="utf-8") as f:
-        f.write(f"--- ERROR [{timestamp}] ---\n")
-        if ref: f.write(f"Referencia: {ref}\n")
-        f.write(f"Mensaje: {error_msg}\n")
-        f.write(f"Traceback:\n{traceback_str}\n")
-        f.write("-" * 30 + "\n\n")
+        with open(ruta, "r+b"):
+            return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 def abrir_ruta_en_sistema(ruta):
     if not ruta or not os.path.exists(ruta):
@@ -118,7 +106,8 @@ def abrir_ruta_en_sistema(ruta):
     except Exception:
         return False
 
-def crear_copia_seguridad(ruta_archivo, carpeta_destino="backups_pedidos"):
+def crear_copia_seguridad(ruta_archivo, carpeta_destino=None):
+    carpeta_destino = carpeta_destino or ruta_datos("backups_pedidos")
     Path(carpeta_destino).mkdir(parents=True, exist_ok=True)
     nombre_base = Path(ruta_archivo).stem
     extension = Path(ruta_archivo).suffix
@@ -231,6 +220,8 @@ def filtrar_por_disponibilidad_task(ruta_excel_quiter, ruta_salida_folder, color
         if finalizado_callback: finalizado_callback()
 
 def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida_folder, umbral_media, color_resaltado, precio_minimo=0.0, log_callback=None, progreso_callback=None, finalizado_callback=None):
+    global filtro_rotacion_running
+    filtro_rotacion_running = True
     def log(texto, tag=None):
         if log_callback: log_callback(f"[ROTACIÓN] {texto}", tag)
     log(f"📊 Iniciando análisis de rotación...")
@@ -301,6 +292,7 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
         log(f"❌ Error: {e}", "error")
         registrar_error_detallado(str(e), traceback.format_exc())
     finally:
+        filtro_rotacion_running = False
         if finalizado_callback: finalizado_callback()
 
 # ---------------------------------------------------
@@ -343,6 +335,23 @@ def comparar_excel_task(ruta_excel_antiguo, ruta_excel_nuevo, ruta_salida_excel,
 # ---------------------------------------------------
 # 3. LÓGICA DE AUTOMATIZACIÓN MULTI-HILO (WORKER)
 # ---------------------------------------------------
+
+def guardar_resultado_excel(ruta_excel, fila_idx, resultado, intentos=4, espera=3):
+    """Escribe el resultado de una referencia en el Excel; si está abierto en Excel reintenta unos segundos antes de rendirse."""
+    for intento in range(intentos):
+        try:
+            with excel_lock:
+                wb = openpyxl.load_workbook(ruta_excel)
+                try:
+                    wb.active.cell(row=fila_idx, column=18).value = resultado
+                    wb.save(ruta_excel)
+                finally:
+                    wb.close()
+            return
+        except PermissionError:
+            if intento == intentos - 1:
+                raise
+            time.sleep(espera)
 
 def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, precio_minimo, log_callback, update_global_progress, stop_event):
     def log(texto, tag=None):
@@ -432,12 +441,12 @@ def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, preci
                         selector = "tr.moduloTableauBlanc td"
                         target_frame.locator(selector).first.wait_for(state="visible", timeout=15000)
                         resultado = target_frame.locator(selector).first.inner_text().strip()
-                        with excel_lock:
-                            wb = openpyxl.load_workbook(ruta_excel)
-                            ws = wb.active
-                            ws.cell(row=fila_idx, column=18).value = resultado
-                            wb.save(ruta_excel)
-                            wb.close()
+                        try:
+                            guardar_resultado_excel(ruta_excel, fila_idx, resultado)
+                        except PermissionError:
+                            log(f"No se pudo guardar {referencia} porque el Excel está abierto. Ciérralo y repite esa referencia. Resultado obtenido: {resultado}", "error")
+                            update_global_progress()
+                            continue
                         log(f"OK {referencia}: {resultado}")
                         try:
                             btn_otro = target_frame.locator("text=Otro Articulo").first
@@ -657,57 +666,49 @@ def cargar_clientes_excel(ruta_clientes):
     wb.close()
     return clientes
 
-def extraer_no_suministradas(ruta_hoja, log=lambda *a, **k: None):
-    """Recorre todas las pestañas de la hoja de pedido y agrupa por cliente DMS las referencias con ESTADO 'NO SUMINISTRA'."""
-    wb = openpyxl.load_workbook(ruta_hoja, data_only=True)
-    agrupado = {}
-    for ws in wb.worksheets:
-        pedido = ws.cell(row=2, column=5).value
-        encontradas = 0
-        for fila in range(5, ws.max_row + 1):
-            referencia = ws.cell(row=fila, column=2).value
-            estado = ws.cell(row=fila, column=5).value
-            cliente = ws.cell(row=fila, column=8).value
-            if not referencia or not estado:
-                continue
-            if "NO SUMINISTRA" not in _normalizar_texto_estado(estado):
-                continue
-            cliente_norm = _normalizar_cliente_dms(cliente)
-            if not cliente_norm:
-                continue
-            agrupado.setdefault(cliente_norm, []).append(str(referencia).strip())
-            encontradas += 1
-        if encontradas:
-            log(f"Pestaña '{ws.title}' (pedido {pedido}): {encontradas} referencia(s) NO SUMINISTRA.")
-    wb.close()
-    return agrupado
-
-def extraer_sustituciones(ruta_hoja, log=lambda *a, **k: None):
-    """Recorre todas las pestañas de la hoja de pedido y agrupa por cliente DMS las referencias con la casilla SUSTITUCIÓN rellena
-    (y que no estén marcadas como NO SUMINISTRA). Cada entrada es (referencia_original, referencia_sustituta)."""
-    wb = openpyxl.load_workbook(ruta_hoja, data_only=True)
-    agrupado = {}
-    for ws in wb.worksheets:
-        pedido = ws.cell(row=2, column=5).value
-        encontradas = 0
-        for fila in range(5, ws.max_row + 1):
-            referencia = ws.cell(row=fila, column=2).value
-            estado = ws.cell(row=fila, column=5).value
-            sustitucion = ws.cell(row=fila, column=6).value
-            cliente = ws.cell(row=fila, column=8).value
-            if not referencia or sustitucion in (None, ""):
-                continue
-            if "NO SUMINISTRA" in _normalizar_texto_estado(estado):
-                continue
-            cliente_norm = _normalizar_cliente_dms(cliente)
-            if not cliente_norm:
-                continue
-            agrupado.setdefault(cliente_norm, []).append((str(referencia).strip(), str(sustitucion).strip()))
-            encontradas += 1
-        if encontradas:
-            log(f"Pestaña '{ws.title}' (pedido {pedido}): {encontradas} referencia(s) sustituida(s).")
-    wb.close()
-    return agrupado
+def extraer_avisos(ruta_hoja, log=lambda *a, **k: None):
+    """Lee la hoja de pedido en streaming (una sola pasada) y devuelve (no_suministra, sustituciones), agrupados por cliente DMS.
+    no_suministra: {cliente: [referencia, ...]} para ESTADO 'NO SUMINISTRA'.
+    sustituciones: {cliente: [(referencia_original, referencia_sustituta), ...]} con la casilla SUSTITUCIÓN rellena y sin NO SUMINISTRA.
+    Las hojas suelen declarar más de un millón de filas, por eso no se usa ws.max_row ni acceso celda a celda."""
+    wb = openpyxl.load_workbook(ruta_hoja, data_only=True, read_only=True)
+    no_suministra = {}
+    sustituciones = {}
+    try:
+        for ws in wb.worksheets:
+            pedido = None
+            encontradas_no = 0
+            encontradas_sus = 0
+            for numero_fila, fila in enumerate(ws.iter_rows(min_row=2, max_col=8, values_only=True), start=2):
+                if numero_fila == 2:
+                    pedido = fila[4] if len(fila) > 4 else None
+                    continue
+                if numero_fila < 5:
+                    continue
+                if not fila:
+                    continue
+                if len(fila) < 8:
+                    fila = tuple(fila) + (None,) * (8 - len(fila))
+                referencia, estado, sustitucion, cliente = fila[1], fila[4], fila[5], fila[7]
+                if not referencia:
+                    continue
+                if estado and "NO SUMINISTRA" in _normalizar_texto_estado(estado):
+                    cliente_norm = _normalizar_cliente_dms(cliente)
+                    if cliente_norm:
+                        no_suministra.setdefault(cliente_norm, []).append(str(referencia).strip())
+                        encontradas_no += 1
+                elif sustitucion not in (None, ""):
+                    cliente_norm = _normalizar_cliente_dms(cliente)
+                    if cliente_norm:
+                        sustituciones.setdefault(cliente_norm, []).append((str(referencia).strip(), str(sustitucion).strip()))
+                        encontradas_sus += 1
+            if encontradas_no:
+                log(f"Pestaña '{ws.title}' (pedido {pedido}): {encontradas_no} referencia(s) NO SUMINISTRA.")
+            if encontradas_sus:
+                log(f"Pestaña '{ws.title}' (pedido {pedido}): {encontradas_sus} referencia(s) sustituida(s).")
+    finally:
+        wb.close()
+    return no_suministra, sustituciones
 
 def construir_cuerpo_aviso(referencias, fecha_str):
     if len(referencias) == 1:
@@ -788,8 +789,7 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
             resultado["error"] = str(e)
             return
         try:
-            agrupado_no_suministra = extraer_no_suministradas(ruta_hoja, log)
-            agrupado_sustituciones = extraer_sustituciones(ruta_hoja, log)
+            agrupado_no_suministra, agrupado_sustituciones = extraer_avisos(ruta_hoja, log)
         except Exception as e:
             log(f"❌ No se pudo leer la hoja de pedido: {e}", "error")
             registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_hoja")
@@ -985,7 +985,7 @@ def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, pr
 
 MADD_URL_DOCUMENTOS = "https://www.madd.stellantis.com/documents"
 MADD_PERFIL_TEXTO = "Piezas de recambio"
-LOG_FACTURAS_MADD = "log_facturas_madd.txt"
+LOG_FACTURAS_MADD = ruta_datos("log_facturas_madd.txt", migrar=False)
 MADD_PAGINAS_MAX = 10  # 100 docs/página -> hasta 1000 documentos más recientes revisados
 
 def _dia_laborable_anterior(fecha):
@@ -1809,6 +1809,19 @@ class AppIntegrada(ctk.CTk):
         except Exception:
             return default
 
+    def hay_tarea_activa(self):
+        activa = tarea_activa()
+        if activa:
+            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+            return True
+        return False
+
+    def excel_abierto(self, ruta, descripcion):
+        if archivo_bloqueado(ruta):
+            messagebox.showwarning("Archivo en uso", f"{descripcion} está abierto en Excel u otro programa:\n{ruta}\n\nCiérralo y vuelve a intentarlo.")
+            return True
+        return False
+
     def validar_archivo(self, ruta, mensaje):
         if not ruta or not os.path.exists(ruta):
             messagebox.showwarning("Aviso", mensaje)
@@ -1857,9 +1870,8 @@ class AppIntegrada(ctk.CTk):
             self.iniciar_auto()
 
     def iniciar_auto(self, al_terminar=None):
-        activa = tarea_activa()
-        if activa:
-            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+        global automation_running
+        if self.hay_tarea_activa():
             return False
         try:
             self.guardar_configuracion_ui_internal()
@@ -1877,6 +1889,8 @@ class AppIntegrada(ctk.CTk):
             return False
         if not self.validar_archivo(ruta, "Selecciona un Excel valido para la automatizacion."):
             return False
+        if self.excel_abierto(ruta, "El Excel de la automatización"):
+            return False
         if not user or not pwd:
             messagebox.showwarning("Aviso", "Completa usuario y contrasena antes de continuar.")
             return False
@@ -1884,9 +1898,14 @@ class AppIntegrada(ctk.CTk):
         self.btn_auto.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         self.limpiar_caja(self.auto_log_box)
         stop_event_auto.clear()
+        automation_running = True
 
         def correr():
-            ejecutar_automatizacion_task(ruta, user, pwd, precio, hilos, lambda t, tag=None: self.after(0, self.log_callback_auto, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_auto), stop_event_auto)
+            global automation_running
+            try:
+                ejecutar_automatizacion_task(ruta, user, pwd, precio, hilos, lambda t, tag=None: self.after(0, self.log_callback_auto, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_auto), stop_event_auto)
+            finally:
+                automation_running = False
             if al_terminar:
                 self.after(0, al_terminar, auto_completada_ok and not stop_event_auto.is_set())
 
@@ -1894,9 +1913,7 @@ class AppIntegrada(ctk.CTk):
         return True
 
     def iniciar_flujo_completo(self):
-        activa = tarea_activa()
-        if activa:
-            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+        if self.hay_tarea_activa():
             return
         ruta_auto = self.widget_get("excel_auto_entry")
         ruta_rot = self.widget_get("excel_rot_entry")
@@ -1911,6 +1928,10 @@ class AppIntegrada(ctk.CTk):
             float(self.widget_get("umbral_entry"))
         except Exception:
             messagebox.showwarning("Aviso", "Introduce un umbral de rotación válido.")
+            return
+        if self.excel_abierto(ruta_auto, "El Excel de stock"):
+            return
+        if self.excel_abierto(str(Path(folder_salida) / f"{Path(ruta_auto).stem}_ROTACION.xlsx"), "El Excel de salida de rotación"):
             return
         if not messagebox.askyesno("Flujo completo", "Se ejecutará la automatización sobre el Excel de stock y, si termina bien, el filtro de rotación sobre ese mismo Excel. ¿Continuar?"):
             return
@@ -1942,9 +1963,7 @@ class AppIntegrada(ctk.CTk):
             stop_event_pedidos.set()
 
     def iniciar_pedidos(self):
-        activa = tarea_activa()
-        if activa:
-            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+        if self.hay_tarea_activa():
             return
         self.guardar_configuracion_ui_internal()
         ruta = self.excel_pedidos_entry.get()
@@ -1952,6 +1971,8 @@ class AppIntegrada(ctk.CTk):
         if not self.validar_archivo(ruta, "Selecciona un Excel válido para generar pedidos."):
             return
         if not self.validar_carpeta(folder, "Selecciona una carpeta de destino para los pedidos."):
+            return
+        if self.excel_abierto(ruta, "El Excel de pedidos"):
             return
         self.actualizar_estado("generando pedidos", folder)
         self.btn_pedidos.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
@@ -2025,7 +2046,7 @@ class AppIntegrada(ctk.CTk):
 
     def iniciar_avisos_no_suministro(self):
         global avisos_running
-        if avisos_running:
+        if self.hay_tarea_activa():
             return
         self.guardar_configuracion_ui_internal()
         ruta_hoja = self.widget_get("hoja_avisos_entry")
@@ -2048,6 +2069,7 @@ class AppIntegrada(ctk.CTk):
         self.actualizar_estado("generando avisos de no suministro")
         self.btn_avisos.configure(text="Generando...", state="disabled")
         self.limpiar_caja(self.avisos_log_box)
+        avisos_running = True
         threading.Thread(
             target=generar_avisos_no_suministro_task,
             args=(ruta_hoja, ruta_clientes),
@@ -2111,9 +2133,7 @@ class AppIntegrada(ctk.CTk):
             stop_event_comparador.set()
 
     def iniciar_comparador(self):
-        activa = tarea_activa()
-        if activa:
-            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+        if self.hay_tarea_activa():
             return
         self.guardar_configuracion_ui_internal()
         ruta_ant = self.excel_old_entry.get()
@@ -2128,6 +2148,8 @@ class AppIntegrada(ctk.CTk):
         if not self.validar_carpeta(folder, "Selecciona una carpeta para el resultado comparado."):
             return
         ruta_salida = str(Path(folder) / "resultado_comparacion.xlsx")
+        if self.excel_abierto(ruta_salida, "El resultado de la comparación anterior"):
+            return
         self.actualizar_estado("comparando excels", ruta_salida)
         self.btn_comparador.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         stop_event_comparador.clear()
@@ -2139,9 +2161,8 @@ class AppIntegrada(ctk.CTk):
         self.btn_comparador.configure(text="Comparar Excels", fg_color=acc_color, hover_color=self.color_hover, state="normal")
 
     def iniciar_filtro_rotacion(self):
-        activa = tarea_activa()
-        if activa:
-            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+        global filtro_rotacion_running
+        if self.hay_tarea_activa():
             return False
         self.guardar_configuracion_ui_internal()
         ruta_quiter = self.excel_quiter_entry.get()
@@ -2164,9 +2185,12 @@ class AppIntegrada(ctk.CTk):
         if not self.validar_carpeta(folder_salida, "Selecciona una carpeta de salida para rotación."):
             return False
         ruta_estimacion = str(Path(folder_salida) / f"{Path(ruta_quiter).stem}_ROTACION.xlsx")
+        if self.excel_abierto(ruta_estimacion, "El Excel de salida de rotación"):
+            return False
         self.actualizar_estado("analizando rotación", ruta_estimacion)
         self.btn_rotacion.configure(state="disabled", text="Analizando...")
         self.limpiar_caja(self.rotacion_log_box)
+        filtro_rotacion_running = True
         threading.Thread(target=filtrar_por_rotacion_task, args=(ruta_quiter, ruta_rot, folder_salida, umbral, "FF0000", precio_minimo, lambda t, tag=None: self.after(0, self.log_callback_rotacion, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_filtro_rotacion)), daemon=True).start()
         return True
 
@@ -2187,9 +2211,7 @@ class AppIntegrada(ctk.CTk):
             self.iniciar_mopar()
 
     def iniciar_mopar(self):
-        activa = tarea_activa()
-        if activa:
-            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+        if self.hay_tarea_activa():
             return
         self.guardar_configuracion_ui_internal()
         ruta = self.excel_mopar_entry.get()
@@ -2219,9 +2241,7 @@ class AppIntegrada(ctk.CTk):
             self.iniciar_stock_fiat()
 
     def iniciar_stock_fiat(self):
-        activa = tarea_activa()
-        if activa:
-            messagebox.showwarning("Aviso", f"Ya hay una tarea en curso ({activa}). Espera a que termine antes de iniciar otra.")
+        if self.hay_tarea_activa():
             return
         self.guardar_configuracion_ui_internal()
         ruta = self.excel_stock_fiat_entry.get()
@@ -2247,7 +2267,7 @@ class AppIntegrada(ctk.CTk):
 
     def iniciar_facturas_madd(self):
         global madd_running
-        if madd_running:
+        if self.hay_tarea_activa():
             return
         self.guardar_configuracion_ui_internal()
         usuario = self.widget_get("usuario_madd_entry")
@@ -2269,6 +2289,7 @@ class AppIntegrada(ctk.CTk):
         self.actualizar_estado("descargando facturas MADD")
         self.btn_madd.configure(text="Ejecutando...", state="disabled")
         self.limpiar_caja(self.madd_log_box)
+        madd_running = True
         threading.Thread(
             target=tarea_facturas_madd,
             args=(usuario, password, carpeta, email_destino, email_aviso),
@@ -2358,15 +2379,14 @@ class AppIntegrada(ctk.CTk):
             "filtro_dia_facturas_madd": self.widget_get("filtro_dia_madd_option", "Ayer"),
             "color_resaltado": self.widget_get("color_optionmenu", "Amarillo"),
             "modo_apariencia": "Dark" if self.widget_get("modo_option", "Claro" if self.config.get("modo_apariencia", "Light") != "Dark" else "Oscuro") == "Oscuro" else "Light",
-            "mopar_fecha": self.config.get("mopar_fecha"),
-            "mopar_numero": self.config.get("mopar_numero"),
-            "stock_fiat_fecha": self.config.get("stock_fiat_fecha"),
-            "stock_fiat_numero": self.config.get("stock_fiat_numero")
         }
         if hasattr(self, "reclamaciones_power_line"):
             config.update(self.reclamaciones_power_line.obtener_configuracion())
-            self.config.update(config)
-        guardar_configuracion(config)
+        # Se fusiona con lo que hay en disco para no pisar claves que escriben otros procesos (contadores de Mopar/Stock FIAT)
+        completa = cargar_configuracion()
+        completa.update(config)
+        guardar_configuracion(completa)
+        self.config.update(completa)
 
     def finalizar_mopar(self):
         acc_color = self.color_principal
