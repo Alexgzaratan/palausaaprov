@@ -1182,6 +1182,95 @@ def enviar_correo_outlook_madd(outlook, destinatarios, asunto, cuerpo_texto, adj
             mail.Attachments.Add(str(ruta))
     mail.Send()
 
+def outlook_en_ejecucion():
+    """True si hay un Outlook de escritorio abierto en esta sesión."""
+    try:
+        salida = subprocess.run(["tasklist", "/FI", "IMAGENAME eq OUTLOOK.EXE", "/NH"], capture_output=True, timeout=30,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return b"OUTLOOK.EXE" in salida.stdout.upper()
+    except Exception:
+        return False
+
+def asegurar_outlook_abierto(log, espera_max=120):
+    """Si Outlook está cerrado lo abre (como haría el usuario, para que siga enviando y sincronizando)
+    y espera a que responda. Devuelve el objeto Outlook.Application. Se deja abierto al terminar."""
+    import win32com.client
+    if not outlook_en_ejecucion():
+        log("Outlook estaba cerrado: abriéndolo para poder enviar el correo...")
+        try:
+            os.startfile("outlook.exe")
+        except Exception as e:
+            log(f"⚠️ No se pudo abrir Outlook de forma directa ({e}); se intentará arrancarlo por COM.", "error")
+    limite = time.time() + espera_max
+    ultimo_error = None
+    while time.time() < limite:
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            outlook.GetNamespace("MAPI").GetDefaultFolder(4)  # bandeja de salida: confirma que el perfil ya está cargado
+            return outlook
+        except Exception as e:
+            ultimo_error = e
+            time.sleep(3)
+    raise RuntimeError(f"Outlook no respondió en {espera_max} s: {ultimo_error}")
+
+def esperar_salida_de_correo(outlook, asunto, desde, espera_max=180, intervalo=3):
+    """Espera a que el correo con ese asunto, creado desde 'desde', salga de la bandeja de salida.
+    Devuelve True si salió y False si sigue pendiente al agotar el tiempo."""
+    ns = outlook.GetNamespace("MAPI")
+    limite = time.time() + espera_max
+    empujado = False
+    inicio = time.time()
+    while time.time() < limite:
+        pendiente = False
+        try:
+            for item in ns.GetDefaultFolder(4).Items:
+                try:
+                    if (item.Subject or "") == asunto and item.CreationTime.timestamp() >= desde - 5:
+                        pendiente = True
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pendiente = True
+        if not pendiente:
+            return True
+        if not empujado and time.time() - inicio > 15:
+            empujado = True
+            try:
+                ns.SyncObjects.Item(1).Start()  # fuerza un ciclo de enviar/recibir
+            except Exception:
+                pass
+        time.sleep(intervalo)
+    return False
+
+def registrar_estado_correo_madd(fecha_objetivo, estado, detalle=""):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(LOG_FACTURAS_MADD, "a", encoding="utf-8") as f:
+            f.write(f"--- CORREO [{timestamp}] ---\n")
+            f.write(f"Fecha objetivo: {fecha_objetivo.isoformat()}\n")
+            f.write(f"Estado: {estado}\n")
+            if detalle:
+                f.write(f"{detalle}\n")
+            f.write("-" * 30 + "\n\n")
+    except OSError:
+        pass
+
+def enviar_con_outlook_abierto(destinatarios, asunto, cuerpo, adjuntos, log):
+    """Abre Outlook si hace falta, envía el correo y espera a que salga de la bandeja de salida.
+    Devuelve 'enviado' o 'pendiente' (sigue en la bandeja de salida; saldrá cuando Outlook pueda enviarlo)."""
+    import pythoncom
+    pythoncom.CoInitialize()
+    try:
+        outlook = asegurar_outlook_abierto(log)
+        creado = time.time()
+        enviar_correo_outlook_madd(outlook, destinatarios, asunto, cuerpo, adjuntos=adjuntos)
+        if esperar_salida_de_correo(outlook, asunto, creado):
+            return "enviado"
+        return "pendiente"
+    finally:
+        pythoncom.CoUninitialize()
+
 def _madd_enviar_correo_resultado(email_destino, fecha_objetivo, rutas_facturas, log):
     fecha_str = fecha_objetivo.strftime("%Y-%m-%d")
     asunto = f"Facturas Stellantis del {fecha_str}"
@@ -1189,15 +1278,13 @@ def _madd_enviar_correo_resultado(email_destino, fecha_objetivo, rutas_facturas,
         cuerpo = f"Adjunto las facturas del día {fecha_str}. Total: {len(rutas_facturas)} facturas."
     else:
         cuerpo = f"No hay facturas del día {fecha_str}"
-    import pythoncom
-    import win32com.client
-    pythoncom.CoInitialize()
-    try:
-        outlook = win32com.client.Dispatch("Outlook.Application")
-        enviar_correo_outlook_madd(outlook, email_destino, asunto, cuerpo, adjuntos=rutas_facturas or None)
+    estado = enviar_con_outlook_abierto(email_destino, asunto, cuerpo, rutas_facturas or None, log)
+    if estado == "enviado":
         log(f"✅ Correo enviado a {email_destino} ({len(rutas_facturas)} factura(s) adjuntas).", "success")
-    finally:
-        pythoncom.CoUninitialize()
+        registrar_estado_correo_madd(fecha_objetivo, "enviado", f"Destinatarios: {email_destino} | adjuntos: {len(rutas_facturas)}")
+    else:
+        log(f"⚠️ El correo para {email_destino} sigue en la bandeja de salida de Outlook; saldrá en cuanto Outlook pueda enviarlo.", "error")
+        registrar_estado_correo_madd(fecha_objetivo, "PENDIENTE en la bandeja de salida de Outlook", f"Destinatarios: {email_destino} | adjuntos: {len(rutas_facturas)}")
 
 def _madd_enviar_aviso_fallo(email_aviso, fecha_objetivo, resultado, log):
     if not email_aviso:
@@ -1208,15 +1295,12 @@ def _madd_enviar_aviso_fallo(email_aviso, fecha_objetivo, resultado, log):
     error = resultado.get("error") or "error desconocido"
     asunto = f"[AVISO] Fallo en descarga de facturas Stellantis del {fecha_str}"
     cuerpo = f"La descarga automática de facturas Stellantis del día {fecha_str} ha fallado tras 3 intentos.\n\nPaso que falló: {paso}\nError: {error}"
-    import pythoncom
-    import win32com.client
-    pythoncom.CoInitialize()
-    try:
-        outlook = win32com.client.Dispatch("Outlook.Application")
-        enviar_correo_outlook_madd(outlook, email_aviso, asunto, cuerpo)
+    estado = enviar_con_outlook_abierto(email_aviso, asunto, cuerpo, None, log)
+    if estado == "enviado":
         log(f"✅ Aviso de fallo enviado a {email_aviso}.", "error")
-    finally:
-        pythoncom.CoUninitialize()
+    else:
+        log(f"⚠️ El aviso de fallo para {email_aviso} sigue en la bandeja de salida de Outlook.", "error")
+    registrar_estado_correo_madd(fecha_objetivo, f"aviso de fallo: {estado}", f"Destinatarios: {email_aviso}")
 
 def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email_aviso_fallo, filtro_dia="Ayer", log_callback=None, finalizado_callback=None, resultado_callback=None):
     global madd_running
