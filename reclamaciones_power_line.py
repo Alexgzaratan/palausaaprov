@@ -14,6 +14,7 @@ import customtkinter as ctk
 from PIL import Image
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+import estilo
 from rutas_app import ruta_datos
 
 
@@ -263,77 +264,69 @@ class ModuloReclamacionesPowerLine:
                                segmented_button_fg_color=self.app.color_panel_medio,
                                segmented_button_unselected_color=self.app.color_panel_medio,
                                text_color=self.app.color_texto)
-        panel.pack(padx=14, pady=12, fill="both", expand=True)
+        panel.pack(padx=8, pady=8, fill="both", expand=True)
         self.tab_formulario = panel.add("Formulario")
         self.tab_historial = panel.add("Historial")
         self._construir_formulario()
         self._construir_historial()
 
     def _construir_formulario(self):
+        app = self.app
         contenedor = ctk.CTkScrollableFrame(self.tab_formulario, fg_color="transparent")
         contenedor.pack(padx=2, pady=2, fill="both", expand=True)
-        card = ctk.CTkFrame(contenedor, fg_color=self.app.color_superficie, corner_radius=12, border_width=1, border_color=self.app.color_borde)
-        card.pack(padx=12, pady=8, fill="x", expand=True)
-        ctk.CTkLabel(card, text="Nueva reclamación", font=("Segoe UI", 16, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(20, 2))
-        ctk.CTkLabel(card, text="Los campos marcados con * son obligatorios.", font=("Segoe UI", 12), text_color=self.app.color_texto_sec).pack(anchor="w", padx=22, pady=(0, 12))
-        ctk.CTkFrame(card, fg_color=self.app.color_borde, height=1).pack(fill="x", padx=22, pady=(0, 14))
+        card = app.crear_tarjeta_tab(contenedor, "Nueva reclamación", "Los campos marcados con * son obligatorios.")
         self.litigio_entry = self._campo(card, "Nº Litigio *")
         self.pedido_entry = self._campo(card, "Nº Pedido SAP")
         self.referencia_entry = self._campo(card, "Referencia")
         self._crear_selector_destino(card)
-        ctk.CTkLabel(card, text="Descripción del problema", font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(2, 4))
-        self.descripcion_text = ctk.CTkTextbox(card, height=46, corner_radius=12, border_width=2, border_color=self.app.color_borde,
-                                               fg_color=self.app.color_campo, text_color=self.app.color_texto)
-        self.descripcion_text.pack(padx=22, pady=(0, 8), fill="x")
-        ctk.CTkLabel(card, text="Fotografías *", font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(2, 4))
+        app.crear_etiqueta(card, "Descripción del problema", negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(2, 4))
+        self.descripcion_text = ctk.CTkTextbox(card, height=56, corner_radius=estilo.RADIO, border_width=1, border_color=app.color_borde,
+                                               fg_color=app.color_campo, text_color=app.color_texto, font=estilo.fuente())
+        self.descripcion_text.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        app.crear_etiqueta(card, "Fotografías *", negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(2, 4))
         fotos_frame = ctk.CTkFrame(card, fg_color="transparent")
-        fotos_frame.pack(padx=22, pady=(0, 10), fill="x")
+        fotos_frame.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
         for clave, etiqueta in PHOTO_FIELDS:
             self._crear_selector_foto(fotos_frame, clave, etiqueta)
         self.pdf_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(card, text="Generar también PDF", variable=self.pdf_var, fg_color=self.app.color_principal,
-                        hover_color=self.app.color_hover, text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(0, 8))
+        ctk.CTkCheckBox(card, text="Generar también PDF", variable=self.pdf_var, fg_color=app.color_principal,
+                        hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_X, pady=(0, estilo.PAD_Y))
         acciones = ctk.CTkFrame(card, fg_color="transparent")
-        acciones.pack(padx=22, pady=(0, 18), fill="x")
-        self.btn_generar = self.app.crear_boton_principal(acciones, "Generar documento", self.generar_documento)
+        acciones.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        self.btn_generar = app.crear_boton_principal(acciones, "Generar documento", self.generar_documento)
         self.btn_generar.pack(fill="x")
-        ctk.CTkButton(acciones, text="Limpiar formulario", height=36, corner_radius=8, fg_color=self.app.color_panel_medio,
-                      text_color=self.app.color_texto, hover_color=self.app.color_panel_medio_hover, border_width=1,
-                      border_color=self.app.color_borde, command=self.limpiar_formulario).pack(fill="x", pady=(8, 0))
+        app.crear_boton_secundario(acciones, "Limpiar formulario", self.limpiar_formulario).pack(fill="x", pady=(8, 0))
 
     def _crear_selector_destino(self, card):
-        destino = ctk.CTkFrame(card, fg_color=self.app.color_superficie_alt, corner_radius=10)
-        destino.pack(padx=22, pady=(0, 8), fill="x")
-        ctk.CTkLabel(destino, text="Carpeta de destino", font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=12, pady=(8, 3))
+        app = self.app
+        destino = ctk.CTkFrame(card, fg_color=app.color_superficie_alt, corner_radius=10)
+        destino.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        app.crear_etiqueta(destino, "Carpeta de destino", negrita=True).pack(anchor="w", padx=estilo.PAD_FILA, pady=(estilo.PAD_FILA - 4, 4))
         destino_fila = ctk.CTkFrame(destino, fg_color="transparent")
-        destino_fila.pack(padx=12, pady=(0, 8), fill="x")
-        self.destino_entry = ctk.CTkEntry(destino_fila, height=36, corner_radius=8, border_width=1, border_color=self.app.color_borde,
-                                           fg_color=self.app.color_campo, text_color=self.app.color_texto)
+        destino_fila.pack(padx=estilo.PAD_FILA, pady=(0, estilo.PAD_FILA - 2), fill="x")
+        self.destino_entry = app.crear_entrada(destino_fila)
         self.destino_entry.insert(0, self.configuracion.get("power_line_ruta_guardado", ""))
         self.destino_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ctk.CTkButton(destino_fila, text="Elegir carpeta", width=122, height=36, corner_radius=8, fg_color=self.app.color_principal,
-                      hover_color=self.app.color_hover, command=self.cambiar_carpeta).pack(side="right")
+        app.crear_boton_secundario(destino_fila, "Elegir carpeta", self.cambiar_carpeta, width=122).pack(side="right")
 
     def _campo(self, parent, texto):
-        ctk.CTkLabel(parent, text=texto, font=("Segoe UI", 11, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=22, pady=(2, 3))
-        entrada = ctk.CTkEntry(parent, height=32, corner_radius=8, border_width=1, border_color=self.app.color_borde,
-                                fg_color=self.app.color_campo, text_color=self.app.color_texto)
-        entrada.pack(padx=22, pady=(0, 6), fill="x")
+        self.app.crear_etiqueta(parent, texto, negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(2, 4))
+        entrada = self.app.crear_entrada(parent)
+        entrada.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
         return entrada
 
     def _crear_selector_foto(self, parent, clave, etiqueta):
-        marco = ctk.CTkFrame(parent, fg_color=self.app.color_superficie_alt, corner_radius=10)
+        app = self.app
+        marco = ctk.CTkFrame(parent, fg_color=app.color_superficie_alt, corner_radius=10)
         marco.pack(fill="x", pady=3)
         vista = ctk.CTkLabel(marco, text="", width=54)
         vista.pack(side="left", padx=(8, 0), pady=5)
-        etiqueta_estado = ctk.CTkLabel(marco, text=etiqueta + "\nArrastra desde el explorador o un adjunto del correo", justify="left", anchor="w",
-                                       font=("Segoe UI", 11), text_color=self.app.color_texto)
+        etiqueta_estado = app.crear_etiqueta(marco, etiqueta + "\nArrastra desde el explorador o un adjunto del correo", estilo.TAM_PEQUENO, justify="left", anchor="w")
         etiqueta_estado.pack(side="left", padx=12, pady=8, fill="x", expand=True)
-        boton = ctk.CTkButton(marco, text="Seleccionar", width=94, height=32, corner_radius=8, fg_color=self.app.color_panel_medio,
-                              text_color=self.app.color_texto, hover_color=self.app.color_panel_medio_hover, command=lambda: self.seleccionar_foto(clave))
+        boton = app.crear_boton_secundario(marco, "Seleccionar", lambda: self.seleccionar_foto(clave), alto=estilo.ALTO_BOTON_COMPACTO, width=94)
         boton.pack(side="right", padx=(4, 8), pady=8)
-        eliminar = ctk.CTkButton(marco, text="×", width=30, height=32, corner_radius=8, fg_color=self.app.color_peligro,
-                                 hover_color=self.app.color_peligro_hover, command=lambda: self.eliminar_foto(clave))
+        eliminar = ctk.CTkButton(marco, text="×", width=30, height=estilo.ALTO_BOTON_COMPACTO, corner_radius=estilo.RADIO, fg_color=app.color_peligro,
+                                 hover_color=app.color_peligro_hover, command=lambda: self.eliminar_foto(clave))
         eliminar.pack(side="right", padx=2, pady=8)
         self.previews[clave] = (vista, etiqueta_estado, boton, eliminar, etiqueta)
         if self.dnd_activo:
@@ -405,24 +398,23 @@ class ModuloReclamacionesPowerLine:
             self.app.actualizar_estado("carpeta de Power Line actualizada", ruta)
 
     def _construir_historial(self):
-        card = self.app.crear_tarjeta_tab(self.tab_historial, "Historial de reclamaciones", "Busca, abre o elimina registros; eliminar no borra los documentos.")
+        app = self.app
+        card = app.crear_tarjeta_tab(self.tab_historial, "Historial de reclamaciones", "Busca, abre o elimina registros; eliminar no borra los documentos.")
         fila = ctk.CTkFrame(card, fg_color="transparent")
-        fila.pack(padx=22, pady=(0, 10), fill="x")
-        self.busqueda_entry = ctk.CTkEntry(fila, placeholder_text="Nº litigio, referencia o pedido SAP...", height=36, corner_radius=8,
-                                            border_width=1, border_color=self.app.color_borde, fg_color=self.app.color_campo, text_color=self.app.color_texto)
+        fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        self.busqueda_entry = app.crear_entrada(fila, placeholder_text="Nº litigio, referencia o pedido SAP...")
         self.busqueda_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.busqueda_entry.bind("<KeyRelease>", lambda _event: self.actualizar_historial())
-        ctk.CTkButton(fila, text="Buscar", width=76, height=36, corner_radius=8, fg_color=self.app.color_panel_medio,
-                      text_color=self.app.color_texto, hover_color=self.app.color_panel_medio_hover, command=self.actualizar_historial).pack(side="right")
-        tabla_frame = ctk.CTkFrame(card, fg_color=self.app.color_campo, corner_radius=8, border_width=1, border_color=self.app.color_borde)
-        tabla_frame.pack(padx=22, pady=(0, 10), fill="both", expand=True)
-        estilo = ttk.Style()
-        estilo.theme_use("clam")
-        estilo.configure("PowerLine.Treeview", background=self.app.color_campo, fieldbackground=self.app.color_campo,
-                          foreground=self.app.color_texto, rowheight=28, borderwidth=0, font=("Segoe UI", 11))
-        estilo.configure("PowerLine.Treeview.Heading", background=self.app.color_panel_medio, foreground=self.app.color_texto,
-                          font=("Segoe UI", 11, "bold"), relief="flat", borderwidth=0)
-        estilo.map("PowerLine.Treeview", background=[("selected", self.app.color_principal)], foreground=[("selected", "#ffffff")])
+        app.crear_boton_secundario(fila, "Buscar", self.actualizar_historial, width=76).pack(side="right")
+        tabla_frame = ctk.CTkFrame(card, fg_color=app.color_campo, corner_radius=estilo.RADIO, border_width=1, border_color=app.color_borde)
+        tabla_frame.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="both", expand=True)
+        estilo_tabla = ttk.Style()
+        estilo_tabla.theme_use("clam")
+        estilo_tabla.configure("PowerLine.Treeview", background=app.color_campo, fieldbackground=app.color_campo,
+                               foreground=app.color_texto, rowheight=28, borderwidth=0, font=estilo.fuente(estilo.TAM_PEQUENO))
+        estilo_tabla.configure("PowerLine.Treeview.Heading", background=app.color_panel_medio, foreground=app.color_texto,
+                               font=estilo.fuente(estilo.TAM_PEQUENO, True), relief="flat", borderwidth=0)
+        estilo_tabla.map("PowerLine.Treeview", background=[("selected", app.color_principal)], foreground=[("selected", "#ffffff")])
         columnas = ("litigio", "fecha", "pedido", "referencia")
         self.tabla = ttk.Treeview(tabla_frame, columns=columnas, show="headings", height=7, style="PowerLine.Treeview")
         for clave, texto, ancho in (("litigio", "Nº Litigio", 115), ("fecha", "Fecha", 120), ("pedido", "Pedido SAP", 120), ("referencia", "Referencia", 150)):
@@ -433,10 +425,10 @@ class ModuloReclamacionesPowerLine:
         barra.pack(side="right", fill="y", pady=4)
         self.tabla.configure(yscrollcommand=barra.set)
         acciones = ctk.CTkFrame(card, fg_color="transparent")
-        acciones.pack(padx=22, pady=(0, 18), fill="x")
-        ctk.CTkButton(acciones, text="Abrir documento", height=36, corner_radius=8, fg_color=self.app.color_panel_medio, text_color=self.app.color_texto, hover_color=self.app.color_panel_medio_hover, command=self.abrir_documento).pack(side="left")
-        ctk.CTkButton(acciones, text="Abrir carpeta", height=36, corner_radius=8, fg_color=self.app.color_panel_medio, text_color=self.app.color_texto, hover_color=self.app.color_panel_medio_hover, command=self.abrir_carpeta).pack(side="left", padx=8)
-        ctk.CTkButton(acciones, text="Eliminar registro", height=36, corner_radius=8, fg_color=self.app.color_peligro, hover_color=self.app.color_peligro_hover, command=self.eliminar_registro).pack(side="right")
+        acciones.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        app.crear_boton_secundario(acciones, "Abrir documento", self.abrir_documento).pack(side="left")
+        app.crear_boton_secundario(acciones, "Abrir carpeta", self.abrir_carpeta).pack(side="left", padx=8)
+        ctk.CTkButton(acciones, text="Eliminar registro", height=estilo.ALTO_CONTROL, corner_radius=estilo.RADIO, fg_color=app.color_peligro, hover_color=app.color_peligro_hover, command=self.eliminar_registro).pack(side="right")
         self.actualizar_historial()
 
     def actualizar_historial(self):
@@ -558,24 +550,25 @@ class ModuloReclamacionesPowerLine:
         messagebox.showerror("Error", f"No se pudo generar la reclamación.\n{detalle}")
 
     def construir_ajustes(self, parent):
-        marco = ctk.CTkFrame(parent, fg_color=self.app.color_superficie_alt, corner_radius=10)
-        marco.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(marco, text="Reclamaciones Power Line", font=("Segoe UI", 12, "bold"), text_color=self.app.color_texto).pack(anchor="w", padx=18, pady=(12, 6))
+        app = self.app
+        marco = ctk.CTkFrame(parent, fg_color=app.color_superficie_alt, corner_radius=10)
+        marco.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        app.crear_etiqueta(marco, "Reclamaciones Power Line", negrita=True).pack(anchor="w", padx=estilo.PAD_FILA, pady=(estilo.PAD_FILA, 4))
         self.plantilla_entry = self._fila_ajuste(marco, "Ruta de la plantilla Word", "power_line_ruta_plantilla", self._seleccionar_plantilla)
         self.guardado_entry = self._fila_ajuste(marco, "Ruta por defecto de guardado", "power_line_ruta_guardado", self.cambiar_carpeta)
         self.abrir_documento_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_abrir_documento", False)))
         self.abrir_carpeta_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_abrir_carpeta", False)))
-        ctk.CTkCheckBox(marco, text="Abrir documento al finalizar", variable=self.abrir_documento_var, fg_color=self.app.color_principal, hover_color=self.app.color_hover, text_color=self.app.color_texto).pack(anchor="w", padx=18, pady=4)
-        ctk.CTkCheckBox(marco, text="Abrir carpeta al finalizar", variable=self.abrir_carpeta_var, fg_color=self.app.color_principal, hover_color=self.app.color_hover, text_color=self.app.color_texto).pack(anchor="w", padx=18, pady=(4, 12))
+        ctk.CTkCheckBox(marco, text="Abrir documento al finalizar", variable=self.abrir_documento_var, fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=4)
+        ctk.CTkCheckBox(marco, text="Abrir carpeta al finalizar", variable=self.abrir_carpeta_var, fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=(4, estilo.PAD_FILA))
 
     def _fila_ajuste(self, parent, texto, clave, comando):
         fila = ctk.CTkFrame(parent, fg_color="transparent")
-        fila.pack(padx=18, pady=5, fill="x")
-        ctk.CTkLabel(fila, text=texto, width=180, anchor="w", font=("Segoe UI", 11), text_color=self.app.color_texto).pack(side="left")
-        entrada = ctk.CTkEntry(fila, height=32, corner_radius=8, border_color=self.app.color_borde, fg_color=self.app.color_campo, text_color=self.app.color_texto)
+        fila.pack(padx=estilo.PAD_FILA, pady=5, fill="x")
+        self.app.crear_etiqueta(fila, texto, width=180, anchor="w").pack(side="left")
+        entrada = self.app.crear_entrada(fila)
         entrada.insert(0, self.configuracion.get(clave, ""))
         entrada.pack(side="left", fill="x", expand=True, padx=6)
-        ctk.CTkButton(fila, text="Examinar", width=80, height=32, corner_radius=8, fg_color=self.app.color_panel_medio, text_color=self.app.color_texto, hover_color=self.app.color_panel_medio_hover, command=comando).pack(side="right")
+        self.app.crear_boton_secundario(fila, "Examinar", comando, width=80).pack(side="right")
         return entrada
 
     def _seleccionar_plantilla(self):
@@ -588,6 +581,6 @@ class ModuloReclamacionesPowerLine:
         return {
             "power_line_ruta_plantilla": self.plantilla_entry.get() if hasattr(self, "plantilla_entry") else self.configuracion.get("power_line_ruta_plantilla", ""),
             "power_line_ruta_guardado": self.guardado_entry.get() if hasattr(self, "guardado_entry") else self.configuracion.get("power_line_ruta_guardado", ""),
-            "power_line_abrir_documento": self.abrir_documento_var.get() if hasattr(self, "abrir_documento_var") else False,
-            "power_line_abrir_carpeta": self.abrir_carpeta_var.get() if hasattr(self, "abrir_carpeta_var") else False,
+            "power_line_abrir_documento": self.abrir_documento_var.get() if hasattr(self, "abrir_documento_var") else bool(self.configuracion.get("power_line_abrir_documento", False)),
+            "power_line_abrir_carpeta": self.abrir_carpeta_var.get() if hasattr(self, "abrir_carpeta_var") else bool(self.configuracion.get("power_line_abrir_carpeta", False)),
         }

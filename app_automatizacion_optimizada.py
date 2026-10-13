@@ -23,6 +23,7 @@ from tkinter import filedialog, messagebox
 from openpyxl.styles import PatternFill
 from concurrent.futures import ThreadPoolExecutor
 from reclamaciones_power_line import ModuloReclamacionesPowerLine
+import estilo
 from rutas_app import ruta_datos
 from configuracion import CONFIG_FILE, LOG_DETALLADO, cargar_configuracion, guardar_configuracion, registrar_error_detallado
 
@@ -121,6 +122,11 @@ def tarea_activa():
         if activa:
             return nombre
     return None
+
+def correos_invalidos(texto):
+    """Direcciones de una lista separada por ';' o ',' que no tienen forma de correo electrónico."""
+    direcciones = [d.strip() for d in re.split(r"[;,]", texto or "") if d.strip()]
+    return [d for d in direcciones if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", d)]
 
 def archivo_bloqueado(ruta):
     """True si el fichero existe y otro programa (normalmente Excel) lo tiene abierto y no se puede escribir."""
@@ -733,10 +739,14 @@ def extraer_avisos(ruta_hoja, log=lambda *a, **k: None):
             pedido = None
             encontradas_no = 0
             encontradas_sus = 0
+            cabecera_correcta = False
             for numero_fila, fila in enumerate(ws.iter_rows(min_row=2, max_col=8, values_only=True), start=2):
                 if numero_fila == 2:
                     pedido = fila[4] if len(fila) > 4 else None
                     continue
+                if numero_fila == 4:
+                    cabecera = fila[1] if len(fila) > 1 else None
+                    cabecera_correcta = bool(cabecera) and "REFERENCIA" in str(cabecera).upper()
                 if numero_fila < 5:
                     continue
                 if not fila:
@@ -756,6 +766,8 @@ def extraer_avisos(ruta_hoja, log=lambda *a, **k: None):
                     if cliente_norm:
                         sustituciones.setdefault(cliente_norm, []).append((str(referencia).strip(), str(sustitucion).strip()))
                         encontradas_sus += 1
+            if not cabecera_correcta:
+                log(f"⚠️ La pestaña '{ws.title}' no tiene el formato esperado (falta la cabecera «REFERENCIAS A PEDIR» en B4); puede que no se detecte nada.", "error")
             if encontradas_no:
                 log(f"Pestaña '{ws.title}' (pedido {pedido}): {encontradas_no} referencia(s) NO SUMINISTRA.")
             if encontradas_sus:
@@ -856,7 +868,7 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
             try:
                 outlook = win32com.client.Dispatch("Outlook.Application")
             except Exception as e:
-                log(f"❌ No se pudo conectar con Outlook: {e}", "error")
+                log(f"❌ No se pudo conectar con Outlook: {e}. Abre Outlook de escritorio, comprueba que tiene una cuenta configurada y vuelve a intentarlo.", "error")
                 registrar_error_detallado(str(e), traceback.format_exc(), ref="generar_avisos_no_suministro_task_outlook")
                 resultado["error"] = str(e)
                 return
@@ -1381,106 +1393,169 @@ class AppIntegrada(ctk.CTk):
         self._ultimo_porcentaje = -1
         self.aplicar_tema_inicial()
         self.title("Palausa Aprovisionamiento")
-        self.geometry("1000x980")
-        self.minsize(1000, 760)
+        self.ajustar_tamano_ventana()
         self.resizable(True, True)
         if os.path.exists(ICONO_PATH):
             try: self.iconbitmap(ICONO_PATH)
             except Exception: pass
         self.setup_ui()
+        self.configurar_atajos()
         self.comprobar_hoja_pedidos_al_inicio()
+
+    def ajustar_tamano_ventana(self):
+        """Tamaño inicial proporcional a la pantalla (hasta 1500x1000), centrado, y mínimo que mantiene todo legible."""
+        try:
+            escala = ctk.ScalingTracker.get_window_scaling(self)
+        except Exception:
+            escala = 1.0
+        ancho_pantalla = self.winfo_screenwidth() / escala
+        alto_pantalla = self.winfo_screenheight() / escala
+        ancho = int(min(1500, ancho_pantalla * 0.85))
+        alto = int(min(1000, alto_pantalla * 0.88))
+        x = int((ancho_pantalla - ancho) / 2)
+        y = max(0, int((alto_pantalla - alto) / 2) - 20)
+        self.geometry(f"{ancho}x{alto}+{x}+{y}")
+        self.minsize(900, 680)
 
     def aplicar_tema_inicial(self):
         modo = self.config.get("modo_apariencia", "Light")
         ctk.set_appearance_mode("Dark" if modo == "Dark" else "Light")
         ctk.set_default_color_theme("blue")
-        self.accent_color = None
-        self.hover_color = None
 
     def aplicar_estilos_ui(self):
-        # Paleta clara u oscura según configuración (modo_apariencia).
-        modo_oscuro = self.config.get("modo_apariencia", "Light") == "Dark"
-        if modo_oscuro:
-            self.color_principal = "#3b82f6"       # Acento primario (acciones principales)
-            self.color_hover = "#2563eb"
-            self.color_superficie = "#1e293b"      # Fondo de tarjetas/paneles
-            self.color_superficie_alt = "#26374d"  # Fondo de sub-secciones dentro de una tarjeta
-            self.color_campo = "#16202f"           # Fondo de campos de texto
-            self.color_borde = "#334155"
-            self.color_texto = "#e2e8f0"
-            self.color_texto_sec = "#94a3b8"
-            self.color_panel_oscuro = "#0f172a"    # Secciones destacadas de fondo oscuro
-            self.color_panel_medio = "#2b3a4f"     # Fondo de botones secundarios
-            self.color_panel_medio_hover = "#374763"
-            self.color_panel_claro = "#0f172a"     # Fondo general de la ventana
-            self.color_acento_azul = "#38bdf8"
-            self.color_ok = "#22c55e"
-            self.color_warn = "#f59e0b"
-            self.color_peligro = "#f87171"
-            self.color_peligro_hover = "#ef4444"
-            self.color_pokedex_luz = "#f1f5f9"     # Texto de énfasis (estado, porcentaje)
-        else:
-            self.color_principal = "#2563eb"       # Acento primario (acciones principales)
-            self.color_hover = "#1d4ed8"
-            self.color_superficie = "#ffffff"      # Fondo de tarjetas/paneles
-            self.color_superficie_alt = "#f1f4f9"  # Fondo de sub-secciones dentro de una tarjeta
-            self.color_campo = "#ffffff"           # Fondo de campos de texto
-            self.color_borde = "#dbe1ea"
-            self.color_texto = "#1e2733"
-            self.color_texto_sec = "#64748b"
-            self.color_panel_oscuro = "#eef2f8"    # Secciones destacadas de fondo claro
-            self.color_panel_medio = "#eef1f6"     # Fondo de botones secundarios
-            self.color_panel_medio_hover = "#dfe4ec"
-            self.color_panel_claro = "#f5f6f9"     # Fondo general de la ventana
-            self.color_acento_azul = "#0ea5e9"
-            self.color_ok = "#16a34a"
-            self.color_warn = "#d97706"
-            self.color_peligro = "#dc2626"
-            self.color_peligro_hover = "#b91c1c"
-            self.color_pokedex_luz = "#0f172a"     # Texto de énfasis (estado, porcentaje)
+        # Paleta clara u oscura según configuración (modo_apariencia); definida en estilo.py
+        for nombre, valor in estilo.paleta(self.config.get("modo_apariencia", "Light") == "Dark").items():
+            setattr(self, f"color_{nombre}", valor)
 
-    def crear_tarjeta_tab(self, tab, titulo, subtitulo):
-        card = ctk.CTkFrame(tab, fg_color=self.color_superficie, corner_radius=12, border_width=1, border_color=self.color_borde)
-        card.pack(padx=20, pady=16, fill="both", expand=True)
-        ctk.CTkLabel(card, text=titulo, font=("Segoe UI", 17, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(22, 2))
-        ctk.CTkLabel(card, text=subtitulo, font=("Segoe UI", 12), text_color=self.color_texto_sec).pack(anchor="w", padx=24, pady=(0, 14))
-        ctk.CTkFrame(card, fg_color=self.color_borde, height=1).pack(fill="x", padx=24, pady=(0, 16))
+    # ---------- componentes reutilizables (todos usan estilo.py) ----------
+
+    def crear_etiqueta(self, parent, texto, tam=estilo.TAM_TEXTO, negrita=False, secundario=False, mono=False, **kw):
+        return ctk.CTkLabel(parent, text=texto, font=estilo.fuente(tam, negrita, mono), text_color=self.color_texto_sec if secundario else self.color_texto, **kw)
+
+    def crear_entrada(self, parent, **kw):
+        return ctk.CTkEntry(parent, height=estilo.ALTO_CONTROL, corner_radius=estilo.RADIO, border_width=1, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto, **kw)
+
+    def crear_boton_secundario(self, parent, texto, comando, alto=estilo.ALTO_CONTROL, **kw):
+        return ctk.CTkButton(parent, text=texto, height=alto, corner_radius=estilo.RADIO, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=comando, **kw)
+
+    def crear_boton_principal(self, parent, text, command, alto=estilo.ALTO_BOTON):
+        return ctk.CTkButton(parent, text=text, height=alto, corner_radius=estilo.RADIO, font=estilo.fuente(estilo.TAM_BOTON, True), fg_color=self.color_principal, text_color="#ffffff", hover_color=self.color_hover, command=command)
+
+    def crear_menu(self, parent, valores, comando=None, **kw):
+        return ctk.CTkOptionMenu(parent, values=valores, height=estilo.ALTO_CONTROL, corner_radius=estilo.RADIO, fg_color=self.color_principal, button_color=self.color_principal, button_hover_color=self.color_hover, command=comando, **kw)
+
+    def crear_tarjeta_tab(self, tab, titulo, subtitulo, en_rejilla=False):
+        card = ctk.CTkFrame(tab, fg_color=self.color_superficie, corner_radius=estilo.RADIO_TARJETA, border_width=1, border_color=self.color_borde)
+        if en_rejilla:
+            self.registrar_tarjeta(tab, card)
+        else:
+            card.pack(padx=20, pady=estilo.PAD_TARJETA * 2, fill="both", expand=True)
+        self.crear_etiqueta(card, titulo, estilo.TAM_TITULO, negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(14, 2))
+        self.crear_etiqueta(card, subtitulo, secundario=True, wraplength=470, justify="left").pack(anchor="w", padx=estilo.PAD_X, pady=(0, 8))
+        ctk.CTkFrame(card, fg_color=self.color_borde, height=1).pack(fill="x", padx=estilo.PAD_X, pady=(0, estilo.PAD_Y + 2))
         return card
 
+    def registrar_tarjeta(self, contenedor, card):
+        """Las tarjetas de una pestaña se reparten en una o dos columnas según el ancho disponible."""
+        if not hasattr(contenedor, "_tarjetas"):
+            contenedor._tarjetas = []
+            contenedor._distribucion = None
+            contenedor.bind("<Configure>", lambda evento, c=contenedor: self.repartir_tarjetas(c, evento.width), add="+")
+        contenedor._tarjetas.append(card)
+        self.repartir_tarjetas(contenedor, contenedor.winfo_width())
+
+    def repartir_tarjetas(self, contenedor, ancho):
+        tarjetas = contenedor._tarjetas
+        columnas = 2 if (ancho >= estilo.ANCHO_DOS_COLUMNAS and len(tarjetas) > 1) else 1
+        distribucion = (columnas, len(tarjetas))
+        if distribucion == contenedor._distribucion:
+            return
+        contenedor._distribucion = distribucion
+        for columna in range(2):
+            contenedor.grid_columnconfigure(columna, weight=1 if columna < columnas else 0, uniform="tarjetas" if columna < columnas else "")
+        for posicion, card in enumerate(tarjetas):
+            fila, columna = divmod(posicion, columnas)
+            ocupa_todo = columnas == 2 and posicion == len(tarjetas) - 1 and len(tarjetas) % 2 == 1
+            card.grid(row=fila, column=0 if ocupa_todo else columna, columnspan=2 if ocupa_todo else 1, sticky="nsew", padx=estilo.PAD_TARJETA, pady=estilo.PAD_TARJETA)
+
     def crear_fila_archivo(self, parent, label_text, entry_attr, config_key, placeholder, button_text, command):
-        ctk.CTkLabel(parent, text=label_text, font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
+        self.crear_etiqueta(parent, label_text, negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(0, 4))
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(padx=24, pady=(0, 16), fill="x")
-        entry = ctk.CTkEntry(row, placeholder_text=placeholder, height=38, corner_radius=8, border_width=1, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
+        row.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        entry = self.crear_entrada(row, placeholder_text=placeholder)
         entry.insert(0, self.config.get(config_key, ""))
-        entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         setattr(self, entry_attr, entry)
-        btn = ctk.CTkButton(row, text=button_text, width=92, height=38, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=command)
-        btn.pack(side="right")
+        self.crear_boton_secundario(row, button_text, command, width=92).pack(side="right")
         return entry
 
-    def crear_boton_principal(self, parent, text, command):
-        return ctk.CTkButton(parent, text=text, height=44, corner_radius=8, font=("Segoe UI", 13, "bold"), fg_color=self.color_principal, text_color="#ffffff", hover_color=self.color_hover, command=command)
+    def crear_fila_ajuste(self, card, texto):
+        """Fila con etiqueta a la izquierda; el control se coloca a la derecha con pack(side='right', padx=estilo.PAD_FILA, pady=6)."""
+        fila = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        self.crear_etiqueta(fila, texto, negrita=True).pack(side="left", padx=(estilo.PAD_FILA, 12), pady=estilo.PAD_FILA - 4)
+        return fila
+
+    def crear_campo_en_fila(self, card, texto, atributo, clave, defecto="", **kw):
+        """Fila con etiqueta arriba y campo de texto a todo el ancho (por ejemplo, listas de correos)."""
+        fila = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        self.crear_etiqueta(fila, texto, negrita=True).pack(anchor="w", padx=estilo.PAD_FILA, pady=(estilo.PAD_FILA - 4, 4))
+        entrada = self.crear_entrada(fila, **kw)
+        entrada.insert(0, self.config.get(clave, defecto))
+        entrada.pack(padx=estilo.PAD_FILA, pady=(0, estilo.PAD_FILA - 2), fill="x")
+        setattr(self, atributo, entrada)
+        return entrada
+
+    def crear_bloque_credenciales(self, card, filas):
+        """filas: lista de (etiqueta, atributo, clave, defecto, ocultar)."""
+        marco = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
+        marco.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        for numero, (texto, atributo, clave, defecto, ocultar) in enumerate(filas):
+            self.crear_etiqueta(marco, texto, negrita=True).grid(row=numero, column=0, padx=estilo.PAD_FILA, pady=6, sticky="w")
+            entrada = self.crear_entrada(marco, width=220, show="*" if ocultar else "")
+            entrada.insert(0, self.config.get(clave, defecto))
+            entrada.grid(row=numero, column=1, padx=estilo.PAD_FILA, pady=6, sticky="ew")
+            setattr(self, atributo, entrada)
+        marco.grid_columnconfigure(1, weight=1)
+
+    def crear_caja_log(self, parent, alto=110):
+        caja = ctk.CTkTextbox(parent, height=alto, font=estilo.fuente(estilo.TAM_TEXTO, mono=True), border_width=1, border_color=self.color_borde, corner_radius=estilo.RADIO, fg_color=self.color_campo, text_color=self.color_texto)
+        caja.tag_config("success", foreground=self.color_ok)
+        caja.tag_config("error", foreground=self.color_peligro)
+        caja.configure(state="disabled")
+        return caja
+
+    def crear_registro(self, card, titulo, atributo, alto, pady_final=estilo.PAD_Y):
+        self.crear_etiqueta(card, titulo, negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(0, 4))
+        caja = self.crear_caja_log(card, alto=alto)
+        caja.pack(padx=estilo.PAD_X, pady=(0, pady_final), fill="x")
+        setattr(self, atributo, caja)
+        return caja
+
+    # ---------- ventana ----------
 
     def setup_ui(self):
         self._ultimo_porcentaje = -1
         self.aplicar_estilos_ui()
-        acc_color = self.color_principal
         self.ultima_ruta_generada = ""
         self.configure(fg_color=self.color_panel_claro)
 
         cabecera = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=0, border_width=0)
         cabecera.pack(fill="x")
         cabecera_int = ctk.CTkFrame(cabecera, fg_color="transparent")
-        cabecera_int.pack(fill="x", padx=24, pady=16)
-        ctk.CTkLabel(cabecera_int, text="Palausa Aprovisionamiento", font=("Segoe UI", 20, "bold"), text_color=self.color_texto).pack(anchor="w")
-        ctk.CTkLabel(cabecera_int, text="Herramienta interna de gestión de stock y pedidos", font=("Segoe UI", 12), text_color=self.color_texto_sec).pack(anchor="w", pady=(2, 0))
+        cabecera_int.pack(fill="x", padx=20, pady=10)
+        self.crear_etiqueta(cabecera_int, "Palausa Aprovisionamiento", estilo.TAM_APP, negrita=True).pack(side="left")
+        self.crear_etiqueta(cabecera_int, "Gestión de stock y pedidos", secundario=True).pack(side="left", padx=(14, 0), pady=(6, 0))
+        self.crear_etiqueta(cabecera_int, "Ctrl+1…8 pestañas  ·  Ctrl+Intro ejecutar  ·  Esc detener", estilo.TAM_PEQUENO, secundario=True).pack(side="right", pady=(6, 0))
         ctk.CTkFrame(self, fg_color=self.color_borde, height=1).pack(fill="x")
+
+        self.construir_panel_actividad()
 
         self.tabview = ctk.CTkTabview(
             self,
             corner_radius=10,
-            segmented_button_selected_color=acc_color,
+            segmented_button_selected_color=self.color_principal,
             segmented_button_selected_hover_color=self.color_hover,
             segmented_button_fg_color=self.color_panel_medio,
             segmented_button_unselected_color=self.color_panel_medio,
@@ -1488,7 +1563,7 @@ class AppIntegrada(ctk.CTk):
             fg_color=self.color_panel_claro,
             border_width=0,
         )
-        self.tabview.pack(pady=(16, 8), padx=22, fill="both", expand=True)
+        self.tabview.pack(pady=(10, 6), padx=16, fill="both", expand=True)
         # Las pestañas se construyen la primera vez que se abren (arranque más rápido)
         self.constructores_pestanas = {
             "Automatización": ("tab_auto", self.build_tab_auto),
@@ -1507,38 +1582,61 @@ class AppIntegrada(ctk.CTk):
         self.construir_pestana(self.tabview.get())
         self.tabview.configure(command=self.al_cambiar_pestana)
 
-        self.frame_progreso = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=10, border_width=1, border_color=self.color_borde)
-        self.frame_progreso.pack(pady=(0, 8), padx=22, fill="x")
-        ctk.CTkLabel(self.frame_progreso, text="Progreso", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(12, 4))
-        barra_row = ctk.CTkFrame(self.frame_progreso, fg_color="transparent")
-        barra_row.pack(padx=16, pady=(0, 12), fill="x")
-        self.progreso_var = ctk.DoubleVar()
-        self.barra_prog = ctk.CTkProgressBar(barra_row, variable=self.progreso_var, height=12, corner_radius=999, progress_color=self.color_principal, fg_color=self.color_superficie_alt)
-        self.barra_prog.pack(side="left", fill="x", expand=True, padx=(0, 15))
-        self.porcentaje_label = ctk.CTkLabel(barra_row, text="0%", font=("Segoe UI", 13, "bold"), text_color=self.color_pokedex_luz)
+    def construir_panel_actividad(self):
+        """Un único panel inferior: estado y progreso en una fila, acciones en otra y registro plegable."""
+        self.panel_actividad = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=10, border_width=1, border_color=self.color_borde)
+        self.panel_actividad.pack(side="bottom", pady=(0, 12), padx=16, fill="x")
+
+        self.frame_progreso = ctk.CTkFrame(self.panel_actividad, fg_color="transparent")
+        self.frame_progreso.pack(padx=estilo.PAD_X, pady=(10, 2), fill="x")
+        self.estado_label = self.crear_etiqueta(self.frame_progreso, "Estado: listo", negrita=True)
+        self.estado_label.configure(text_color=self.color_enfasis)
+        self.estado_label.pack(side="left")
+        self.porcentaje_label = self.crear_etiqueta(self.frame_progreso, "0%", estilo.TAM_BOTON, negrita=True)
+        self.porcentaje_label.configure(text_color=self.color_enfasis)
         self.porcentaje_label.pack(side="right")
+        self.progreso_var = ctk.DoubleVar()
+        self.barra_prog = ctk.CTkProgressBar(self.frame_progreso, variable=self.progreso_var, height=10, corner_radius=999, progress_color=self.color_principal, fg_color=self.color_superficie_alt)
+        self.barra_prog.pack(side="left", fill="x", expand=True, padx=14)
 
-        self.frame_estado = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=10, border_width=1, border_color=self.color_borde)
-        self.frame_estado.pack(pady=(0, 8), padx=22, fill="x")
-        ctk.CTkLabel(self.frame_estado, text="Estado", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(12, 4))
-        self.estado_label = ctk.CTkLabel(self.frame_estado, text="Estado: listo", font=("Segoe UI", 12, "bold"), text_color=self.color_pokedex_luz)
-        self.estado_label.pack(anchor="w", padx=16, pady=(0, 2))
-        self.ruta_label = ctk.CTkLabel(self.frame_estado, text="Última salida: -", font=("Consolas", 10), text_color=self.color_texto_sec, anchor="w", justify="left")
-        self.ruta_label.pack(anchor="w", padx=16, pady=(0, 8))
+        self.frame_estado = ctk.CTkFrame(self.panel_actividad, fg_color="transparent")
+        self.frame_estado.pack(padx=estilo.PAD_X, pady=(2, 6), fill="x")
         self.frame_acciones = ctk.CTkFrame(self.frame_estado, fg_color="transparent")
-        self.frame_acciones.pack(fill="x", padx=16, pady=(0, 12))
-        ctk.CTkButton(self.frame_acciones, text="Abrir última salida", height=30, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, command=self.abrir_ultima_salida).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(self.frame_acciones, text="Abrir errores", height=30, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, command=lambda: self.abrir_directorio(ERROR_FOLDER)).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(self.frame_acciones, text="Abrir log", height=30, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, command=self.abrir_log_detallado).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(self.frame_acciones, text="Limpiar log", height=30, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, command=self.limpiar_log).pack(side="left")
+        self.frame_acciones.pack(side="right")
+        for texto, comando in (
+            ("Abrir última salida", self.abrir_ultima_salida),
+            ("Abrir errores", lambda: self.abrir_directorio(ERROR_FOLDER)),
+            ("Abrir log", self.abrir_log_detallado),
+            ("Limpiar log", self.limpiar_log),
+        ):
+            self.crear_boton_secundario(self.frame_acciones, texto, comando, alto=estilo.ALTO_BOTON_COMPACTO).pack(side="left", padx=(6, 0))
+        self.btn_registro = self.crear_boton_secundario(self.frame_acciones, "", self.alternar_registro, alto=estilo.ALTO_BOTON_COMPACTO, width=104)
+        self.btn_registro.pack(side="left", padx=(6, 0))
+        self.ruta_label = self.crear_etiqueta(self.frame_estado, "Última salida: -", estilo.TAM_PEQUENO, secundario=True, mono=True, anchor="w", justify="left")
+        self.ruta_label.pack(side="left", fill="x", expand=True)
 
-        self.frame_log = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=10, border_width=1, border_color=self.color_borde)
-        self.frame_log.pack(pady=(0, 16), padx=22, fill="both", expand=True)
-        ctk.CTkLabel(self.frame_log, text="Registro de actividad", font=("Segoe UI", 13, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(12, 8))
-        self.log_box = ctk.CTkTextbox(self.frame_log, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color=self.color_campo, text_color=self.color_texto)
-        self.log_box.pack(padx=16, pady=(0, 16), fill="both", expand=True)
+        self.frame_log = ctk.CTkFrame(self.panel_actividad, fg_color="transparent")
+        self.log_box = ctk.CTkTextbox(self.frame_log, height=130, font=estilo.fuente(estilo.TAM_TEXTO, mono=True), border_width=1, border_color=self.color_borde, corner_radius=estilo.RADIO, fg_color=self.color_campo, text_color=self.color_texto)
+        self.log_box.pack(padx=0, pady=(0, 0), fill="both", expand=True)
         self.log_box.tag_config("success", foreground=self.color_ok)
         self.log_box.tag_config("error", foreground=self.color_peligro)
+        self.mostrar_registro(self.config.get("registro_visible", True))
+
+    def mostrar_registro(self, visible):
+        self.registro_visible = bool(visible)
+        if self.registro_visible:
+            self.frame_log.pack(padx=estilo.PAD_X, pady=(0, 10), fill="x")
+            self.btn_registro.configure(text="Registro ▾")
+        else:
+            self.frame_log.pack_forget()
+            self.btn_registro.configure(text="Registro ▸")
+
+    def alternar_registro(self):
+        self.mostrar_registro(not self.registro_visible)
+        completa = cargar_configuracion()
+        completa["registro_visible"] = self.registro_visible
+        guardar_configuracion(completa)
+        self.config["registro_visible"] = self.registro_visible
 
     def build_tab_reclamaciones(self, acc_color):
         self.reclamaciones_power_line.construir(self.tab_reclamaciones_power_line)
@@ -1554,209 +1652,195 @@ class AppIntegrada(ctk.CTk):
         self.actualizar_paneles_por_pestana()
 
     def actualizar_paneles_por_pestana(self):
-        ocultar_paneles = self.tabview.get() == "Reclamaciones"
-        paneles = (self.frame_progreso, self.frame_estado, self.frame_log)
-        if ocultar_paneles:
-            for panel in paneles:
-                panel.pack_forget()
-            self.tabview.pack_configure(fill="both", expand=True, pady=(16, 16))
+        """La pestaña Reclamaciones usa todo el alto de la ventana; en el resto se muestra el panel de actividad."""
+        if self.tabview.get() == "Reclamaciones":
+            self.panel_actividad.pack_forget()
+            self.tabview.pack_configure(pady=(10, 12))
             return
-        self.tabview.pack_configure(fill="both", expand=True, pady=(16, 8))
-        if not self.frame_progreso.winfo_manager():
-            self.frame_progreso.pack(pady=(0, 8), padx=22, fill="x", before=self.frame_estado)
-        if not self.frame_estado.winfo_manager():
-            self.frame_estado.pack(pady=(0, 8), padx=22, fill="x", before=self.frame_log)
-        if not self.frame_log.winfo_manager():
-            self.frame_log.pack(pady=(0, 16), padx=22, fill="both", expand=True)
+        if not self.panel_actividad.winfo_manager():
+            self.panel_actividad.pack(side="bottom", pady=(0, 12), padx=16, fill="x", before=self.tabview)
+        self.tabview.pack_configure(pady=(10, 6))
+
+    # ---------- atajos de teclado ----------
+
+    def configurar_atajos(self):
+        for numero in range(1, 9):
+            self.bind_all(f"<Control-Key-{numero}>", lambda evento, n=numero - 1: self.ir_a_pestana(n))
+        self.bind_all("<Control-Return>", lambda evento: self.accion_principal())
+        self.bind_all("<Escape>", lambda evento: self.detener_tarea_actual())
+
+    def ir_a_pestana(self, indice):
+        nombres = list(self.constructores_pestanas)
+        if 0 <= indice < len(nombres):
+            self.tabview.set(nombres[indice])
+            self.al_cambiar_pestana()
+
+    def accion_principal(self):
+        """Ejecuta la acción principal de la pestaña visible (nunca detiene una tarea en curso)."""
+        pestana = self.tabview.get()
+        acciones = {
+            "Automatización": (automation_running, self.iniciar_auto),
+            "Pedidos": (pedidos_running, self.iniciar_pedidos),
+            "Comparador": (comparador_running, self.iniciar_comparador),
+            "Fichero Mopar": (mopar_running, self.iniciar_mopar),
+            "Stock FIAT": (stock_fiat_running, self.iniciar_stock_fiat),
+            "Facturas": (madd_running, self.iniciar_facturas_madd),
+            "Reclamaciones": (False, self.reclamaciones_power_line.generar_documento),
+            "Configuración": (False, self.guardar_config_ui),
+        }
+        en_curso, accion = acciones[pestana]
+        if not en_curso:
+            accion()
+
+    def detener_tarea_actual(self):
+        tareas = (
+            (automation_running, "la automatización", self.toggle_auto),
+            (pedidos_running, "la generación de pedidos", self.toggle_pedidos),
+            (comparador_running, "el comparador", self.toggle_comparador),
+            (mopar_running, "el fichero Mopar", self.toggle_mopar),
+            (stock_fiat_running, "Stock FIAT", self.toggle_stock_fiat),
+        )
+        for en_curso, descripcion, detener in tareas:
+            if en_curso:
+                if messagebox.askyesno("Detener", f"¿Detener {descripcion}? Lo ya procesado se conserva."):
+                    detener()
+                return
+
+    # ---------- pestañas ----------
 
     def build_tab_auto(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_auto, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.")
+        card = self.crear_tarjeta_tab(contenedor, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.", en_rejilla=True)
         self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]))
-        row_input = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        row_input.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(row_input, text="Precio mínimo (EUR)", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.precio_entry = ctk.CTkEntry(row_input, width=120, height=36, justify="center", corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
+        fila = self.crear_fila_ajuste(card, "Precio mínimo (EUR)")
+        self.precio_entry = self.crear_entrada(fila, width=120, justify="center")
         self.precio_entry.insert(0, self.config.get("precio_min", "0"))
-        self.precio_entry.pack(side="right", padx=14, pady=12)
+        self.precio_entry.pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.btn_auto = self.crear_boton_principal(card, "Iniciar automatización", self.toggle_auto)
-        self.btn_auto.pack(padx=24, pady=(4, 8), fill="x")
-        self.btn_flujo = ctk.CTkButton(card, text="Flujo completo: automatización + filtro de rotación", height=40, corner_radius=8, font=("Segoe UI", 13, "bold"), fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.iniciar_flujo_completo)
-        self.btn_flujo.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(card, text="Referencias consultadas", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
-        self.auto_log_box = self.crear_caja_log(card, alto=140)
-        self.auto_log_box.pack(padx=24, pady=(0, 12), fill="x")
-        ctk.CTkButton(card, text="Abrir carpeta del Excel", height=36, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.abrir_carpeta_auto).pack(padx=24, pady=(0, 24), fill="x")
+        self.btn_auto.pack(padx=estilo.PAD_X, pady=(2, 6), fill="x")
+        self.btn_flujo = self.crear_boton_secundario(card, "Flujo completo: automatización + filtro de rotación", self.iniciar_flujo_completo, alto=estilo.ALTO_BOTON, font=estilo.fuente(estilo.TAM_BOTON, True))
+        self.btn_flujo.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        self.crear_registro(card, "Referencias consultadas", "auto_log_box", 140)
+        self.crear_boton_secundario(card, "Abrir carpeta del Excel", self.abrir_carpeta_auto).pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
 
-        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación en base al umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.")
+        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación según el umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.", en_rejilla=True)
         self.crear_fila_archivo(card_rotacion, "Excel de Quiter", "excel_quiter_entry", "ruta_excel_quiter", "Excel de Quiter (DMS)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_rotacion, "Archivo de propuesta", "excel_rot_entry", "ruta_excel_rotacion", "Archivo PROPUESTAPEDIDO.xls...", "Examinar", lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")]))
         self.crear_fila_archivo(card_rotacion, "Carpeta destino", "folder_rot_entry", "ruta_folder_rotacion", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_rot_entry))
-        row_umbral = ctk.CTkFrame(card_rotacion, fg_color=self.color_superficie_alt, corner_radius=10)
-        row_umbral.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(row_umbral, text="Umbral mínimo", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.umbral_entry = ctk.CTkEntry(row_umbral, width=120, justify="center", height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
+        fila = self.crear_fila_ajuste(card_rotacion, "Umbral mínimo")
+        self.umbral_entry = self.crear_entrada(fila, width=120, justify="center")
         self.umbral_entry.insert(0, self.config.get("umbral_rotacion", "0.08"))
-        self.umbral_entry.pack(side="right", padx=14, pady=12)
+        self.umbral_entry.pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.btn_rotacion = self.crear_boton_principal(card_rotacion, "Resaltar por rotación", self.iniciar_filtro_rotacion)
-        self.btn_rotacion.pack(padx=24, pady=(4, 16), fill="x")
-        ctk.CTkLabel(card_rotacion, text="Registro de rotación", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
-        self.rotacion_log_box = self.crear_caja_log(card_rotacion, alto=110)
-        self.rotacion_log_box.pack(padx=24, pady=(0, 12), fill="x")
-        ctk.CTkButton(card_rotacion, text="Abrir carpeta destino", height=36, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.abrir_carpeta_rotacion).pack(padx=24, pady=(0, 24), fill="x")
+        self.btn_rotacion.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
+        self.crear_registro(card_rotacion, "Registro de rotación", "rotacion_log_box", 110)
+        self.crear_boton_secundario(card_rotacion, "Abrir carpeta destino", self.abrir_carpeta_rotacion).pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
 
     def build_tab_pedidos(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_pedidos, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.")
+        card = self.crear_tarjeta_tab(contenedor, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.", en_rejilla=True)
         self.crear_fila_archivo(card, "Excel urgente", "excel_pedidos_entry", "ruta_excel_pedidos", "Excel URGENTE.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.excel_pedidos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_pedidos_entry", "ruta_folder_pedidos", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_pedidos_entry))
         self.btn_pedidos = self.crear_boton_principal(card, "Generar pedidos", self.toggle_pedidos)
-        self.btn_pedidos.pack(padx=24, pady=(4, 16), fill="x")
-        ctk.CTkLabel(card, text="Números de pedido generados", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
-        self.pedidos_generados_box = ctk.CTkTextbox(card, height=90, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color=self.color_campo, text_color=self.color_texto)
-        self.pedidos_generados_box.pack(padx=24, pady=(0, 24), fill="x")
-        self.pedidos_generados_box.configure(state="disabled")
+        self.btn_pedidos.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
+        self.crear_registro(card, "Números de pedido generados", "pedidos_generados_box", 90, pady_final=14)
 
-        card_hoja = self.crear_tarjeta_tab(contenedor, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.")
+        card_hoja = self.crear_tarjeta_tab(contenedor, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.", en_rejilla=True)
         self.crear_fila_archivo(card_hoja, "Plantilla de hoja", "plantilla_hoja_entry", "ruta_plantilla_hojas", "HOJA DE PEDIDOS.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.plantilla_hoja_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_hoja, "Carpeta HOJAS DE PEDIDO", "carpeta_hojas_entry", "ruta_carpeta_hojas", "Carpeta HOJAS DE PEDIDO...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_hojas_entry))
         self.btn_hoja_pedidos = self.crear_boton_principal(card_hoja, "Generar hoja de hoy", self.iniciar_hoja_pedidos)
-        self.btn_hoja_pedidos.pack(padx=24, pady=(4, 24), fill="x")
+        self.btn_hoja_pedidos.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
 
-        card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.")
+        card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.", en_rejilla=True)
         self.crear_fila_archivo(card_avisos, "Hoja de pedido a procesar", "hoja_avisos_entry", "ruta_hoja_avisos", "Hoja dd-mm-aaaa.xlsx ya rellenada...", "Examinar", lambda: self.seleccionar_archivo(self.hoja_avisos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_avisos, "Excel de clientes", "clientes_avisos_entry", "ruta_excel_clientes", "clientes.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.clientes_avisos_entry, [("Excel files", "*.xlsx")]))
-        row_companeros = ctk.CTkFrame(card_avisos, fg_color=self.color_superficie_alt, corner_radius=10)
-        row_companeros.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(row_companeros, text="Correo(s) de compañeros (se les envía la hoja de pedido completa)", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(10, 2))
-        self.email_companeros_avisos_entry = ctk.CTkEntry(row_companeros, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto, placeholder_text="correo1@palausa.es; correo2@palausa.es")
-        self.email_companeros_avisos_entry.insert(0, self.config.get("email_companeros_avisos", ""))
-        self.email_companeros_avisos_entry.pack(padx=16, pady=(0, 10), fill="x")
+        self.crear_campo_en_fila(card_avisos, "Correo(s) de compañeros (se les envía la hoja de pedido completa)", "email_companeros_avisos_entry", "email_companeros_avisos", "", placeholder_text="correo1@palausa.es; correo2@palausa.es")
         self.avisos_auto_var = ctk.BooleanVar(value=self.config.get("avisos_envio_automatico", True))
-        ctk.CTkCheckBox(card_avisos, text="Enviar automáticamente si el cliente tiene email (si no, se guarda como borrador)", variable=self.avisos_auto_var, fg_color=self.color_principal, hover_color=self.color_hover, text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 16))
+        ctk.CTkCheckBox(card_avisos, text="Enviar automáticamente si el cliente tiene email (si no, se guarda como borrador)", variable=self.avisos_auto_var, fg_color=self.color_principal, hover_color=self.color_hover, text_color=self.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_X, pady=(0, estilo.PAD_Y))
         self.btn_avisos = self.crear_boton_principal(card_avisos, "Generar avisos de no suministro", self.iniciar_avisos_no_suministro)
-        self.btn_avisos.pack(padx=24, pady=(4, 16), fill="x")
-        ctk.CTkLabel(card_avisos, text="Registro de avisos", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
-        self.avisos_log_box = self.crear_caja_log(card_avisos, alto=110)
-        self.avisos_log_box.pack(padx=24, pady=(0, 24), fill="x")
+        self.btn_avisos.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
+        self.crear_registro(card_avisos, "Registro de avisos", "avisos_log_box", 110, pady_final=14)
 
     def build_tab_comparador(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_comparador, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.")
+        card = self.crear_tarjeta_tab(contenedor, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.", en_rejilla=True)
         self.crear_fila_archivo(card, "Excel antiguo", "excel_old_entry", "ruta_excel_antiguo", "Excel antiguo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_old_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Excel nuevo", "excel_new_entry", "ruta_excel_nuevo", "Excel nuevo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_new_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_comp_entry", "ruta_folder_comparador", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_comp_entry))
-        row_color = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        row_color.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(row_color, text="Color de resaltado", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.color_optionmenu = ctk.CTkOptionMenu(row_color, values=["Amarillo", "Rojo", "Verde", "Azul", "Naranja"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
+        fila = self.crear_fila_ajuste(card, "Color de resaltado")
+        self.color_optionmenu = self.crear_menu(fila, ["Amarillo", "Rojo", "Verde", "Azul", "Naranja"])
         self.color_optionmenu.set(self.config.get("color_resaltado", "Amarillo"))
-        self.color_optionmenu.pack(side="right", padx=14, pady=12)
+        self.color_optionmenu.pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.btn_comparador = self.crear_boton_principal(card, "Comparar Excels", self.toggle_comparador)
-        self.btn_comparador.pack(padx=24, pady=(4, 24), fill="x")
+        self.btn_comparador.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
 
     def build_tab_mopar(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_mopar, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.")
+        card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.", en_rejilla=True)
         self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_mopar_entry", "ruta_folder_mopar", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_mopar_entry))
         self.btn_mopar = self.crear_boton_principal(card, "Generar fichero Mopar", self.toggle_mopar)
-        self.btn_mopar.pack(padx=24, pady=(4, 16), fill="x")
-        ctk.CTkLabel(card, text="Ficheros Mopar generados", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
-        self.mopar_generados_box = ctk.CTkTextbox(card, height=90, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color=self.color_campo, text_color=self.color_texto)
-        self.mopar_generados_box.pack(padx=24, pady=(0, 24), fill="x")
-        self.mopar_generados_box.configure(state="disabled")
+        self.btn_mopar.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
+        self.crear_registro(card, "Ficheros Mopar generados", "mopar_generados_box", 90, pady_final=14)
 
     def build_tab_stock_fiat(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_stock_fiat, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.")
+        card = self.crear_tarjeta_tab(contenedor, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.", en_rejilla=True)
         self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_stock_fiat_entry", "ruta_folder_stock_fiat", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_stock_fiat_entry))
         self.btn_stock_fiat = self.crear_boton_principal(card, "Generar Stock FIAT", self.toggle_stock_fiat)
-        self.btn_stock_fiat.pack(padx=24, pady=(4, 24), fill="x")
+        self.btn_stock_fiat.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
 
     def build_tab_madd(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_madd, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Facturas Stellantis MADD", "Descarga diaria de facturas desde el portal MADD (www.madd.stellantis.com) y envía un correo con los PDF adjuntos.")
-        frame_creds_madd = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        frame_creds_madd.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(frame_creds_madd, text="Usuario MADD", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=0, column=0, padx=18, pady=12, sticky="w")
-        self.usuario_madd_entry = ctk.CTkEntry(frame_creds_madd, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
-        self.usuario_madd_entry.insert(0, self.config.get("usuario_madd", ""))
-        self.usuario_madd_entry.grid(row=0, column=1, padx=18, pady=12, sticky="ew")
-        ctk.CTkLabel(frame_creds_madd, text="Contraseña MADD", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=1, column=0, padx=18, pady=12, sticky="w")
-        self.password_madd_entry = ctk.CTkEntry(frame_creds_madd, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto, show="*")
-        self.password_madd_entry.insert(0, self.config.get("password_madd", ""))
-        self.password_madd_entry.grid(row=1, column=1, padx=18, pady=12, sticky="ew")
-        frame_creds_madd.grid_columnconfigure(1, weight=1)
+        card = self.crear_tarjeta_tab(contenedor, "Facturas Stellantis MADD", "Descarga diaria de facturas desde el portal MADD (www.madd.stellantis.com) y envía un correo con los PDF adjuntos.", en_rejilla=True)
+        self.crear_bloque_credenciales(card, [
+            ("Usuario MADD", "usuario_madd_entry", "usuario_madd", "", False),
+            ("Contraseña MADD", "password_madd_entry", "password_madd", "", True),
+        ])
         self.crear_fila_archivo(card, "Carpeta de facturas", "carpeta_facturas_madd_entry", "ruta_carpeta_facturas_madd", "Carpeta donde guardar las facturas...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_facturas_madd_entry))
-        row_email = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        row_email.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(row_email, text="Correo diario de facturas", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(10, 2))
-        self.email_facturas_madd_entry = ctk.CTkEntry(row_email, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
-        self.email_facturas_madd_entry.insert(0, self.config.get("email_facturas_madd", ""))
-        self.email_facturas_madd_entry.pack(padx=16, pady=(0, 10), fill="x")
-        row_email_fallo = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        row_email_fallo.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(row_email_fallo, text="Correo de aviso si falla", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=16, pady=(10, 2))
-        self.email_aviso_fallo_madd_entry = ctk.CTkEntry(row_email_fallo, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
-        self.email_aviso_fallo_madd_entry.insert(0, self.config.get("email_aviso_fallo_madd", ""))
-        self.email_aviso_fallo_madd_entry.pack(padx=16, pady=(0, 10), fill="x")
-        row_filtro = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        row_filtro.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(row_filtro, text="Facturas de", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.filtro_dia_madd_option = ctk.CTkOptionMenu(row_filtro, values=["Ayer", "Hoy"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
+        self.crear_campo_en_fila(card, "Correo diario de facturas (varios separados por ;)", "email_facturas_madd_entry", "email_facturas_madd", "")
+        self.crear_campo_en_fila(card, "Correo de aviso si falla", "email_aviso_fallo_madd_entry", "email_aviso_fallo_madd", "")
+        fila = self.crear_fila_ajuste(card, "Facturas de")
+        self.filtro_dia_madd_option = self.crear_menu(fila, ["Ayer", "Hoy"])
         self.filtro_dia_madd_option.set(self.config.get("filtro_dia_facturas_madd", "Ayer"))
-        self.filtro_dia_madd_option.pack(side="right", padx=14, pady=12)
+        self.filtro_dia_madd_option.pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.btn_madd = self.crear_boton_principal(card, "Ejecutar ahora (prueba manual)", self.iniciar_facturas_madd)
-        self.btn_madd.pack(padx=24, pady=(4, 16), fill="x")
-        ctk.CTkLabel(card, text="Registro de la ejecución", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(anchor="w", padx=24, pady=(0, 6))
-        self.madd_log_box = self.crear_caja_log(card, alto=140)
-        self.madd_log_box.pack(padx=24, pady=(0, 24), fill="x")
+        self.btn_madd.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
+        self.crear_registro(card, "Registro de la ejecución", "madd_log_box", 140, pady_final=14)
 
-        card_prog = self.crear_tarjeta_tab(contenedor, "Programación diaria", "Cuando compruebes que la ejecución manual funciona bien, activa la tarea de Windows para que corra sola todos los días laborables a las 07:00 (despierta el PC si está en suspensión).")
+        card_prog = self.crear_tarjeta_tab(contenedor, "Programación diaria", "Cuando compruebes que la ejecución manual funciona bien, activa la tarea de Windows para que corra sola todos los días laborables a las 07:00 (despierta el PC si está en suspensión).", en_rejilla=True)
         fila_prog = ctk.CTkFrame(card_prog, fg_color="transparent")
-        fila_prog.pack(padx=24, pady=(0, 20), fill="x")
-        self.btn_activar_tarea_madd = ctk.CTkButton(fila_prog, text="Activar tarea programada (07:00 L-V)", height=40, corner_radius=8, fg_color=acc_color, hover_color=self.color_hover, command=self.activar_tarea_programada_madd)
+        fila_prog.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        self.btn_activar_tarea_madd = self.crear_boton_principal(fila_prog, "Activar tarea programada (07:00 L-V)", self.activar_tarea_programada_madd)
         self.btn_activar_tarea_madd.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.btn_desactivar_tarea_madd = ctk.CTkButton(fila_prog, text="Desactivar", height=40, corner_radius=8, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=self.desactivar_tarea_programada_madd)
+        self.btn_desactivar_tarea_madd = self.crear_boton_secundario(fila_prog, "Desactivar", self.desactivar_tarea_programada_madd, alto=estilo.ALTO_BOTON)
         self.btn_desactivar_tarea_madd.pack(side="right")
 
     def build_tab_config(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_config, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Configuración general", "Ajusta credenciales, rendimiento y apariencia visual de la herramienta.")
-        frame_creds = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        frame_creds.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(frame_creds, text="Usuario", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=0, column=0, padx=18, pady=12, sticky="w")
-        self.user_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto)
-        self.user_entry.insert(0, self.config.get("usuario", ""))
-        self.user_entry.grid(row=0, column=1, padx=18, pady=12, sticky="ew")
-        ctk.CTkLabel(frame_creds, text="Contraseña", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).grid(row=1, column=0, padx=18, pady=12, sticky="w")
-        self.pass_entry = ctk.CTkEntry(frame_creds, width=220, height=36, corner_radius=8, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto, show="*")
-        self.pass_entry.insert(0, self.config.get("password", ""))
-        self.pass_entry.grid(row=1, column=1, padx=18, pady=12, sticky="ew")
-        frame_creds.grid_columnconfigure(1, weight=1)
-        frame_perf = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        frame_perf.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(frame_perf, text="Hilos paralelos", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.hilos_option = ctk.CTkOptionMenu(frame_perf, values=["1", "2", "3", "4", "5"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover)
+        card = self.crear_tarjeta_tab(contenedor, "Configuración general", "Ajusta credenciales, rendimiento y apariencia visual de la herramienta.", en_rejilla=True)
+        self.crear_bloque_credenciales(card, [
+            ("Usuario", "user_entry", "usuario", "", False),
+            ("Contraseña", "pass_entry", "password", "", True),
+        ])
+        fila = self.crear_fila_ajuste(card, "Hilos paralelos")
+        self.hilos_option = self.crear_menu(fila, ["1", "2", "3", "4", "5"])
         self.hilos_option.set(str(self.config.get("num_hilos", "3")))
-        self.hilos_option.pack(side="right", padx=14, pady=12)
-        frame_apariencia = ctk.CTkFrame(card, fg_color=self.color_superficie_alt, corner_radius=10)
-        frame_apariencia.pack(padx=24, pady=(0, 16), fill="x")
-        ctk.CTkLabel(frame_apariencia, text="Apariencia", font=("Segoe UI", 12, "bold"), text_color=self.color_texto).pack(side="left", padx=(16, 12), pady=12)
-        self.modo_option = ctk.CTkOptionMenu(frame_apariencia, values=["Claro", "Oscuro"], height=36, corner_radius=8, fg_color=acc_color, button_color=acc_color, button_hover_color=self.color_hover, command=self.cambiar_modo_apariencia)
+        self.hilos_option.pack(side="right", padx=estilo.PAD_FILA, pady=6)
+        fila = self.crear_fila_ajuste(card, "Apariencia")
+        self.modo_option = self.crear_menu(fila, ["Claro", "Oscuro"], comando=self.cambiar_modo_apariencia)
         self.modo_option.set("Oscuro" if self.config.get("modo_apariencia", "Light") == "Dark" else "Claro")
-        self.modo_option.pack(side="right", padx=14, pady=12)
+        self.modo_option.pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.reclamaciones_power_line.construir_ajustes(card)
-        ctk.CTkButton(card, text="Guardar configuración", height=42, corner_radius=8, fg_color=acc_color, hover_color=self.color_hover, command=self.guardar_config_ui).pack(padx=24, pady=(4, 24), fill="x")
+        self.crear_boton_principal(card, "Guardar configuración", self.guardar_config_ui).pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
 
     def seleccionar_archivo(self, entry, tipos):
         ruta = filedialog.askopenfilename(filetypes=tipos)
@@ -1797,13 +1881,6 @@ class AppIntegrada(ctk.CTk):
 
     def limpiar_log(self):
         self.log_box.delete("1.0", "end")
-
-    def crear_caja_log(self, parent, alto=110):
-        caja = ctk.CTkTextbox(parent, height=alto, font=("Consolas", 12), border_width=1, border_color=self.color_borde, corner_radius=8, fg_color=self.color_campo, text_color=self.color_texto)
-        caja.tag_config("success", foreground=self.color_ok)
-        caja.tag_config("error", foreground=self.color_peligro)
-        caja.configure(state="disabled")
-        return caja
 
     def agregar_a_caja(self, caja, texto, tag=None):
         caja.configure(state="normal")
@@ -1973,17 +2050,17 @@ class AppIntegrada(ctk.CTk):
             precio = float(self.widget_get("precio_entry", "0"))
         except Exception as e:
             registrar_error_detallado(str(e), traceback.format_exc())
-            messagebox.showerror("Error", "La automatizacion no pudo iniciarse por un problema interno de la interfaz.")
+            messagebox.showerror("Error", f"No se pudo iniciar la automatización: {e}\n\nComprueba que el precio mínimo (pestaña Automatización) sea un número, por ejemplo 150, y que los hilos paralelos (pestaña Configuración) sean un valor válido.")
             return False
         if precio < 0:
-            messagebox.showwarning("Aviso", "Introduce un precio minimo valido.")
+            messagebox.showwarning("Aviso", "El precio mínimo debe ser un número igual o mayor que 0 (por ejemplo 150).")
             return False
         if not self.validar_archivo(ruta, "Selecciona un Excel valido para la automatizacion."):
             return False
         if self.excel_abierto(ruta, "El Excel de la automatización"):
             return False
         if not user or not pwd:
-            messagebox.showwarning("Aviso", "Completa usuario y contrasena antes de continuar.")
+            messagebox.showwarning("Aviso", "Faltan el usuario o la contraseña del portal Citroën. Introdúcelos en la pestaña Configuración y guarda.")
             return False
         self.actualizar_estado("automatización en curso", ruta)
         self.btn_auto.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
@@ -2018,7 +2095,7 @@ class AppIntegrada(ctk.CTk):
         try:
             float(self.widget_get("umbral_entry"))
         except Exception:
-            messagebox.showwarning("Aviso", "Introduce un umbral de rotación válido.")
+            messagebox.showwarning("Aviso", "El umbral de rotación debe ser un número, por ejemplo 0.12 (usa punto como separador decimal).")
             return
         if self.excel_abierto(ruta_auto, "El Excel de stock"):
             return
@@ -2150,6 +2227,10 @@ class AppIntegrada(ctk.CTk):
             return
         envio_automatico = self.avisos_auto_var.get()
         emails_companeros = self.widget_get("email_companeros_avisos_entry")
+        invalidos = correos_invalidos(emails_companeros)
+        if invalidos:
+            messagebox.showwarning("Aviso", "Estas direcciones de compañeros no parecen correos válidos:\n" + "\n".join(invalidos) + "\n\nSepara varias con punto y coma (;).")
+            return
         if envio_automatico:
             mensaje = "Se generará un aviso por cada cliente con referencias en NO SUMINISTRA y otro por cada cliente con referencias SUSTITUIDAS. Los que tengan email registrado en el Excel de clientes se ENVIARÁN automáticamente; los que no tengan email se guardarán como borrador para completarlos a mano."
         else:
@@ -2264,7 +2345,7 @@ class AppIntegrada(ctk.CTk):
         try:
             umbral = float(self.umbral_entry.get())
         except Exception:
-            messagebox.showwarning("Aviso", "Introduce un umbral de rotación válido.")
+            messagebox.showwarning("Aviso", "El umbral de rotación debe ser un número, por ejemplo 0.12 (usa punto como separador decimal).")
             return False
         try:
             precio_minimo = float(self.precio_entry.get().replace(",", "."))
@@ -2376,6 +2457,10 @@ class AppIntegrada(ctk.CTk):
             return
         if not email_destino:
             messagebox.showwarning("Aviso", "Introduce el correo de destino de las facturas.")
+            return
+        invalidos = correos_invalidos(email_destino) + correos_invalidos(email_aviso)
+        if invalidos:
+            messagebox.showwarning("Aviso", "Estas direcciones no parecen correos válidos:\n" + "\n".join(invalidos) + "\n\nSepara varias con punto y coma (;).")
             return
         if not messagebox.askyesno("Ejecutar prueba manual", "Esto iniciará sesión en MADD, descargará las facturas del día seleccionado y ENVIARÁ un correo real con los adjuntos (o el aviso de 'sin facturas'). ¿Continuar?"):
             return
