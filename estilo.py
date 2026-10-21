@@ -122,7 +122,7 @@ TEMAS = {
         "oscuro": {**_NEUTROS_SALVIA_OSCURO, "principal": "#2f6b4f", "hover": "#24563f"},
     },
 }
-TEMA_POR_DEFECTO = "Lino"
+TEMA_POR_DEFECTO = "Terracota"
 
 # Compatibilidad: paletas del tema por defecto
 PALETA_CLARA = TEMAS[TEMA_POR_DEFECTO]["claro"]
