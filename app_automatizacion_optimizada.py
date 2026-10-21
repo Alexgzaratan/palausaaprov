@@ -1485,7 +1485,12 @@ class AppIntegrada(ctk.CTk):
         return ctk.CTkLabel(parent, text=texto, font=estilo.fuente(tam, negrita, mono), text_color=self.color_texto_sec if secundario else self.color_texto, **kw)
 
     def crear_entrada(self, parent, **kw):
-        return ctk.CTkEntry(parent, height=estilo.ALTO_CONTROL, corner_radius=estilo.RADIO, border_width=1, border_color=self.color_borde, fg_color=self.color_campo, text_color=self.color_texto, **kw)
+        entrada = ctk.CTkEntry(parent, height=estilo.ALTO_CONTROL, corner_radius=estilo.RADIO, border_width=1, border_color=self.color_borde_campo,
+                               fg_color=self.color_campo, text_color=self.color_texto, placeholder_text_color=self.color_texto_placeholder, **kw)
+        # Foco visible: el campo activo se resalta con el color principal
+        entrada.bind("<FocusIn>", lambda evento, campo=entrada: campo.configure(border_color=self.color_principal, border_width=2), add="+")
+        entrada.bind("<FocusOut>", lambda evento, campo=entrada: campo.configure(border_color=self.color_borde_campo, border_width=1), add="+")
+        return entrada
 
     def crear_boton_secundario(self, parent, texto, comando, alto=estilo.ALTO_CONTROL, **kw):
         return ctk.CTkButton(parent, text=texto, height=alto, corner_radius=estilo.RADIO, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=comando, **kw)
@@ -1503,9 +1508,31 @@ class AppIntegrada(ctk.CTk):
         else:
             card.pack(padx=20, pady=estilo.PAD_TARJETA * 2, fill="both", expand=True)
         self.crear_etiqueta(card, titulo, estilo.TAM_TITULO, negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(14, 2))
-        self.crear_etiqueta(card, subtitulo, secundario=True, wraplength=470, justify="left").pack(anchor="w", padx=estilo.PAD_X, pady=(0, 8))
+        etiqueta_subtitulo = self.crear_etiqueta(card, subtitulo, secundario=True, wraplength=470, justify="left")
+        etiqueta_subtitulo.pack(anchor="w", padx=estilo.PAD_X, pady=(0, 8))
+        card.bind("<Configure>", lambda evento, etiqueta=etiqueta_subtitulo: self.ajustar_subtitulo(etiqueta, evento.width), add="+")
         ctk.CTkFrame(card, fg_color=self.color_borde, height=1).pack(fill="x", padx=estilo.PAD_X, pady=(0, estilo.PAD_Y + 2))
         return card
+
+    def ajustar_subtitulo(self, etiqueta, ancho_tarjeta):
+        """El subtítulo ocupa todo el ancho de la tarjeta (menos líneas en tarjetas anchas, sin cortes en las estrechas)."""
+        try:
+            escala = ctk.ScalingTracker.get_widget_scaling(etiqueta)
+        except Exception:
+            escala = 1.0
+        ancho = max(200, int(ancho_tarjeta / escala) - 2 * estilo.PAD_X - 8)
+        if getattr(etiqueta, "_ancho_ajuste", None) != ancho:
+            etiqueta._ancho_ajuste = ancho
+            etiqueta.configure(wraplength=ancho)
+
+    def resaltar_pestana_activa(self, tabview):
+        """La pestaña activa lleva texto blanco sobre el azul (contraste 4.5:1); las demás, el texto normal."""
+        try:
+            activa = tabview.get()
+            for nombre, boton in tabview._segmented_button._buttons_dict.items():
+                boton.configure(text_color="#ffffff" if nombre == activa else self.color_texto)
+        except Exception:
+            pass
 
     def registrar_tarjeta(self, contenedor, card):
         """Las tarjetas de una pestaña se reparten en una o dos columnas según el ancho disponible."""
@@ -1574,7 +1601,7 @@ class AppIntegrada(ctk.CTk):
     def crear_caja_log(self, parent, alto=110):
         caja = ctk.CTkTextbox(parent, height=alto, font=estilo.fuente(estilo.TAM_TEXTO, mono=True), border_width=1, border_color=self.color_borde, corner_radius=estilo.RADIO, fg_color=self.color_campo, text_color=self.color_texto)
         caja.tag_config("success", foreground=self.color_ok)
-        caja.tag_config("error", foreground=self.color_peligro)
+        caja.tag_config("error", foreground=self.color_texto_error)
         caja.configure(state="disabled")
         return caja
 
@@ -1633,6 +1660,7 @@ class AppIntegrada(ctk.CTk):
         self.reclamaciones_power_line = ModuloReclamacionesPowerLine(self, self.config)
         self.construir_pestana(self.tabview.get())
         self.tabview.configure(command=self.al_cambiar_pestana)
+        self.resaltar_pestana_activa(self.tabview)
 
     def construir_panel_actividad(self):
         """Un único panel inferior: estado y progreso en una fila, acciones en otra y registro plegable."""
@@ -1671,7 +1699,7 @@ class AppIntegrada(ctk.CTk):
         self.log_box = ctk.CTkTextbox(self.frame_log, height=130, font=estilo.fuente(estilo.TAM_TEXTO, mono=True), border_width=1, border_color=self.color_borde, corner_radius=estilo.RADIO, fg_color=self.color_campo, text_color=self.color_texto)
         self.log_box.pack(padx=0, pady=(0, 0), fill="both", expand=True)
         self.log_box.tag_config("success", foreground=self.color_ok)
-        self.log_box.tag_config("error", foreground=self.color_peligro)
+        self.log_box.tag_config("error", foreground=self.color_texto_error)
         self.mostrar_registro(self.config.get("registro_visible", True))
 
     def mostrar_registro(self, visible):
@@ -1705,6 +1733,7 @@ class AppIntegrada(ctk.CTk):
 
     def actualizar_paneles_por_pestana(self):
         """La pestaña Reclamaciones usa todo el alto de la ventana; en el resto se muestra el panel de actividad."""
+        self.resaltar_pestana_activa(self.tabview)
         if self.tabview.get() == "Reclamaciones":
             self.panel_actividad.pack_forget()
             self.tabview.pack_configure(pady=(10, 12))
@@ -2080,6 +2109,7 @@ class AppIntegrada(ctk.CTk):
                 self.actualizar_paneles_por_pestana()
             except Exception:
                 pass
+        self.update_idletasks()  # pinta la interfaz nueva de una vez, sin quedarse a medias
 
     def toggle_auto(self):
         global automation_running

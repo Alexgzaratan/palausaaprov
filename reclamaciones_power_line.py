@@ -264,9 +264,11 @@ class ModuloReclamacionesPowerLine:
                                segmented_button_fg_color=self.app.color_panel_medio,
                                segmented_button_unselected_color=self.app.color_panel_medio,
                                text_color=self.app.color_texto)
+        panel.configure(command=lambda: self.app.resaltar_pestana_activa(panel))
         panel.pack(padx=8, pady=8, fill="both", expand=True)
         self.tab_formulario = panel.add("Formulario")
         self.tab_historial = panel.add("Historial")
+        self.app.resaltar_pestana_activa(panel)
         self._construir_formulario()
         self._construir_historial()
 
