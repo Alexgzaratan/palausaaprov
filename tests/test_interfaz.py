@@ -44,7 +44,8 @@ def test_cambio_de_tema_reconstruye_y_conserva_pestana_y_datos(app):
     app.modo_option.set("Oscuro")
     app.cambiar_modo_apariencia()
     assert app.config["modo_apariencia"] == "Dark"
-    assert app.color_superficie == "#1e293b"
+    import estilo
+    assert app.color_superficie == estilo.paleta(True, app.tema_actual())["superficie"]
     assert app.tabview.get() == "Configuración"
     assert app.pestanas_construidas == {"Automatización", "Configuración"}
     assert not hasattr(app, "usuario_madd_entry")

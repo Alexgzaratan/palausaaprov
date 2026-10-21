@@ -276,7 +276,7 @@ class ModuloReclamacionesPowerLine:
         app = self.app
         contenedor = ctk.CTkScrollableFrame(self.tab_formulario, fg_color="transparent")
         contenedor.pack(padx=2, pady=2, fill="both", expand=True)
-        card = app.crear_tarjeta_tab(contenedor, "Nueva reclamación", "Los campos marcados con * son obligatorios.")
+        card = app.crear_tarjeta_tab(contenedor, "Nueva reclamación", "Los campos marcados con * son obligatorios.", icono="aviso")
         self.litigio_entry = self._campo(card, "Nº Litigio *")
         self.pedido_entry = self._campo(card, "Nº Pedido SAP")
         self.referencia_entry = self._campo(card, "Referencia")
@@ -401,7 +401,7 @@ class ModuloReclamacionesPowerLine:
 
     def _construir_historial(self):
         app = self.app
-        card = app.crear_tarjeta_tab(self.tab_historial, "Historial de reclamaciones", "Busca, abre o elimina registros; eliminar no borra los documentos.")
+        card = app.crear_tarjeta_tab(self.tab_historial, "Historial de reclamaciones", "Busca, abre o elimina registros; eliminar no borra los documentos.", icono="reloj")
         fila = ctk.CTkFrame(card, fg_color="transparent")
         fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
         self.busqueda_entry = app.crear_entrada(fila, placeholder_text="Nº litigio, referencia o pedido SAP...")

@@ -3,8 +3,11 @@ import pytest
 import estilo
 
 
-@pytest.mark.parametrize("nombre,paleta", [("clara", estilo.PALETA_CLARA), ("oscura", estilo.PALETA_OSCURA)])
-def test_contraste_wcag_aa_en_ambas_paletas(nombre, paleta):
+TODAS_LAS_PALETAS = [(f"{tema}/{modo}", paletas[modo]) for tema, paletas in estilo.TEMAS.items() for modo in ("claro", "oscuro")]
+
+
+@pytest.mark.parametrize("nombre,paleta", TODAS_LAS_PALETAS)
+def test_contraste_wcag_aa_en_todas_las_paletas(nombre, paleta):
     fallos = []
     for texto, fondo, minimo in estilo.PAREJAS_CONTRASTE:
         color_texto = paleta.get(texto, texto)
@@ -48,3 +51,13 @@ def test_subtitulo_se_ajusta_al_ancho_de_la_tarjeta(app):
     app.ajustar_subtitulo(etiqueta, 500)
     assert ancho_ancho > etiqueta._ancho_ajuste >= 200
     etiqueta.destroy()
+
+
+def test_todas_las_paletas_tienen_los_mismos_colores():
+    claves = set(estilo.PALETA_CLARA)
+    for nombre, paleta in TODAS_LAS_PALETAS:
+        assert set(paleta) == claves, nombre
+
+
+def test_tema_desconocido_usa_el_de_por_defecto():
+    assert estilo.paleta(False, "Sinnoh") is estilo.TEMAS[estilo.TEMA_POR_DEFECTO]["claro"]

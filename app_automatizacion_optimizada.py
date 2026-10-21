@@ -15,6 +15,7 @@ import xlrd
 import string
 import subprocess
 import tkinter
+import tkinter.font
 from datetime import datetime, timedelta
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -46,7 +47,7 @@ def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
 ICONO_PATH = resource_path(ICONO_NOMBRE)
@@ -103,7 +104,54 @@ CAMPOS_CONFIG = (
     ("email_aviso_fallo_madd", "email_aviso_fallo_madd_entry", ""),
     ("filtro_dia_facturas_madd", "filtro_dia_madd_option", "Ayer"),
     ("color_resaltado", "color_optionmenu", "Amarillo"),
+    ("nombre_usuario", "nombre_entry", ""),
 )
+
+DIAS_ES = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+MESES_LARGOS_ES = ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre")
+
+def texto_saludo(nombre="", ahora=None):
+    hora = (ahora or datetime.now()).hour
+    saludo = "Buenos días" if 6 <= hora < 14 else "Buenas tardes" if 14 <= hora < 21 else "Buenas noches"
+    nombre = (nombre or "").strip()
+    return f"{saludo}, {nombre}" if nombre else saludo
+
+def fecha_larga(ahora=None):
+    ahora = ahora or datetime.now()
+    texto = f"{DIAS_ES[ahora.weekday()]}, {ahora.day} de {MESES_LARGOS_ES[ahora.month - 1]}"
+    return texto[0].upper() + texto[1:]
+
+def resumen_del_dia(config, ahora=None):
+    """Fichas (icono, texto, correcto) con lo que ya está hecho hoy. Solo incluye lo que está configurado."""
+    ahora = ahora or datetime.now()
+    fichas = []
+    carpeta_hojas = config.get("ruta_carpeta_hojas", "")
+    if carpeta_hojas and os.path.isdir(carpeta_hojas):
+        if ruta_hoja_pedidos_del_dia(carpeta_hojas, ahora).exists():
+            fichas.append(("check", "Hoja de pedidos de hoy creada", True))
+        else:
+            fichas.append(("calendario", "Hoja de pedidos de hoy pendiente", False))
+    if config.get("usuario_madd") and ahora.weekday() < 5 and os.path.exists(LOG_FACTURAS_MADD):
+        hoy = ahora.strftime("%Y-%m-%d")
+        estado = None
+        try:
+            with open(LOG_FACTURAS_MADD, encoding="utf-8") as f:
+                bloque_hoy = None
+                for linea in f:
+                    if linea.startswith("--- CORREO [" + hoy):
+                        bloque_hoy = linea.split(" ")[3][:5]  # "--- CORREO [AAAA-MM-DD HH:MM:SS] ---" -> "HH:MM"
+                    elif bloque_hoy and linea.startswith("Estado:"):
+                        estado = (bloque_hoy, linea.split(":", 1)[1].strip())
+                        bloque_hoy = None
+        except OSError:
+            estado = None
+        if estado and estado[1].startswith("enviado"):
+            fichas.append(("check", f"Facturas enviadas a las {estado[0]}", True))
+        elif estado:
+            fichas.append(("aviso", "Facturas pendientes en Outlook", False))
+        else:
+            fichas.append(("factura", "Facturas de hoy aún sin enviar", False))
+    return fichas
 
 def tarea_activa():
     """Nombre de la tarea en curso que trabaja con ficheros o envía correos, o None si no hay ninguna."""
@@ -1441,6 +1489,7 @@ def generar_fichero_stock_fiat_task(ruta_excel, carpeta_salida, log_callback=Non
 class AppIntegrada(ctk.CTk):
     def __init__(self):
         super().__init__()
+        estilo.configurar_fuentes(tkinter.font.families(self))
         self.config = cargar_configuracion()
         self._ultimo_porcentaje = -1
         self.aplicar_tema_inicial()
@@ -1475,9 +1524,13 @@ class AppIntegrada(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
     def aplicar_estilos_ui(self):
-        # Paleta clara u oscura según configuración (modo_apariencia); definida en estilo.py
-        for nombre, valor in estilo.paleta(self.config.get("modo_apariencia", "Light") == "Dark").items():
+        # Paleta del tema de color elegido, en su variante clara u oscura; definida en estilo.py
+        for nombre, valor in estilo.paleta(self.config.get("modo_apariencia", "Light") == "Dark", self.tema_actual()).items():
             setattr(self, f"color_{nombre}", valor)
+
+    def tema_actual(self):
+        tema = self.config.get("tema_color")
+        return tema if tema in estilo.TEMAS else estilo.TEMA_POR_DEFECTO
 
     # ---------- componentes reutilizables (todos usan estilo.py) ----------
 
@@ -1485,6 +1538,7 @@ class AppIntegrada(ctk.CTk):
         return ctk.CTkLabel(parent, text=texto, font=estilo.fuente(tam, negrita, mono), text_color=self.color_texto_sec if secundario else self.color_texto, **kw)
 
     def crear_entrada(self, parent, **kw):
+        kw.setdefault("font", estilo.fuente())
         entrada = ctk.CTkEntry(parent, height=estilo.ALTO_CONTROL, corner_radius=estilo.RADIO, border_width=1, border_color=self.color_borde_campo,
                                fg_color=self.color_campo, text_color=self.color_texto, placeholder_text_color=self.color_texto_placeholder, **kw)
         # Foco visible: el campo activo se resalta con el color principal
@@ -1493,21 +1547,28 @@ class AppIntegrada(ctk.CTk):
         return entrada
 
     def crear_boton_secundario(self, parent, texto, comando, alto=estilo.ALTO_CONTROL, **kw):
+        kw.setdefault("font", estilo.fuente())
         return ctk.CTkButton(parent, text=texto, height=alto, corner_radius=estilo.RADIO, fg_color=self.color_panel_medio, text_color=self.color_texto, hover_color=self.color_panel_medio_hover, border_width=1, border_color=self.color_borde, command=comando, **kw)
 
     def crear_boton_principal(self, parent, text, command, alto=estilo.ALTO_BOTON):
         return ctk.CTkButton(parent, text=text, height=alto, corner_radius=estilo.RADIO, font=estilo.fuente(estilo.TAM_BOTON, True), fg_color=self.color_principal, text_color="#ffffff", hover_color=self.color_hover, command=command)
 
     def crear_menu(self, parent, valores, comando=None, **kw):
+        kw.setdefault("font", estilo.fuente())
+        kw.setdefault("dropdown_font", estilo.fuente())
         return ctk.CTkOptionMenu(parent, values=valores, height=estilo.ALTO_CONTROL, corner_radius=estilo.RADIO, fg_color=self.color_principal, button_color=self.color_principal, button_hover_color=self.color_hover, command=comando, **kw)
 
-    def crear_tarjeta_tab(self, tab, titulo, subtitulo, en_rejilla=False):
+    def crear_tarjeta_tab(self, tab, titulo, subtitulo, en_rejilla=False, icono=None):
         card = ctk.CTkFrame(tab, fg_color=self.color_superficie, corner_radius=estilo.RADIO_TARJETA, border_width=1, border_color=self.color_borde)
         if en_rejilla:
             self.registrar_tarjeta(tab, card)
         else:
             card.pack(padx=20, pady=estilo.PAD_TARJETA * 2, fill="both", expand=True)
-        self.crear_etiqueta(card, titulo, estilo.TAM_TITULO, negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(14, 2))
+        fila_titulo = ctk.CTkFrame(card, fg_color="transparent")
+        fila_titulo.pack(anchor="w", fill="x", padx=estilo.PAD_X, pady=(14, 2))
+        if icono and estilo.FUENTE_ICONOS:
+            ctk.CTkLabel(fila_titulo, text=estilo.ICONOS[icono], font=estilo.fuente_icono(), text_color=self.color_principal).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(fila_titulo, text=titulo, font=estilo.fuente_titulo(), text_color=self.color_texto).pack(side="left")
         etiqueta_subtitulo = self.crear_etiqueta(card, subtitulo, secundario=True, wraplength=470, justify="left")
         etiqueta_subtitulo.pack(anchor="w", padx=estilo.PAD_X, pady=(0, 8))
         card.bind("<Configure>", lambda evento, etiqueta=etiqueta_subtitulo: self.ajustar_subtitulo(etiqueta, evento.width), add="+")
@@ -1620,20 +1681,13 @@ class AppIntegrada(ctk.CTk):
         self.ultima_ruta_generada = ""
         self.configure(fg_color=self.color_panel_claro)
 
-        cabecera = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=0, border_width=0)
-        cabecera.pack(fill="x")
-        cabecera_int = ctk.CTkFrame(cabecera, fg_color="transparent")
-        cabecera_int.pack(fill="x", padx=20, pady=10)
-        self.crear_etiqueta(cabecera_int, "Palausa Aprovisionamiento", estilo.TAM_APP, negrita=True).pack(side="left")
-        self.crear_etiqueta(cabecera_int, "Gestión de stock y pedidos", secundario=True).pack(side="left", padx=(14, 0), pady=(6, 0))
-        self.crear_etiqueta(cabecera_int, "Ctrl+1…8 pestañas  ·  Ctrl+Intro ejecutar  ·  Esc detener", estilo.TAM_PEQUENO, secundario=True).pack(side="right", pady=(6, 0))
-        ctk.CTkFrame(self, fg_color=self.color_borde, height=1).pack(fill="x")
+        self.construir_cabecera()
 
         self.construir_panel_actividad()
 
         self.tabview = ctk.CTkTabview(
             self,
-            corner_radius=10,
+            corner_radius=estilo.RADIO_TARJETA,
             segmented_button_selected_color=self.color_principal,
             segmented_button_selected_hover_color=self.color_hover,
             segmented_button_fg_color=self.color_panel_medio,
@@ -1661,6 +1715,51 @@ class AppIntegrada(ctk.CTk):
         self.construir_pestana(self.tabview.get())
         self.tabview.configure(command=self.al_cambiar_pestana)
         self.resaltar_pestana_activa(self.tabview)
+
+    def construir_cabecera(self):
+        """Cabecera de bienvenida: logo, saludo según la hora, fecha y un resumen de cómo va el día."""
+        cabecera = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=0, border_width=0)
+        cabecera.pack(fill="x")
+        cabecera_int = ctk.CTkFrame(cabecera, fg_color="transparent")
+        cabecera_int.pack(fill="x", padx=20, pady=(12, 10))
+        logo = self.cargar_logo(38)
+        if logo is not None:
+            ctk.CTkLabel(cabecera_int, image=logo, text="").pack(side="left", padx=(0, 14))
+        bloque = ctk.CTkFrame(cabecera_int, fg_color="transparent")
+        bloque.pack(side="left")
+        ctk.CTkLabel(bloque, text=texto_saludo(self.config.get("nombre_usuario", "")), font=estilo.fuente_titulo(estilo.TAM_APP), text_color=self.color_texto).pack(anchor="w")
+        self.crear_etiqueta(bloque, f"{fecha_larga()}  ·  Palausa Aprovisionamiento", secundario=True).pack(anchor="w")
+        derecha = ctk.CTkFrame(cabecera_int, fg_color="transparent")
+        derecha.pack(side="right")
+        self.frame_resumen = ctk.CTkFrame(derecha, fg_color="transparent")
+        self.frame_resumen.pack(anchor="e")
+        self.crear_etiqueta(derecha, "Ctrl+1…8 pestañas  ·  Ctrl+Intro ejecutar  ·  Esc detener", estilo.TAM_PEQUENO, secundario=True).pack(anchor="e", pady=(6, 0))
+        self.actualizar_resumen()
+        ctk.CTkFrame(self, fg_color=self.color_borde, height=1).pack(fill="x")
+
+    def cargar_logo(self, tam):
+        try:
+            from PIL import Image
+            imagen = Image.open(ICONO_PATH)
+            if hasattr(imagen, "ico"):
+                imagen = imagen.ico.getimage(max(imagen.ico.sizes()))  # la resolución más grande del .ico
+            return ctk.CTkImage(light_image=imagen, dark_image=imagen, size=(tam, tam))
+        except Exception:
+            return None
+
+    def actualizar_resumen(self):
+        """Fichas con el estado del día (hoja de pedidos y facturas MADD)."""
+        marco = getattr(self, "frame_resumen", None)
+        if marco is None or not marco.winfo_exists():
+            return
+        for hijo in marco.winfo_children():
+            hijo.destroy()
+        for icono, texto, correcto in resumen_del_dia(self.config):
+            ficha = ctk.CTkFrame(marco, fg_color=self.color_superficie_alt, corner_radius=12)
+            ficha.pack(side="left", padx=(8, 0))
+            if estilo.FUENTE_ICONOS:
+                ctk.CTkLabel(ficha, text=estilo.ICONOS[icono], font=estilo.fuente_icono(13), text_color=self.color_ok if correcto else self.color_texto_sec).pack(side="left", padx=(10, 6), pady=4)
+            self.crear_etiqueta(ficha, texto, estilo.TAM_PEQUENO).pack(side="left", padx=(0 if estilo.FUENTE_ICONOS else 10, 10), pady=4)
 
     def construir_panel_actividad(self):
         """Un único panel inferior: estado y progreso en una fila, acciones en otra y registro plegable."""
@@ -1792,7 +1891,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_auto(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_auto, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.", en_rejilla=True)
+        card = self.crear_tarjeta_tab(contenedor, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.", en_rejilla=True, icono="buscar")
         self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]))
         fila = self.crear_fila_ajuste(card, "Precio mínimo (EUR)")
         self.precio_entry = self.crear_entrada(fila, width=120, justify="center")
@@ -1805,7 +1904,7 @@ class AppIntegrada(ctk.CTk):
         self.crear_registro(card, "Referencias consultadas", "auto_log_box", 140)
         self.crear_boton_secundario(card, "Abrir carpeta del Excel", self.abrir_carpeta_auto).pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
 
-        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación según el umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.", en_rejilla=True)
+        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación según el umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.", en_rejilla=True, icono="filtro")
         self.crear_fila_archivo(card_rotacion, "Excel de Quiter", "excel_quiter_entry", "ruta_excel_quiter", "Excel de Quiter (DMS)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_rotacion, "Archivo de propuesta", "excel_rot_entry", "ruta_excel_rotacion", "Archivo PROPUESTAPEDIDO.xls...", "Examinar", lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")]))
         self.crear_fila_archivo(card_rotacion, "Carpeta destino", "folder_rot_entry", "ruta_folder_rotacion", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_rot_entry))
@@ -1821,20 +1920,20 @@ class AppIntegrada(ctk.CTk):
     def build_tab_pedidos(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_pedidos, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.", en_rejilla=True)
+        card = self.crear_tarjeta_tab(contenedor, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.", en_rejilla=True, icono="carrito")
         self.crear_fila_archivo(card, "Excel urgente", "excel_pedidos_entry", "ruta_excel_pedidos", "Excel URGENTE.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.excel_pedidos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_pedidos_entry", "ruta_folder_pedidos", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_pedidos_entry))
         self.btn_pedidos = self.crear_boton_principal(card, "Generar pedidos", self.toggle_pedidos)
         self.btn_pedidos.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
         self.crear_registro(card, "Números de pedido generados", "pedidos_generados_box", 90, pady_final=14)
 
-        card_hoja = self.crear_tarjeta_tab(contenedor, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.", en_rejilla=True)
+        card_hoja = self.crear_tarjeta_tab(contenedor, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.", en_rejilla=True, icono="calendario")
         self.crear_fila_archivo(card_hoja, "Plantilla de hoja", "plantilla_hoja_entry", "ruta_plantilla_hojas", "HOJA DE PEDIDOS.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.plantilla_hoja_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_hoja, "Carpeta HOJAS DE PEDIDO", "carpeta_hojas_entry", "ruta_carpeta_hojas", "Carpeta HOJAS DE PEDIDO...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_hojas_entry))
         self.btn_hoja_pedidos = self.crear_boton_principal(card_hoja, "Generar hoja de hoy", self.iniciar_hoja_pedidos)
         self.btn_hoja_pedidos.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
 
-        card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.", en_rejilla=True)
+        card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.", en_rejilla=True, icono="correo")
         self.crear_fila_archivo(card_avisos, "Hoja de pedido a procesar", "hoja_avisos_entry", "ruta_hoja_avisos", "Hoja dd-mm-aaaa.xlsx ya rellenada...", "Examinar", lambda: self.seleccionar_archivo(self.hoja_avisos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_avisos, "Excel de clientes", "clientes_avisos_entry", "ruta_excel_clientes", "clientes.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.clientes_avisos_entry, [("Excel files", "*.xlsx")]))
         self.crear_campo_en_fila(card_avisos, "Correo(s) de compañeros (se les envía la hoja de pedido completa)", "email_companeros_avisos_entry", "email_companeros_avisos", "", placeholder_text="correo1@palausa.es; correo2@palausa.es")
@@ -1847,7 +1946,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_comparador(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_comparador, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.", en_rejilla=True)
+        card = self.crear_tarjeta_tab(contenedor, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.", en_rejilla=True, icono="comparar")
         self.crear_fila_archivo(card, "Excel antiguo", "excel_old_entry", "ruta_excel_antiguo", "Excel antiguo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_old_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Excel nuevo", "excel_new_entry", "ruta_excel_nuevo", "Excel nuevo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_new_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_comp_entry", "ruta_folder_comparador", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_comp_entry))
@@ -1861,7 +1960,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_mopar(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_mopar, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.", en_rejilla=True)
+        card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.", en_rejilla=True, icono="documento")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_mopar_entry", "ruta_folder_mopar", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_mopar_entry))
         self.btn_mopar = self.crear_boton_principal(card, "Generar fichero Mopar", self.toggle_mopar)
@@ -1871,7 +1970,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_stock_fiat(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_stock_fiat, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.", en_rejilla=True)
+        card = self.crear_tarjeta_tab(contenedor, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.", en_rejilla=True, icono="coche")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files (.xls)", "*.xls")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_stock_fiat_entry", "ruta_folder_stock_fiat", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_stock_fiat_entry))
         self.btn_stock_fiat = self.crear_boton_principal(card, "Generar Stock FIAT", self.toggle_stock_fiat)
@@ -1880,7 +1979,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_madd(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_madd, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Facturas Stellantis MADD", "Descarga diaria de facturas desde el portal MADD (www.madd.stellantis.com) y envía un correo con los PDF adjuntos.", en_rejilla=True)
+        card = self.crear_tarjeta_tab(contenedor, "Facturas Stellantis MADD", "Descarga diaria de facturas desde el portal MADD (www.madd.stellantis.com) y envía un correo con los PDF adjuntos.", en_rejilla=True, icono="factura")
         self.crear_bloque_credenciales(card, [
             ("Usuario MADD", "usuario_madd_entry", "usuario_madd", "", False),
             ("Contraseña MADD", "password_madd_entry", "password_madd", "", True),
@@ -1896,7 +1995,7 @@ class AppIntegrada(ctk.CTk):
         self.btn_madd.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
         self.crear_registro(card, "Registro de la ejecución", "madd_log_box", 140, pady_final=14)
 
-        card_prog = self.crear_tarjeta_tab(contenedor, "Programación diaria", "Cuando compruebes que la ejecución manual funciona bien, activa la tarea de Windows para que corra sola todos los días laborables a las 07:00 (despierta el PC si está en suspensión).", en_rejilla=True)
+        card_prog = self.crear_tarjeta_tab(contenedor, "Programación diaria", "Cuando compruebes que la ejecución manual funciona bien, activa la tarea de Windows para que corra sola todos los días laborables a las 07:00 (despierta el PC si está en suspensión).", en_rejilla=True, icono="reloj")
         fila_prog = ctk.CTkFrame(card_prog, fg_color="transparent")
         fila_prog.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
         self.btn_activar_tarea_madd = self.crear_boton_principal(fila_prog, "Activar tarea programada (07:00 L-V)", self.activar_tarea_programada_madd)
@@ -1907,7 +2006,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_config(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_config, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Configuración general", "Ajusta credenciales, rendimiento y apariencia visual de la herramienta.", en_rejilla=True)
+        card = self.crear_tarjeta_tab(contenedor, "Configuración general", "Ajusta credenciales, rendimiento y apariencia visual de la herramienta.", en_rejilla=True, icono="ajustes")
         self.crear_bloque_credenciales(card, [
             ("Usuario", "user_entry", "usuario", "", False),
             ("Contraseña", "pass_entry", "password", "", True),
@@ -1920,6 +2019,14 @@ class AppIntegrada(ctk.CTk):
         self.modo_option = self.crear_menu(fila, ["Claro", "Oscuro"], comando=self.cambiar_modo_apariencia)
         self.modo_option.set("Oscuro" if self.config.get("modo_apariencia", "Light") == "Dark" else "Claro")
         self.modo_option.pack(side="right", padx=estilo.PAD_FILA, pady=6)
+        fila = self.crear_fila_ajuste(card, "Color")
+        self.tema_option = self.crear_menu(fila, list(estilo.TEMAS), comando=self.cambiar_modo_apariencia)
+        self.tema_option.set(self.tema_actual())
+        self.tema_option.pack(side="right", padx=estilo.PAD_FILA, pady=6)
+        fila = self.crear_fila_ajuste(card, "Tu nombre (para el saludo)")
+        self.nombre_entry = self.crear_entrada(fila, width=220, placeholder_text="Opcional")
+        self.nombre_entry.insert(0, self.config.get("nombre_usuario", ""))
+        self.nombre_entry.pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.reclamaciones_power_line.construir_ajustes(card)
         self.crear_boton_principal(card, "Guardar configuración", self.guardar_config_ui).pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
 
@@ -2083,6 +2190,8 @@ class AppIntegrada(ctk.CTk):
         if activa:
             messagebox.showwarning("Aviso", f"No se puede cambiar la apariencia mientras hay una tarea en curso ({activa}). Espera a que termine.")
             self.modo_option.set("Oscuro" if self.config.get("modo_apariencia", "Light") == "Dark" else "Claro")
+            if getattr(self, "tema_option", None) is not None:
+                self.tema_option.set(self.tema_actual())
             return
         self.guardar_configuracion_ui_internal()
         self.reconstruir_interfaz()
@@ -2278,6 +2387,7 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         ruta = ruta_hoja_pedidos_del_dia(carpeta)
         self.actualizar_estado("hoja de pedidos lista", str(ruta))
+        self.actualizar_resumen()
         boton = getattr(self, "btn_hoja_pedidos", None)
         if boton is not None:
             boton.configure(text="Generar hoja de hoy", fg_color=acc_color, hover_color=self.color_hover, state="normal")
@@ -2573,6 +2683,7 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("descarga de facturas MADD finalizada", self.widget_get("carpeta_facturas_madd_entry"))
         self.btn_madd.configure(text="Ejecutar ahora (prueba manual)", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        self.actualizar_resumen()
 
     def activar_tarea_programada_madd(self):
         if not getattr(sys, "frozen", False):
@@ -2630,6 +2741,11 @@ class AppIntegrada(ctk.CTk):
             config[clave] = convertir[0](valor) if convertir else valor
         variable_avisos = getattr(self, "avisos_auto_var", None)
         config["avisos_envio_automatico"] = bool(variable_avisos.get()) if variable_avisos is not None else self.config.get("avisos_envio_automatico", True)
+        selector_tema = getattr(self, "tema_option", None)
+        try:
+            config["tema_color"] = selector_tema.get() if selector_tema is not None else self.tema_actual()
+        except Exception:
+            config["tema_color"] = self.tema_actual()
         selector_modo = getattr(self, "modo_option", None)
         if selector_modo is not None:
             config["modo_apariencia"] = "Dark" if selector_modo.get() == "Oscuro" else "Light"
