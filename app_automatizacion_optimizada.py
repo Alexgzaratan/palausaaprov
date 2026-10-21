@@ -24,6 +24,7 @@ from openpyxl.styles import PatternFill
 from concurrent.futures import ThreadPoolExecutor
 from reclamaciones_power_line import ModuloReclamacionesPowerLine
 import estilo
+import animacion_inicio
 from rutas_app import ruta_datos
 from configuracion import LOG_DETALLADO, cargar_configuracion, guardar_configuracion, registrar_error_detallado
 
@@ -1737,15 +1738,34 @@ class AppIntegrada(ctk.CTk):
         self.actualizar_resumen()
         ctk.CTkFrame(self, fg_color=self.color_borde, height=1).pack(fill="x")
 
-    def cargar_logo(self, tam):
+    def imagen_logo(self):
         try:
             from PIL import Image
             imagen = Image.open(ICONO_PATH)
             if hasattr(imagen, "ico"):
                 imagen = imagen.ico.getimage(max(imagen.ico.sizes()))  # la resolución más grande del .ico
-            return ctk.CTkImage(light_image=imagen, dark_image=imagen, size=(tam, tam))
+            return imagen
         except Exception:
             return None
+
+    def cargar_logo(self, tam):
+        imagen = self.imagen_logo()
+        if imagen is None:
+            return None
+        return ctk.CTkImage(light_image=imagen, dark_image=imagen, size=(tam, tam))
+
+    def mostrar_animacion_inicio(self):
+        """La ultraball se abre y deja paso a la app (se desactiva en Configuración; un clic la salta)."""
+        if not self.config.get("animacion_inicio", True):
+            return None
+        imagen = self.imagen_logo()
+        if imagen is None:
+            return None
+        oscuro = self.config.get("modo_apariencia", "Light") == "Dark"
+        # Luz dorada, como el amarillo de la ultraball: más clara sobre fondo oscuro, más intensa sobre fondo claro
+        color_luz = animacion_inicio.mezclar(animacion_inicio.AMARILLO_BOLA, "#ffffff", 0.5 if oscuro else 0.0)
+        return animacion_inicio.reproducir(self, imagen, fondo=self.color_panel_claro, color_texto=self.color_texto_sec,
+                                           color_luz=color_luz, fuente=estilo.fuente_titulo(15))
 
     def actualizar_resumen(self):
         """Fichas con el estado del día (hoja de pedidos y facturas MADD)."""
@@ -2027,6 +2047,9 @@ class AppIntegrada(ctk.CTk):
         self.nombre_entry = self.crear_entrada(fila, width=220, placeholder_text="Opcional")
         self.nombre_entry.insert(0, self.config.get("nombre_usuario", ""))
         self.nombre_entry.pack(side="right", padx=estilo.PAD_FILA, pady=6)
+        fila = self.crear_fila_ajuste(card, "Animación de apertura")
+        self.animacion_var = ctk.BooleanVar(value=self.config.get("animacion_inicio", True))
+        ctk.CTkSwitch(fila, text="", variable=self.animacion_var, width=46, progress_color=self.color_principal).pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.reclamaciones_power_line.construir_ajustes(card)
         self.crear_boton_principal(card, "Guardar configuración", self.guardar_config_ui).pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
 
@@ -2741,6 +2764,8 @@ class AppIntegrada(ctk.CTk):
             config[clave] = convertir[0](valor) if convertir else valor
         variable_avisos = getattr(self, "avisos_auto_var", None)
         config["avisos_envio_automatico"] = bool(variable_avisos.get()) if variable_avisos is not None else self.config.get("avisos_envio_automatico", True)
+        variable_animacion = getattr(self, "animacion_var", None)
+        config["animacion_inicio"] = bool(variable_animacion.get()) if variable_animacion is not None else self.config.get("animacion_inicio", True)
         selector_tema = getattr(self, "tema_option", None)
         try:
             config["tema_color"] = selector_tema.get() if selector_tema is not None else self.tema_actual()
@@ -2796,4 +2821,5 @@ if __name__ == "__main__":
         probar_navegador()
         sys.exit(0)
     app = AppIntegrada()
+    app.mostrar_animacion_inicio()
     app.mainloop()
