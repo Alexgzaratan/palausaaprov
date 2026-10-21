@@ -64,3 +64,8 @@ def test_no_se_cambia_el_tema_con_una_tarea_en_curso(app, monkeypatch):
     assert app.config["modo_apariencia"] == "Light"
     assert app.modo_option.get() == "Claro"
     assert app.mensajes
+
+
+def test_umbral_de_rotacion_tiene_ayuda(app):
+    texto = app.ayuda_umbral.cget("text")
+    assert "menor que este valor" in texto and "endurece" in texto

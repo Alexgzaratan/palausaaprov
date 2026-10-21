@@ -1932,6 +1932,13 @@ class AppIntegrada(ctk.CTk):
         self.umbral_entry = self.crear_entrada(fila, width=120, justify="center")
         self.umbral_entry.insert(0, self.config.get("umbral_rotacion", "0.08"))
         self.umbral_entry.pack(side="right", padx=estilo.PAD_FILA, pady=6)
+        fila.pack_configure(pady=(0, 4))
+        # Ayuda breve pegada a la fila: qué hace el umbral (comparación en filtrar_por_rotacion_task)
+        self.ayuda_umbral = self.crear_etiqueta(card_rotacion, "Se marcan en rojo las referencias cuya media en la propuesta es menor que este valor "
+                                                "(si no aparecen en la propuesta, cuentan como 0). Subirlo endurece el filtro: más filas en rojo. "
+                                                "Bajarlo lo suaviza.", estilo.TAM_PEQUENO, secundario=True, wraplength=470, justify="left")
+        self.ayuda_umbral.pack(anchor="w", padx=estilo.PAD_X + 4, pady=(0, estilo.PAD_Y))
+        card_rotacion.bind("<Configure>", lambda evento, etiqueta=self.ayuda_umbral: self.ajustar_subtitulo(etiqueta, evento.width), add="+")
         self.btn_rotacion = self.crear_boton_principal(card_rotacion, "Resaltar por rotación", self.iniciar_filtro_rotacion)
         self.btn_rotacion.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
         self.crear_registro(card_rotacion, "Registro de rotación", "rotacion_log_box", 110)
