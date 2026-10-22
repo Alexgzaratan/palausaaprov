@@ -274,6 +274,108 @@ def obtener_ruta_para_contador(carpeta_base, contador):
 # 1. LÓGICA DE FILTRO DE ROTACIÓN
 # ---------------------------------------------------
 
+# ---------- regla del filtro de rotación (la usan el filtro, su vista previa y la lista para Quiter) ----------
+RESULTADOS_DISPONIBLES = ("pieza disponible", "disponible")
+COLOR_ROJO_ROTACION = "FF0000"
+COLOR_AMARILLO_ROTACION = "FFFF00"
+
+
+def precio_fila_rotacion(valor):
+    """Precio de la columna F del Excel de Quiter, o None si no es un número."""
+    try:
+        return float(str(valor).replace(",", "."))
+    except Exception:
+        return None
+
+
+def referencia_rotacion(valor):
+    return str(valor).strip().replace('2/', '')
+
+
+def resultado_disponibilidad(valor):
+    """Resultado de la automatización (columna R) normalizado para compararlo."""
+    return "" if valor is None else " ".join(str(valor).strip().lower().split())
+
+
+def clasificar_fila_rotacion(precio, media, resultado, umbral_media, precio_minimo):
+    """'precio' (se deja sin marcar), 'rojo' (baja rotación), 'amarillo' (no disponible) o 'blanco'."""
+    if precio is not None and precio < precio_minimo:
+        return "precio"
+    if media < umbral_media:
+        return "rojo"
+    if resultado and resultado not in RESULTADOS_DISPONIBLES:
+        return "amarillo"
+    return "blanco"
+
+
+def leer_medias_propuesta(ruta_propuesta_xls):
+    """Media de cada referencia en la hoja 'Informe' de la propuesta; None si faltan las columnas."""
+    df_propuesta = pd.read_excel(ruta_propuesta_xls, sheet_name='Informe')
+    columnas = [str(c).strip() for c in df_propuesta.columns]
+    col_articulo = next((c for c in columnas if c.lower() in ["articulo", "artículo", "referencia", "ref", "código", "codigo"]), None)
+    col_media = next((c for c in columnas if c.lower() in ["media", "consumo", "promedio"]), None)
+    if not col_articulo or not col_media:
+        return None
+    df_propuesta.columns = columnas
+    dict_medias = {}
+    for _, fila in df_propuesta.iterrows():
+        try:
+            dict_medias[referencia_rotacion(fila[col_articulo])] = float(fila[col_media])
+        except Exception:
+            continue
+    return dict_medias
+
+
+def leer_filas_quiter(ruta_excel_quiter):
+    """(precio, referencia, resultado) de cada fila del Excel de Quiter, sin la cabecera."""
+    wb = load_workbook(ruta_excel_quiter, read_only=True)
+    try:
+        filas = []
+        for valores in wb.active.iter_rows(min_row=2, max_col=18, values_only=True):
+            valores = tuple(valores) + (None,) * (18 - len(valores))
+            filas.append((precio_fila_rotacion(valores[5]), referencia_rotacion(valores[1]), resultado_disponibilidad(valores[17])))
+        return filas
+    finally:
+        wb.close()
+
+
+def contar_rotacion(filas, dict_medias, umbral_media, precio_minimo):
+    conteo = {"rojo": 0, "amarillo": 0, "precio": 0, "blanco": 0}
+    for precio, ref, resultado in filas:
+        conteo[clasificar_fila_rotacion(precio, dict_medias.get(ref, 0.0), resultado, umbral_media, precio_minimo)] += 1
+    return conteo
+
+
+def lineas_marcadas_rotacion(ruta_rotacion):
+    """Líneas en rojo o amarillo del Excel _ROTACION.xlsx ya generado: ([(línea, referencia, color)], total de líneas).
+    La fila N del archivo es la línea N del pedido en Quiter (el filtro quita la cabecera)."""
+    wb = load_workbook(ruta_rotacion)
+    try:
+        marcadas, total = [], 0
+        for fila in range(1, wb.active.max_row + 1):
+            celda = wb.active.cell(row=fila, column=2)
+            if celda.value is None or not str(celda.value).strip():
+                continue
+            total += 1
+            color = str(celda.fill.fgColor.rgb or "")[-6:].upper() if celda.fill.fill_type == "solid" else ""
+            if color == COLOR_ROJO_ROTACION:
+                marcadas.append((fila, str(celda.value).strip(), "rojo"))
+            elif color == COLOR_AMARILLO_ROTACION:
+                marcadas.append((fila, str(celda.value).strip(), "amarillo"))
+        return marcadas, total
+    finally:
+        wb.close()
+
+
+def texto_lista_quiter(pedido, marcadas, total):
+    """Texto para pegar en Claude (skill quiter-lineas-a-cero)."""
+    if not marcadas:
+        return f"rotación {pedido}: ninguna línea marcada de {total}"
+    lineas = [f"rotación {pedido}: {len(marcadas)} de {total} líneas a poner a 0"]
+    lineas += [f"Lín. {linea} · {ref} ({color})" for linea, ref, color in marcadas]
+    return "\n".join(lineas)
+
+
 def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida_folder, umbral_media, color_resaltado, precio_minimo=0.0, log_callback=None, progreso_callback=None, finalizado_callback=None):
     global filtro_rotacion_running
     filtro_rotacion_running = True
@@ -283,49 +385,33 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
     try:
         log("📖 Leyendo archivo de rotación...")
         try:
-            df_propuesta = pd.read_excel(ruta_propuesta_xls, sheet_name='Informe')
+            dict_medias = leer_medias_propuesta(ruta_propuesta_xls)
         except Exception as e:
             log(f"❌ Error al leer el archivo Excel: {e}", "error")
             registrar_error_detallado(str(e), traceback.format_exc())
             return
-        columnas = [str(c).strip() for c in df_propuesta.columns]
-        col_articulo = next((c for c in columnas if c.lower() in ["articulo", "artículo", "referencia", "ref", "código", "codigo"]), None)
-        col_media = next((c for c in columnas if c.lower() in ["media", "consumo", "promedio"]), None)
-        if not col_articulo or not col_media:
+        if dict_medias is None:
             log(f"❌ Error: No se encuentran las columnas necesarias.", "error")
             return
-        dict_medias = {}
-        for _, fila in df_propuesta.iterrows():
-            try:
-                ref = str(fila[col_articulo]).strip().replace('2/', '')
-                dict_medias[ref] = float(fila[col_media])
-            except Exception:
-                continue
         log(f"✅ Cargadas {len(dict_medias)} referencias.", "success")
         wb = load_workbook(ruta_excel_quiter)
         ws = wb.active
         fill_color = PatternFill(start_color=color_resaltado, end_color=color_resaltado, fill_type="solid")
-        fill_no_disponible = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        fill_no_disponible = PatternFill(start_color=COLOR_AMARILLO_ROTACION, end_color=COLOR_AMARILLO_ROTACION, fill_type="solid")
         total_filas = max(ws.max_row - 1, 1)
         filas_baja_rotacion = 0
         filas_no_disponibles = 0
         filas_bajo_precio = 0
         for i in range(2, ws.max_row + 1):
-            try:
-                precio_num = float(str(ws.cell(row=i, column=6).value).replace(",", "."))
-            except Exception:
-                precio_num = None
-            if precio_num is not None and precio_num < precio_minimo:
+            ref = referencia_rotacion(ws.cell(row=i, column=2).value)
+            clase = clasificar_fila_rotacion(precio_fila_rotacion(ws.cell(row=i, column=6).value), dict_medias.get(ref, 0.0),
+                                             resultado_disponibilidad(ws.cell(row=i, column=18).value), umbral_media, precio_minimo)
+            if clase == "precio":
                 filas_bajo_precio += 1
-                if progreso_callback: progreso_callback((i - 1) / total_filas)
-                continue
-            ref = str(ws.cell(row=i, column=2).value).strip().replace('2/', '')
-            resultado_busqueda = ws.cell(row=i, column=18).value
-            resultado_normalizado = "" if resultado_busqueda is None else " ".join(str(resultado_busqueda).strip().lower().split())
-            if dict_medias.get(ref, 0.0) < umbral_media:
+            elif clase == "rojo":
                 for cell in ws[i]: cell.fill = fill_color
                 filas_baja_rotacion += 1
-            elif resultado_normalizado and resultado_normalizado not in ("pieza disponible", "disponible"):
+            elif clase == "amarillo":
                 for cell in ws[i]: cell.fill = fill_no_disponible
                 filas_no_disponibles += 1
             if progreso_callback: progreso_callback((i - 1) / total_filas)
@@ -1937,12 +2023,22 @@ class AppIntegrada(ctk.CTk):
         self.ayuda_umbral = self.crear_etiqueta(card_rotacion, "Se marcan en rojo las referencias cuya media en la propuesta es menor que este valor "
                                                 "(si no aparecen en la propuesta, cuentan como 0). Subirlo endurece el filtro: más filas en rojo. "
                                                 "Bajarlo lo suaviza.", estilo.TAM_PEQUENO, secundario=True, wraplength=470, justify="left")
-        self.ayuda_umbral.pack(anchor="w", padx=estilo.PAD_X + 4, pady=(0, estilo.PAD_Y))
-        card_rotacion.bind("<Configure>", lambda evento, etiqueta=self.ayuda_umbral: self.ajustar_subtitulo(etiqueta, evento.width), add="+")
+        self.ayuda_umbral.pack(anchor="w", padx=estilo.PAD_X + 4, pady=(0, 2))
+        # Vista previa: cuántas filas marcaría el filtro con el umbral escrito (se recalcula sola)
+        self.vista_previa_umbral = self.crear_etiqueta(card_rotacion, "", estilo.TAM_PEQUENO, negrita=True, wraplength=470, justify="left")
+        self.vista_previa_umbral.pack(anchor="w", padx=estilo.PAD_X + 4, pady=(0, estilo.PAD_Y))
+        for etiqueta in (self.ayuda_umbral, self.vista_previa_umbral):
+            card_rotacion.bind("<Configure>", lambda evento, etiqueta=etiqueta: self.ajustar_subtitulo(etiqueta, evento.width), add="+")
         self.btn_rotacion = self.crear_boton_principal(card_rotacion, "Resaltar por rotación", self.iniciar_filtro_rotacion)
         self.btn_rotacion.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
         self.crear_registro(card_rotacion, "Registro de rotación", "rotacion_log_box", 110)
-        self.crear_boton_secundario(card_rotacion, "Abrir carpeta destino", self.abrir_carpeta_rotacion).pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        botones = ctk.CTkFrame(card_rotacion, fg_color="transparent")
+        botones.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        botones.grid_columnconfigure((0, 1), weight=1, uniform="botones_rotacion")
+        self.crear_boton_secundario(botones, "Abrir carpeta destino", self.abrir_carpeta_rotacion).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.btn_lista_quiter = self.crear_boton_secundario(botones, "Copiar lista para Quiter", self.copiar_lista_quiter)
+        self.btn_lista_quiter.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.iniciar_vista_previa_umbral()
 
     def build_tab_pedidos(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_pedidos, fg_color="transparent")
@@ -2603,8 +2699,132 @@ class AppIntegrada(ctk.CTk):
         if self.folder_rot_entry.get() and ruta_quiter:
             ruta_final = str(Path(self.folder_rot_entry.get()) / f"{Path(ruta_quiter).stem}_ROTACION.xlsx")
             self.actualizar_estado("rotación completada", ruta_final)
+            if os.path.isfile(ruta_final):
+                self.log_callback_rotacion("Pulsa «Copiar lista para Quiter» para pegar en Claude las líneas a poner a 0.")
         self.btn_rotacion.configure(state="normal", text="Resaltar por rotación")
         self.btn_flujo.configure(state="normal")
+
+    # ---------- vista previa del umbral y lista para Quiter ----------
+
+    def iniciar_vista_previa_umbral(self):
+        """Revisa cada poco si han cambiado el umbral, el precio mínimo o los Excel, y recalcula la vista previa."""
+        if not hasattr(self, "_cache_rotacion"):
+            self._cache_rotacion = {}
+            self._cargando_vista_previa = False
+        self._generacion_vista_previa = getattr(self, "_generacion_vista_previa", 0) + 1
+        self._firma_vista_previa = None
+        self.revisar_vista_previa_umbral(self._generacion_vista_previa)
+
+    def revisar_vista_previa_umbral(self, generacion):
+        etiqueta = getattr(self, "vista_previa_umbral", None)
+        if generacion != self._generacion_vista_previa or etiqueta is None or not etiqueta.winfo_exists():
+            return
+        try:
+            self.actualizar_vista_previa_umbral()
+        except Exception as e:
+            registrar_error_detallado(f"Vista previa del umbral: {e}", traceback.format_exc())
+        self.after(700, self.revisar_vista_previa_umbral, generacion)
+
+    def poner_vista_previa(self, texto):
+        etiqueta = getattr(self, "vista_previa_umbral", None)
+        if etiqueta is not None and etiqueta.winfo_exists() and etiqueta.cget("text") != texto:
+            etiqueta.configure(text=texto)
+
+    def datos_rotacion_cacheados(self, clave, ruta, fecha):
+        guardado = self._cache_rotacion.get(clave)
+        if guardado and guardado[0] == ruta and guardado[1] == fecha:
+            return guardado[2]
+        return None
+
+    def cargar_datos_rotacion(self, ruta_quiter, fecha_quiter, ruta_propuesta, fecha_propuesta):
+        """Lee los Excel que no estén ya en caché; un error se guarda para no reintentarlo hasta que cambie el archivo."""
+        try:
+            for clave, ruta, fecha, lector in (("quiter", ruta_quiter, fecha_quiter, leer_filas_quiter),
+                                               ("propuesta", ruta_propuesta, fecha_propuesta, leer_medias_propuesta)):
+                if self.datos_rotacion_cacheados(clave, ruta, fecha) is None:
+                    try:
+                        datos = lector(ruta)
+                        if datos is None:
+                            datos = ("sin_columnas",)  # propuesta sin columnas de artículo y media
+                    except Exception as e:
+                        datos = ("error", str(e))
+                    self._cache_rotacion[clave] = (ruta, fecha, datos)
+        finally:
+            self._cargando_vista_previa = False
+
+    def actualizar_vista_previa_umbral(self, en_segundo_plano=True):
+        ruta_quiter = self.widget_get("excel_quiter_entry").strip()
+        ruta_propuesta = self.widget_get("excel_rot_entry").strip()
+        texto_umbral = self.widget_get("umbral_entry").strip()
+        texto_precio = self.widget_get("precio_entry", "0").strip()
+        fecha_quiter = os.path.getmtime(ruta_quiter) if os.path.isfile(ruta_quiter) else None
+        fecha_propuesta = os.path.getmtime(ruta_propuesta) if os.path.isfile(ruta_propuesta) else None
+        firma = (ruta_quiter, fecha_quiter, ruta_propuesta, fecha_propuesta, texto_umbral, texto_precio)
+        if firma == self._firma_vista_previa:
+            return
+        if fecha_quiter is None or fecha_propuesta is None:
+            self._firma_vista_previa = firma
+            self.poner_vista_previa("Elige el Excel de Quiter y la propuesta para ver cuántas filas se marcarían.")
+            return
+        try:
+            umbral = float(texto_umbral)  # igual que el filtro: con punto decimal
+            precio_minimo = float(texto_precio.replace(",", "."))
+        except ValueError:
+            self._firma_vista_previa = firma
+            self.poner_vista_previa("Escribe el umbral con punto decimal (por ejemplo 0.12) y un precio mínimo válido para ver la vista previa.")
+            return
+        filas = self.datos_rotacion_cacheados("quiter", ruta_quiter, fecha_quiter)
+        medias = self.datos_rotacion_cacheados("propuesta", ruta_propuesta, fecha_propuesta)
+        if filas is None or medias is None:
+            if not en_segundo_plano:
+                self.cargar_datos_rotacion(ruta_quiter, fecha_quiter, ruta_propuesta, fecha_propuesta)
+                return self.actualizar_vista_previa_umbral(en_segundo_plano=False)
+            if not self._cargando_vista_previa:
+                self._cargando_vista_previa = True
+                self.poner_vista_previa("Calculando cuántas filas se marcarían...")
+                threading.Thread(target=self.cargar_datos_rotacion, args=(ruta_quiter, fecha_quiter, ruta_propuesta, fecha_propuesta), daemon=True).start()
+            return  # la siguiente revisión mostrará el resultado
+        self._firma_vista_previa = firma
+        if isinstance(filas, tuple):
+            self.poner_vista_previa("No se puede leer el Excel de Quiter para la vista previa (puede estar abierto o guardándose).")
+        elif medias == ("sin_columnas",):
+            self.poner_vista_previa("La propuesta no tiene las columnas de artículo y media: el filtro no podrá ejecutarse.")
+        elif isinstance(medias, tuple):
+            self.poner_vista_previa("No se puede leer el archivo de propuesta para la vista previa.")
+        else:
+            conteo = contar_rotacion(filas, medias, umbral, precio_minimo)
+            texto = (f"Con {texto_umbral}: {conteo['rojo']} en rojo · {conteo['amarillo']} en amarillo · "
+                     f"{conteo['precio']} sin marcar por precio · {conteo['blanco']} en blanco")
+            if not any(resultado for _, _, resultado in filas):
+                texto += " (el amarillo aparece tras la automatización)"
+            self.poner_vista_previa(texto)
+
+    def ruta_salida_rotacion(self):
+        ruta_quiter = self.widget_get("excel_quiter_entry").strip()
+        carpeta = self.widget_get("folder_rot_entry").strip()
+        if not ruta_quiter or not carpeta:
+            return None
+        return str(Path(carpeta) / f"{Path(ruta_quiter).stem}_ROTACION.xlsx")
+
+    def copiar_lista_quiter(self):
+        """Copia al portapapeles las líneas en rojo y amarillo del último Excel de rotación, listas para la skill de Quiter."""
+        ruta = self.ruta_salida_rotacion()
+        if not ruta or not os.path.isfile(ruta):
+            messagebox.showinfo("Lista para Quiter", "Todavía no hay Excel de rotación para este Excel de Quiter. Ejecuta primero «Resaltar por rotación».")
+            return None
+        try:
+            marcadas, total = lineas_marcadas_rotacion(ruta)
+        except Exception as e:
+            messagebox.showwarning("Lista para Quiter", f"No se pudo leer {Path(ruta).name}: {e}")
+            return None
+        pedido = Path(ruta).stem.removesuffix("_ROTACION")
+        texto = texto_lista_quiter(pedido, marcadas, total)
+        self.clipboard_clear()
+        self.clipboard_append(texto)
+        self.update_idletasks()
+        generado = datetime.fromtimestamp(os.path.getmtime(ruta)).strftime("%d/%m %H:%M")
+        self.log_callback_rotacion(f"Lista copiada: {len(marcadas)} de {total} líneas de {Path(ruta).name} (generado el {generado}). Pégala en Claude.", "success")
+        return texto
 
     def toggle_mopar(self):
         global mopar_running
