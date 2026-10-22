@@ -69,8 +69,11 @@ def version_actual():
 
 
 def poner_version(version):
-    texto = ARCHIVO_VERSION.read_text(encoding="utf-8")
-    ARCHIVO_VERSION.write_text(re.sub(r'VERSION = "[^"]+"', f'VERSION = "{version}"', texto), encoding="utf-8")
+    # En bytes para conservar los finales de línea: si no, git ve el archivo cambiado aunque la versión sea la misma
+    datos = ARCHIVO_VERSION.read_bytes()
+    nuevos = re.sub(rb'VERSION = "[^"]+"', f'VERSION = "{version}"'.encode("utf-8"), datos)
+    if nuevos != datos:
+        ARCHIVO_VERSION.write_bytes(nuevos)
 
 
 def programa_abierto():
