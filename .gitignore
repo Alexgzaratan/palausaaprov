@@ -18,3 +18,4 @@ build_lanzador/
 build_*.txt
 releases/
 _actualizacion/
+tareas_pendientes.json*

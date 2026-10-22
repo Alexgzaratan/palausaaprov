@@ -29,6 +29,7 @@ import efectos
 import actualizaciones
 import cambio_version
 from version import VERSION
+import tareas
 from rutas_app import ruta_datos
 from configuracion import LOG_DETALLADO, cargar_configuracion, guardar_configuracion, registrar_error_detallado
 
@@ -1591,6 +1592,7 @@ class AppIntegrada(ctk.CTk):
             try: self.iconbitmap(ICONO_PATH)
             except Exception: pass
         self.avisos = efectos.GestorAvisos(self)
+        self.lista_tareas = tareas.ListaTareas(ruta_datos(tareas.ARCHIVO))
         self.arrastre_activo = efectos.preparar_arrastre(self)
         self.setup_ui()
         self.configurar_atajos()
@@ -1897,24 +1899,40 @@ class AppIntegrada(ctk.CTk):
                                            color_luz=color_luz, fuente=estilo.fuente_titulo(15))
 
     def actualizar_resumen(self):
-        """Fichas con el estado del día (hoja de pedidos y facturas MADD)."""
+        """Fichas con el estado del día (hoja de pedidos, facturas MADD y tareas pendientes)."""
         marco = getattr(self, "frame_resumen", None)
         if marco is None or not marco.winfo_exists():
             return
         for hijo in marco.winfo_children():
             hijo.destroy()
         for icono, texto, correcto in resumen_del_dia(self.config):
-            ficha = ctk.CTkFrame(marco, fg_color=self.color_superficie_alt, corner_radius=12)
-            ficha.pack(side="left", padx=(8, 0))
-            if estilo.FUENTE_ICONOS:
-                ctk.CTkLabel(ficha, text=estilo.ICONOS[icono], font=estilo.fuente_icono(13), text_color=self.color_ok if correcto else self.color_texto_sec).pack(side="left", padx=(10, 6), pady=4)
-            self.crear_etiqueta(ficha, texto, estilo.TAM_PEQUENO).pack(side="left", padx=(0 if estilo.FUENTE_ICONOS else 10, 10), pady=4)
+            self.crear_ficha_resumen(marco, icono, texto, self.color_ok if correcto else self.color_texto_sec)
+        lista = getattr(self, "lista_tareas", None)
+        pendientes = lista.pendientes() if lista is not None else 0
+        if pendientes:
+            vencidas = lista.vencidas(datetime.now().date())
+            texto = f"{pendientes} tarea{'s' if pendientes != 1 else ''} pendiente{'s' if pendientes != 1 else ''}"
+            if vencidas:
+                texto += f" · {vencidas} vencida{'s' if vencidas != 1 else ''}"
+            self.ficha_tareas = self.crear_ficha_resumen(marco, "tareas", texto, self.color_texto_error if vencidas else self.color_principal, self.ir_a_tareas)
         texto_boton, comando = self.estado_boton_actualizacion()
         if texto_boton:
             self.btn_actualizacion = ctk.CTkButton(marco, text=texto_boton, command=comando, height=28, corner_radius=12, font=estilo.fuente(estilo.TAM_PEQUENO, True),
                                                    fg_color=self.color_principal, hover_color=self.color_hover, text_color="#ffffff",
                                                    text_color_disabled="#ffffff", state="normal" if comando else "disabled")
             self.btn_actualizacion.pack(side="left", padx=(8, 0))
+
+    def crear_ficha_resumen(self, marco, icono, texto, color_icono, al_pulsar=None):
+        ficha = ctk.CTkFrame(marco, fg_color=self.color_superficie_alt, corner_radius=12)
+        ficha.pack(side="left", padx=(8, 0))
+        cursor = "hand2" if al_pulsar else ""
+        if estilo.FUENTE_ICONOS:
+            ctk.CTkLabel(ficha, text=estilo.ICONOS[icono], font=estilo.fuente_icono(13), text_color=color_icono, cursor=cursor).pack(side="left", padx=(10, 6), pady=4)
+        self.crear_etiqueta(ficha, texto, estilo.TAM_PEQUENO, cursor=cursor).pack(side="left", padx=(0 if estilo.FUENTE_ICONOS else 10, 10), pady=4)
+        if al_pulsar:
+            for widget in [ficha] + ficha.winfo_children():
+                widget.bind("<Button-1>", al_pulsar)
+        return ficha
 
     # ---------- actualizaciones (GitHub Releases; ver actualizaciones.py y cambio_version.py) ----------
 
@@ -2239,6 +2257,7 @@ class AppIntegrada(ctk.CTk):
         self.color_optionmenu.pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.btn_comparador = self.crear_boton_principal(card, "Comparar Excels", self.toggle_comparador)
         self.btn_comparador.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
+        self.construir_tarjeta_tareas(contenedor)
 
     def build_tab_mopar(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_mopar, fg_color="transparent")
@@ -2315,6 +2334,202 @@ class AppIntegrada(ctk.CTk):
         ctk.CTkSwitch(fila, text="", variable=self.animacion_var, width=46, progress_color=self.color_principal).pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.reclamaciones_power_line.construir_ajustes(card)
         self.crear_boton_principal(card, "Guardar configuración", self.guardar_config_ui).pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
+
+    # ---------- tareas pendientes (pestaña Comparador; datos y fechas en tareas.py) ----------
+
+    def construir_tarjeta_tareas(self, contenedor):
+        card = self.crear_tarjeta_tab(contenedor, "Tareas pendientes", "Apunta lo que tengas pendiente; se guarda solo. Doble clic sobre una tarea o su fecha para cambiarla.",
+                                      en_rejilla=True, icono="tareas")
+        fila = ctk.CTkFrame(card, fg_color="transparent")
+        fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        self.nueva_tarea_entry = self.crear_entrada(fila, placeholder_text="Nueva tarea...")
+        self.nueva_tarea_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.nueva_fecha_entry = self.crear_entrada(fila, width=118, placeholder_text="Fecha (dd/mm)", justify="center")
+        self.nueva_fecha_entry.pack(side="left", padx=(0, 8))
+        for campo in (self.nueva_tarea_entry, self.nueva_fecha_entry):
+            campo.bind("<Return>", lambda evento: self.anadir_tarea())
+        self._nueva_importante = False
+        self.btn_nueva_importante = self.crear_boton_estrella(fila, False, self.alternar_nueva_importante, estilo.ALTO_CONTROL)
+        self.btn_nueva_importante.pack(side="left", padx=(0, 8))
+        boton = self.crear_boton_principal(fila, "Añadir", self.anadir_tarea, alto=estilo.ALTO_CONTROL)
+        boton.configure(width=92)
+        boton.pack(side="left")
+        self.lista_tareas_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self.lista_tareas_frame.pack(padx=estilo.PAD_X, fill="x")
+        self.pie_tareas = ctk.CTkFrame(card, fg_color="transparent", height=1)
+        self.pie_tareas.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
+        self.pintar_tareas()
+
+    def crear_boton_estrella(self, padre, importante, comando, lado=28):
+        """Estrella para marcar una tarea como importante (dorada si lo es)."""
+        if estilo.FUENTE_ICONOS:
+            texto, fuente = estilo.ICONOS["estrella_llena" if importante else "estrella"], estilo.fuente_icono(15)
+        else:
+            texto, fuente = "★" if importante else "☆", estilo.fuente(15)
+        color = "#d99a00" if importante else self.color_texto_sec
+        return ctk.CTkButton(padre, text=texto, font=fuente, width=lado, height=lado, corner_radius=estilo.RADIO, command=comando,
+                             fg_color="transparent", hover_color=self.color_panel_medio_hover, text_color=color, border_width=0)
+
+    def alternar_nueva_importante(self):
+        self._nueva_importante = not self._nueva_importante
+        estrella = self.crear_boton_estrella(self.btn_nueva_importante.master, self._nueva_importante, self.alternar_nueva_importante, estilo.ALTO_CONTROL)
+        estrella.pack(side="left", padx=(0, 8), after=self.btn_nueva_importante)
+        self.btn_nueva_importante.destroy()
+        self.btn_nueva_importante = estrella
+
+    def anadir_tarea(self):
+        texto = self.nueva_tarea_entry.get().strip()
+        if not texto:
+            self.avisar("Escribe la tarea antes de añadirla.")
+            return "break"
+        try:
+            fecha = tareas.interpretar_fecha(self.nueva_fecha_entry.get(), datetime.now().date())
+        except ValueError as e:
+            self.avisar(str(e), "aviso")
+            return "break"
+        if not self.guardar_tareas(lambda: self.lista_tareas.anadir(texto, fecha, self._nueva_importante)):
+            return "break"
+        self.nueva_tarea_entry.delete(0, "end")
+        self.nueva_fecha_entry.delete(0, "end")
+        if self._nueva_importante:
+            self.alternar_nueva_importante()
+        self.pintar_tareas()
+        self.nueva_tarea_entry.focus_set()
+        return "break"
+
+    def guardar_tareas(self, cambio):
+        """Aplica un cambio a la lista; si no se puede guardar el archivo, avisa en vez de fallar."""
+        try:
+            cambio()
+            return True
+        except OSError as e:
+            registrar_error_detallado(f"Tareas pendientes: {e}", traceback.format_exc())
+            self.avisar(f"No se pudieron guardar las tareas: {e}", "aviso")
+            return False
+
+    def pintar_tareas(self):
+        marco = getattr(self, "lista_tareas_frame", None)
+        if marco is None or not marco.winfo_exists():
+            self.actualizar_resumen()
+            return
+        for hijo in marco.winfo_children():
+            hijo.destroy()
+        hoy = datetime.now().date()
+        lista = self.lista_tareas.ordenadas()
+        if not lista:
+            self.crear_etiqueta(marco, "No tienes tareas pendientes. Escribe una arriba y pulsa Intro.", secundario=True).pack(anchor="w", pady=(2, 6))
+        for tarea in lista:
+            self.crear_fila_tarea(marco, tarea, hoy)
+        for hijo in self.pie_tareas.winfo_children():
+            hijo.destroy()
+        hechas = sum(1 for t in lista if t["hecha"])
+        if lista:
+            pendientes = len(lista) - hechas
+            self.crear_etiqueta(self.pie_tareas, f"{pendientes} pendiente{'s' if pendientes != 1 else ''}" + (f" · {hechas} hecha{'s' if hechas != 1 else ''}" if hechas else ""),
+                                estilo.TAM_PEQUENO, secundario=True).pack(side="left", pady=(4, 0))
+        if hechas:
+            self.crear_boton_secundario(self.pie_tareas, f"Borrar completadas ({hechas})", self.borrar_tareas_completadas, alto=estilo.ALTO_BOTON_COMPACTO).pack(side="right", pady=(4, 0))
+        self.actualizar_resumen()
+
+    def crear_fila_tarea(self, marco, tarea, hoy):
+        identificador = tarea["id"]
+        fila = ctk.CTkFrame(marco, fg_color=self.color_superficie_alt, corner_radius=10)
+        fila.pack(fill="x", pady=(0, 6))
+        hecha = ctk.BooleanVar(value=tarea["hecha"])
+        ctk.CTkCheckBox(fila, text="", variable=hecha, width=24, checkbox_width=20, checkbox_height=20, corner_radius=6, border_width=2,
+                        fg_color=self.color_principal, hover_color=self.color_hover, border_color=self.color_borde_campo,
+                        command=lambda: self.marcar_tarea(identificador, hecha.get())).pack(side="left", padx=(12, 2), pady=8)
+        self.crear_boton_estrella(fila, tarea["importante"], lambda: self.alternar_importante_tarea(identificador)).pack(side="left", padx=(0, 4))
+        borrar = ctk.CTkButton(fila, text=estilo.ICONOS["cerrar"] if estilo.FUENTE_ICONOS else "✕", font=estilo.fuente_icono(11) if estilo.FUENTE_ICONOS else estilo.fuente(),
+                               width=28, height=28, corner_radius=estilo.RADIO, fg_color="transparent", hover_color=self.color_panel_medio_hover,
+                               text_color=self.color_texto_sec, command=lambda: self.borrar_tarea(identificador))
+        borrar.pack(side="right", padx=(0, 8))
+        if not tarea["hecha"]:
+            estado = tareas.estado_fecha(tarea["fecha"], hoy)
+            color = {"vencida": self.color_texto_error, "hoy": self.color_principal}.get(estado, self.color_texto_sec if tarea["fecha"] else self.color_texto_placeholder)
+            etiqueta_fecha = ctk.CTkLabel(fila, text=tareas.texto_fecha(tarea["fecha"], hoy) or "sin fecha", text_color=color, cursor="hand2",
+                                          font=estilo.fuente(estilo.TAM_PEQUENO, estado in ("vencida", "hoy")))
+            etiqueta_fecha.pack(side="right", padx=(6, 8))
+            etiqueta_fecha.bind("<Double-Button-1>", lambda evento: self.editar_tarea_en_linea(etiqueta_fecha, tarea, "fecha"))
+        if tarea["hecha"]:
+            fuente = ctk.CTkFont(family=estilo.FUENTE, size=estilo.TAM_TEXTO, overstrike=True)
+        else:
+            fuente = estilo.fuente(estilo.TAM_TEXTO, tarea["importante"])
+        etiqueta = ctk.CTkLabel(fila, text=tarea["texto"], font=fuente, anchor="w", justify="left", wraplength=420,
+                                text_color=self.color_texto_sec if tarea["hecha"] else self.color_texto)
+        etiqueta.pack(side="left", fill="x", expand=True, padx=(2, 6), pady=6)
+        etiqueta.bind("<Double-Button-1>", lambda evento: self.editar_tarea_en_linea(etiqueta, tarea, "texto"))
+
+    def editar_tarea_en_linea(self, etiqueta, tarea, campo):
+        """Doble clic: un campo encima del texto (o de la fecha). Intro o salir guarda; Esc cancela."""
+        if campo == "texto":
+            valor = tarea["texto"]
+        else:
+            valor = datetime.fromisoformat(tarea["fecha"]).strftime("%d/%m/%Y") if tarea["fecha"] else ""
+        entrada = self.crear_entrada(etiqueta.master, width=118 if campo == "fecha" else 200, justify="center" if campo == "fecha" else "left",
+                                     placeholder_text="dd/mm" if campo == "fecha" else "")
+        if campo == "fecha":
+            entrada.place(in_=etiqueta, relx=1.0, rely=0.5, anchor="e")
+        else:
+            entrada.place(in_=etiqueta, relx=0, rely=0.5, anchor="w", relwidth=1.0)
+        if valor:
+            entrada.insert(0, valor)
+        entrada.focus_set()
+        entrada._entry.select_range(0, "end")
+        terminado = {"si": False}
+
+        def guardar(evento=None):
+            if terminado["si"]:
+                return "break"
+            terminado["si"] = True
+            nuevo = entrada.get()
+            if campo == "texto":
+                if nuevo.strip() and nuevo.strip() != tarea["texto"]:
+                    self.guardar_tareas(lambda: self.lista_tareas.editar(tarea["id"], nuevo))
+            else:
+                try:
+                    fecha = tareas.interpretar_fecha(nuevo, datetime.now().date())
+                    self.guardar_tareas(lambda: self.lista_tareas.cambiar_fecha(tarea["id"], fecha))
+                except ValueError as e:
+                    self.avisar(str(e), "aviso")
+            self.after_idle(self.pintar_tareas)
+            return "break"
+
+        def cancelar(evento=None):
+            terminado["si"] = True
+            entrada.destroy()
+            return "break"  # que Esc no llegue al atajo global de detener la tarea en curso
+
+        entrada.bind("<Return>", guardar)
+        entrada.bind("<FocusOut>", guardar)
+        entrada.bind("<Escape>", cancelar)
+        entrada.guardar_edicion, entrada.cancelar_edicion = guardar, cancelar
+        return entrada
+
+    def marcar_tarea(self, identificador, hecha):
+        self.guardar_tareas(lambda: self.lista_tareas.marcar(identificador, hecha))
+        self.after_idle(self.pintar_tareas)
+
+    def alternar_importante_tarea(self, identificador):
+        self.guardar_tareas(lambda: self.lista_tareas.cambiar_importante(identificador))
+        self.after_idle(self.pintar_tareas)
+
+    def borrar_tarea(self, identificador):
+        self.guardar_tareas(lambda: self.lista_tareas.borrar(identificador))
+        self.after_idle(self.pintar_tareas)
+
+    def borrar_tareas_completadas(self):
+        borradas = []
+        if self.guardar_tareas(lambda: borradas.append(self.lista_tareas.borrar_completadas())):
+            self.avisar(f"Borradas {borradas[0]} tarea{'s' if borradas[0] != 1 else ''} completada{'s' if borradas[0] != 1 else ''}.", "ok")
+        self.pintar_tareas()
+
+    def ir_a_tareas(self, evento=None):
+        self.tabview.set("Comparador")
+        self.al_cambiar_pestana()
+        campo = getattr(self, "nueva_tarea_entry", None)
+        if campo is not None and campo.winfo_exists():
+            campo.focus_set()
 
     def seleccionar_archivo(self, entry, tipos):
         ruta = filedialog.askopenfilename(filetypes=tipos)
