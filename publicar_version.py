@@ -74,8 +74,9 @@ def poner_version(version):
 
 
 def programa_abierto():
-    lista = salida_de(["tasklist", "/FI", f"IMAGENAME eq {EJECUTABLE}", "/NH"])
-    return EJECUTABLE.lower() in lista.lower()
+    # En formato CSV tasklist no recorta el nombre (en tabla lo corta a 25 caracteres)
+    lista = salida_de(["tasklist", "/FI", f"IMAGENAME eq {EJECUTABLE}", "/FO", "CSV", "/NH"])
+    return f'"{EJECUTABLE.lower()}"' in lista.lower()
 
 
 def crear_zip(version):
