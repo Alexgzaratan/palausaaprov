@@ -118,12 +118,12 @@ def test_vista_previa_avisa_si_aun_no_hay_disponibilidad(app, archivos, tmp_path
 
 def test_copiar_lista_para_quiter(app, archivos, monkeypatch):
     quiter, propuesta, carpeta = archivos
-    avisos = []
-    monkeypatch.setattr(app_mod.messagebox, "showinfo", lambda *a, **k: avisos.append(a))
     poner(app.excel_quiter_entry, quiter)
     poner(app.folder_rot_entry, carpeta)
-    assert app.copiar_lista_quiter() is None and avisos  # aún no hay Excel de rotación
+    assert app.copiar_lista_quiter() is None  # aún no hay Excel de rotación: se avisa sin ventana
+    assert app.avisos.historial[-1][1].startswith("Todavía no hay Excel de rotación")
     ejecutar_filtro(quiter, propuesta, carpeta)
     texto = app.copiar_lista_quiter()
     assert texto.startswith("rotación S39P: 4 de 6 líneas a poner a 0")
     assert app.clipboard_get() == texto
+    assert app.avisos.historial[-1] == ("ok", "Lista copiada: 4 de 6 líneas a poner a 0. Pégala en Claude.")

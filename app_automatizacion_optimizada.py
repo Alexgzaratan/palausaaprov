@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from reclamaciones_power_line import ModuloReclamacionesPowerLine
 import estilo
 import animacion_inicio
+import efectos
 import actualizaciones
 import cambio_version
 from version import VERSION
@@ -1589,6 +1590,8 @@ class AppIntegrada(ctk.CTk):
         if os.path.exists(ICONO_PATH):
             try: self.iconbitmap(ICONO_PATH)
             except Exception: pass
+        self.avisos = efectos.GestorAvisos(self)
+        self.arrastre_activo = efectos.preparar_arrastre(self)
         self.setup_ui()
         self.configurar_atajos()
         self.comprobar_hoja_pedidos_al_inicio()
@@ -1662,6 +1665,7 @@ class AppIntegrada(ctk.CTk):
         etiqueta_subtitulo = self.crear_etiqueta(card, subtitulo, secundario=True, wraplength=470, justify="left")
         etiqueta_subtitulo.pack(anchor="w", padx=estilo.PAD_X, pady=(0, 8))
         card.bind("<Configure>", lambda evento, etiqueta=etiqueta_subtitulo: self.ajustar_subtitulo(etiqueta, evento.width), add="+")
+        efectos.activar_resalte(self, card)
         ctk.CTkFrame(card, fg_color=self.color_borde, height=1).pack(fill="x", padx=estilo.PAD_X, pady=(0, estilo.PAD_Y + 2))
         return card
 
@@ -1708,7 +1712,9 @@ class AppIntegrada(ctk.CTk):
             ocupa_todo = columnas == 2 and posicion == len(tarjetas) - 1 and len(tarjetas) % 2 == 1
             card.grid(row=fila, column=0 if ocupa_todo else columna, columnspan=2 if ocupa_todo else 1, sticky="nsew", padx=estilo.PAD_TARJETA, pady=estilo.PAD_TARJETA)
 
-    def crear_fila_archivo(self, parent, label_text, entry_attr, config_key, placeholder, button_text, command):
+    def crear_fila_archivo(self, parent, label_text, entry_attr, config_key, placeholder, button_text, command, extensiones=(".xlsx",)):
+        """Fila con campo de ruta y botón Examinar/Carpeta; también admite soltar encima un archivo o carpeta
+        (de carpeta si el botón es «Carpeta»; si no, un archivo con alguna de las extensiones indicadas)."""
         self.crear_etiqueta(parent, label_text, negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(0, 4))
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
@@ -1717,7 +1723,40 @@ class AppIntegrada(ctk.CTk):
         entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         setattr(self, entry_attr, entry)
         self.crear_boton_secundario(row, button_text, command, width=92).pack(side="right")
+        if self.arrastre_activo:
+            tipo = "carpeta" if button_text == "Carpeta" else "archivo"
+            try:
+                efectos.activar_soltar(self, entry, lambda datos, campo=entry: self.soltar_en_campo(campo, datos, tipo, extensiones))
+            except Exception:
+                pass  # sin arrastrar y soltar sigue funcionando «Examinar»
         return entry
+
+    def soltar_en_campo(self, entrada, datos, tipo, extensiones=(".xlsx",)):
+        """Rellena el campo con lo soltado si es del tipo que espera; si no, avisa y lo deja como estaba."""
+        rutas = self.tk.splitlist(datos) if datos else ()
+        if not rutas:
+            return False
+        ruta = rutas[0]
+        if not os.path.exists(ruta) and os.path.exists(datos):
+            ruta = datos  # una sola ruta sin formato de lista Tcl (con barras invertidas sin escapar)
+        if tipo == "carpeta":
+            if not os.path.isdir(ruta):
+                self.avisar("Aquí va una carpeta: suelta una carpeta, no un archivo.", "aviso")
+                return False
+        elif not os.path.isfile(ruta) or Path(ruta).suffix.lower() not in extensiones:
+            self.avisar(f"Aquí va un Excel ({' o '.join(extensiones)}).", "aviso")
+            return False
+        entrada.delete(0, "end")
+        entrada.insert(0, ruta.replace("\\", "/"))  # mismo formato que «Examinar»
+        return True
+
+    def avisar(self, texto, tipo="info", duracion=None):
+        """Aviso que no interrumpe (abajo a la derecha, se va solo). tipo: 'info', 'ok' o 'aviso'."""
+        try:
+            return self.avisos.mostrar(texto, tipo, duracion)
+        except Exception:
+            self.agregar_log(texto, "error" if tipo == "aviso" else ("success" if tipo == "ok" else None))
+            return None
 
     def crear_fila_ajuste(self, card, texto):
         """Fila con etiqueta a la izquierda; el control se coloca a la derecha con pack(side='right', padx=estilo.PAD_FILA, pady=6)."""
@@ -1821,7 +1860,8 @@ class AppIntegrada(ctk.CTk):
         self.crear_etiqueta(bloque, f"{fecha_larga()}  ·  Palausa Aprovisionamiento {VERSION}", secundario=True).pack(anchor="w")
         derecha = ctk.CTkFrame(cabecera_int, fg_color="transparent")
         derecha.pack(side="right")
-        self.frame_resumen = ctk.CTkFrame(derecha, fg_color="transparent")
+        # Tamaño mínimo explícito: vacío (sin fichas, p. ej. en una instalación nueva) un CTkFrame ocupa 200x200
+        self.frame_resumen = ctk.CTkFrame(derecha, fg_color="transparent", width=1, height=1)
         self.frame_resumen.pack(anchor="e")
         self.crear_etiqueta(derecha, "Ctrl+1…8 pestañas  ·  Ctrl+Intro ejecutar  ·  Esc detener", estilo.TAM_PEQUENO, secundario=True).pack(anchor="e", pady=(6, 0))
         self.actualizar_resumen()
@@ -1889,6 +1929,20 @@ class AppIntegrada(ctk.CTk):
         if info:
             return f"Actualizar a {info['version']}", self.iniciar_actualizacion
         return "", None
+
+    def mostrar_captura(self, marcadas, total, pedido):
+        """«¡Capturado!» al terminar bien el flujo completo (se desactiva con el interruptor de animaciones)."""
+        if not self.config.get("animacion_inicio", True):
+            return None
+        imagen = self.imagen_logo()
+        if imagen is None:
+            return None
+        oscuro = self.config.get("modo_apariencia", "Light") == "Dark"
+        color_luz = animacion_inicio.mezclar(animacion_inicio.AMARILLO_BOLA, "#ffffff", 0.5 if oscuro else 0.0)
+        subtitulo = f"{marcadas} de {total} líneas a poner a 0  ·  {pedido}" if total else pedido
+        return animacion_inicio.reproducir_captura(self, imagen, fondo=self.color_panel_claro, color_texto=self.color_texto, color_luz=color_luz,
+                                                   titulo="¡Capturado!", subtitulo=subtitulo, fuente=estilo.fuente_titulo(24),
+                                                   fuente_subtitulo=estilo.fuente(14))
 
     def comprobar_actualizaciones_al_inicio(self):
         """Al abrir: avisa si hay una versión publicada más nueva (en segundo plano; sin internet no pasa nada)."""
@@ -2118,7 +2172,7 @@ class AppIntegrada(ctk.CTk):
 
         card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación según el umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.", en_rejilla=True, icono="filtro")
         self.crear_fila_archivo(card_rotacion, "Excel de Quiter", "excel_quiter_entry", "ruta_excel_quiter", "Excel de Quiter (DMS)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")]))
-        self.crear_fila_archivo(card_rotacion, "Archivo de propuesta", "excel_rot_entry", "ruta_excel_rotacion", "Archivo PROPUESTAPEDIDO.xls...", "Examinar", lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")]))
+        self.crear_fila_archivo(card_rotacion, "Archivo de propuesta", "excel_rot_entry", "ruta_excel_rotacion", "Archivo PROPUESTAPEDIDO.xls...", "Examinar", lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")]), extensiones=(".xls", ".xlsx"))
         self.crear_fila_archivo(card_rotacion, "Carpeta destino", "folder_rot_entry", "ruta_folder_rotacion", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_rot_entry))
         fila = self.crear_fila_ajuste(card_rotacion, "Umbral mínimo")
         self.umbral_entry = self.crear_entrada(fila, width=120, justify="center")
@@ -2190,7 +2244,7 @@ class AppIntegrada(ctk.CTk):
         contenedor = ctk.CTkScrollableFrame(self.tab_mopar, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
         card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.", en_rejilla=True, icono="documento")
-        self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]))
+        self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]), extensiones=(".xls",))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_mopar_entry", "ruta_folder_mopar", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_mopar_entry))
         self.btn_mopar = self.crear_boton_principal(card, "Generar fichero Mopar", self.toggle_mopar)
         self.btn_mopar.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
@@ -2200,7 +2254,7 @@ class AppIntegrada(ctk.CTk):
         contenedor = ctk.CTkScrollableFrame(self.tab_stock_fiat, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
         card = self.crear_tarjeta_tab(contenedor, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.", en_rejilla=True, icono="coche")
-        self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files (.xls)", "*.xls")]))
+        self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files (.xls)", "*.xls")]), extensiones=(".xls",))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_stock_fiat_entry", "ruta_folder_stock_fiat", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_stock_fiat_entry))
         self.btn_stock_fiat = self.crear_boton_principal(card, "Generar Stock FIAT", self.toggle_stock_fiat)
         self.btn_stock_fiat.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
@@ -2256,7 +2310,7 @@ class AppIntegrada(ctk.CTk):
         self.nombre_entry = self.crear_entrada(fila, width=220, placeholder_text="Opcional")
         self.nombre_entry.insert(0, self.config.get("nombre_usuario", ""))
         self.nombre_entry.pack(side="right", padx=estilo.PAD_FILA, pady=6)
-        fila = self.crear_fila_ajuste(card, "Animación de apertura")
+        fila = self.crear_fila_ajuste(card, "Animaciones (apertura y «¡Capturado!»)")
         self.animacion_var = ctk.BooleanVar(value=self.config.get("animacion_inicio", True))
         ctk.CTkSwitch(fila, text="", variable=self.animacion_var, width=46, progress_color=self.color_principal).pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.reclamaciones_power_line.construir_ajustes(card)
@@ -2325,14 +2379,14 @@ class AppIntegrada(ctk.CTk):
     def abrir_carpeta_auto(self):
         ruta = self.widget_get("excel_auto_entry")
         if not ruta:
-            messagebox.showinfo("Información", "Selecciona primero un Excel de stock.")
+            self.avisar("Selecciona primero un Excel de stock.")
             return
         self.abrir_directorio(os.path.dirname(ruta) if os.path.isfile(ruta) else ruta)
 
     def abrir_carpeta_rotacion(self):
         ruta = self.widget_get("folder_rot_entry")
         if not ruta:
-            messagebox.showinfo("Información", "Selecciona primero una carpeta de destino.")
+            self.avisar("Selecciona primero una carpeta de destino.")
             return
         self.abrir_directorio(ruta)
 
@@ -2369,7 +2423,7 @@ class AppIntegrada(ctk.CTk):
 
     def abrir_ultima_salida(self):
         if not self.ultima_ruta_generada:
-            messagebox.showinfo("Información", "Todavía no hay una salida generada.")
+            self.avisar("Todavía no hay una salida generada.")
             return
         if os.path.isfile(self.ultima_ruta_generada):
             ruta_a_abrir = os.path.dirname(self.ultima_ruta_generada)
@@ -2415,7 +2469,7 @@ class AppIntegrada(ctk.CTk):
     def guardar_config_ui(self, silent=False):
         self.guardar_configuracion_ui_internal()
         if not silent:
-            messagebox.showinfo("Éxito", "Configuración guardada.")
+            self.avisar("Configuración guardada.", "ok")
 
     def cambiar_modo_apariencia(self, valor=None):
         activa = tarea_activa()
@@ -2456,7 +2510,8 @@ class AppIntegrada(ctk.CTk):
         global automation_running
         if automation_running:
             stop_event_auto.set()
-            self.btn_auto.configure(text="Deteniendo...", state="disabled")
+            self.btn_auto.configure(state="disabled")
+            efectos.marcar_ocupado(self.btn_auto, "Deteniendo")
         else:
             self.iniciar_auto()
 
@@ -2487,7 +2542,8 @@ class AppIntegrada(ctk.CTk):
             messagebox.showwarning("Aviso", "Faltan el usuario o la contraseña del portal Citroën. Introdúcelos en la pestaña Configuración y guarda.")
             return False
         self.actualizar_estado("automatización en curso", ruta)
-        self.btn_auto.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        self.btn_auto.configure(fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        efectos.marcar_ocupado(self.btn_auto, "Detener")
         self.limpiar_caja(self.auto_log_box)
         stop_event_auto.clear()
         automation_running = True
@@ -2546,13 +2602,21 @@ class AppIntegrada(ctk.CTk):
             self.btn_flujo.configure(state="normal")
             return
         self.log_callback_rotacion("Automatización terminada, lanzando el filtro de rotación...", "success")
+        self._rotacion_del_flujo = True
         if not self.iniciar_filtro_rotacion():
+            self._rotacion_del_flujo = False
             self.btn_flujo.configure(state="normal")
 
     def finalizar_auto(self):
         acc_color = self.color_principal
         self.actualizar_estado("automatización finalizada", self.excel_auto_entry.get())
         self.btn_auto.configure(text="Iniciar automatización", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        if stop_event_auto.is_set() or auto_resultado == "detenida":
+            self.avisar("Automatización detenida.")
+        elif auto_resultado == "completa":
+            self.avisar("Automatización terminada: se han consultado todas las referencias.", "ok")
+        else:
+            self.avisar("La automatización terminó con incidencias: revisa el registro.", "aviso")
 
     def toggle_pedidos(self):
         global pedidos_running
@@ -2574,7 +2638,8 @@ class AppIntegrada(ctk.CTk):
         if self.excel_abierto(ruta, "El Excel de pedidos"):
             return
         self.actualizar_estado("generando pedidos", folder)
-        self.btn_pedidos.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        self.btn_pedidos.configure(fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        efectos.marcar_ocupado(self.btn_pedidos, "Detener")
         self.limpiar_pedidos_generados()
         stop_event_pedidos.clear()
         threading.Thread(target=generar_pedidos_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_pedidos), stop_event_pedidos, lambda n: self.after(0, self.agregar_pedido_generado, n)), daemon=True).start()
@@ -2583,6 +2648,7 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("pedidos generados", self.folder_pedidos_entry.get())
         self.btn_pedidos.configure(text="Generar pedidos", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        self.avisar("Generación de pedidos terminada: revisa el registro.")
 
     def iniciar_hoja_pedidos(self, forzar=False, automatico=False):
         global hoja_pedidos_running
@@ -2602,7 +2668,8 @@ class AppIntegrada(ctk.CTk):
                 return
             forzar = True
         self.actualizar_estado("generando hoja de pedidos del día")
-        self.btn_hoja_pedidos.configure(text="Generando...", state="disabled")
+        self.btn_hoja_pedidos.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_hoja_pedidos, "Generando")
         threading.Thread(
             target=generar_hoja_pedidos_task,
             args=(plantilla, carpeta),
@@ -2623,6 +2690,8 @@ class AppIntegrada(ctk.CTk):
         boton = getattr(self, "btn_hoja_pedidos", None)
         if boton is not None:
             boton.configure(text="Generar hoja de hoy", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        if ruta.exists():
+            self.avisar(f"Hoja de pedidos de hoy lista: {ruta.name}", "ok")
 
     def comprobar_hoja_pedidos_al_inicio(self):
         plantilla = self.config.get("ruta_plantilla_hojas", "")
@@ -2673,7 +2742,8 @@ class AppIntegrada(ctk.CTk):
         if not messagebox.askyesno("Generar avisos", mensaje):
             return
         self.actualizar_estado("generando avisos de no suministro")
-        self.btn_avisos.configure(text="Generando...", state="disabled")
+        self.btn_avisos.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_avisos, "Generando")
         self.limpiar_caja(self.avisos_log_box)
         avisos_running = True
         threading.Thread(
@@ -2694,6 +2764,7 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("avisos de no suministro procesados")
         self.btn_avisos.configure(text="Generar avisos de no suministro", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        self.avisar("Avisos de no suministro procesados: revisa el registro.")
 
     def mostrar_resultado_avisos(self, resultado):
         if resultado.get("error"):
@@ -2757,7 +2828,8 @@ class AppIntegrada(ctk.CTk):
         if self.excel_abierto(ruta_salida, "El resultado de la comparación anterior"):
             return
         self.actualizar_estado("comparando excels", ruta_salida)
-        self.btn_comparador.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        self.btn_comparador.configure(fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        efectos.marcar_ocupado(self.btn_comparador, "Detener")
         stop_event_comparador.clear()
         threading.Thread(target=comparar_excel_task, args=(ruta_ant, ruta_nue, ruta_salida, colores_hex[color], lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_comparador), stop_event_comparador), daemon=True).start()
 
@@ -2765,6 +2837,7 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("comparación finalizada", str(Path(self.folder_comp_entry.get()) / "resultado_comparacion.xlsx"))
         self.btn_comparador.configure(text="Comparar Excels", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        self.avisar("Comparación terminada: resultado_comparacion.xlsx")
 
     def iniciar_filtro_rotacion(self):
         global filtro_rotacion_running
@@ -2794,21 +2867,38 @@ class AppIntegrada(ctk.CTk):
         if self.excel_abierto(ruta_estimacion, "El Excel de salida de rotación"):
             return False
         self.actualizar_estado("analizando rotación", ruta_estimacion)
-        self.btn_rotacion.configure(state="disabled", text="Analizando...")
+        self.btn_rotacion.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_rotacion, "Analizando")
         self.limpiar_caja(self.rotacion_log_box)
         filtro_rotacion_running = True
+        self._inicio_rotacion = time.time()
         threading.Thread(target=filtrar_por_rotacion_task, args=(ruta_quiter, ruta_rot, folder_salida, umbral, "FF0000", precio_minimo, lambda t, tag=None: self.after(0, self.log_callback_rotacion, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_filtro_rotacion)), daemon=True).start()
         return True
 
     def finalizar_filtro_rotacion(self):
+        del_flujo = getattr(self, "_rotacion_del_flujo", False)
+        self._rotacion_del_flujo = False
         ruta_quiter = self.excel_quiter_entry.get()
+        generado = None
         if self.folder_rot_entry.get() and ruta_quiter:
             ruta_final = str(Path(self.folder_rot_entry.get()) / f"{Path(ruta_quiter).stem}_ROTACION.xlsx")
             self.actualizar_estado("rotación completada", ruta_final)
-            if os.path.isfile(ruta_final):
+            # Solo cuenta como hecho si el Excel se ha escrito en esta ejecución
+            if os.path.isfile(ruta_final) and os.path.getmtime(ruta_final) >= getattr(self, "_inicio_rotacion", 0) - 2:
+                generado = ruta_final
                 self.log_callback_rotacion("Pulsa «Copiar lista para Quiter» para pegar en Claude las líneas a poner a 0.")
         self.btn_rotacion.configure(state="normal", text="Resaltar por rotación")
         self.btn_flujo.configure(state="normal")
+        if generado is None:
+            self.avisar("El filtro de rotación terminó sin generar el Excel: revisa el registro de rotación.", "aviso")
+            return
+        self.avisar(f"Rotación completada: {Path(generado).name}", "ok")
+        if del_flujo:
+            try:
+                marcadas, total = lineas_marcadas_rotacion(generado)
+            except Exception:
+                marcadas, total = [], 0
+            self.mostrar_captura(len(marcadas), total, Path(generado).stem.removesuffix("_ROTACION"))
 
     # ---------- vista previa del umbral y lista para Quiter ----------
 
@@ -2916,7 +3006,7 @@ class AppIntegrada(ctk.CTk):
         """Copia al portapapeles las líneas en rojo y amarillo del último Excel de rotación, listas para la skill de Quiter."""
         ruta = self.ruta_salida_rotacion()
         if not ruta or not os.path.isfile(ruta):
-            messagebox.showinfo("Lista para Quiter", "Todavía no hay Excel de rotación para este Excel de Quiter. Ejecuta primero «Resaltar por rotación».")
+            self.avisar("Todavía no hay Excel de rotación para este Excel de Quiter. Ejecuta primero «Resaltar por rotación».")
             return None
         try:
             marcadas, total = lineas_marcadas_rotacion(ruta)
@@ -2930,13 +3020,15 @@ class AppIntegrada(ctk.CTk):
         self.update_idletasks()
         generado = datetime.fromtimestamp(os.path.getmtime(ruta)).strftime("%d/%m %H:%M")
         self.log_callback_rotacion(f"Lista copiada: {len(marcadas)} de {total} líneas de {Path(ruta).name} (generado el {generado}). Pégala en Claude.", "success")
+        self.avisar(f"Lista copiada: {len(marcadas)} de {total} líneas a poner a 0. Pégala en Claude.", "ok")
         return texto
 
     def toggle_mopar(self):
         global mopar_running
         if mopar_running:
             stop_event_mopar.set()
-            self.btn_mopar.configure(text="Deteniendo...", state="disabled")
+            self.btn_mopar.configure(state="disabled")
+            efectos.marcar_ocupado(self.btn_mopar, "Deteniendo")
         else:
             self.iniciar_mopar()
 
@@ -2957,7 +3049,8 @@ class AppIntegrada(ctk.CTk):
         if not os.path.exists(folder):
             messagebox.showwarning("Aviso", "Por favor selecciona una carpeta de destino.")
             return
-        self.btn_mopar.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        self.btn_mopar.configure(fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        efectos.marcar_ocupado(self.btn_mopar, "Detener")
         self.limpiar_mopar_generados()
         stop_event_mopar.clear()
         threading.Thread(target=generar_fichero_mopar_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_mopar), stop_event_mopar, lambda n: self.after(0, self.agregar_mopar_generado, n)), daemon=True).start()
@@ -2966,7 +3059,8 @@ class AppIntegrada(ctk.CTk):
         global stock_fiat_running
         if stock_fiat_running:
             stop_event_stock_fiat.set()
-            self.btn_stock_fiat.configure(text="Deteniendo...", state="disabled")
+            self.btn_stock_fiat.configure(state="disabled")
+            efectos.marcar_ocupado(self.btn_stock_fiat, "Deteniendo")
         else:
             self.iniciar_stock_fiat()
 
@@ -2987,7 +3081,8 @@ class AppIntegrada(ctk.CTk):
         if not os.path.exists(folder):
             messagebox.showwarning("Aviso", "Por favor selecciona una carpeta de destino para Stock FIAT.")
             return
-        self.btn_stock_fiat.configure(text="Detener", fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        self.btn_stock_fiat.configure(fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
+        efectos.marcar_ocupado(self.btn_stock_fiat, "Detener")
         stop_event_stock_fiat.clear()
         threading.Thread(target=generar_fichero_stock_fiat_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_stock_fiat), stop_event_stock_fiat), daemon=True).start()
 
@@ -3021,7 +3116,8 @@ class AppIntegrada(ctk.CTk):
         if not messagebox.askyesno("Ejecutar prueba manual", "Esto iniciará sesión en MADD, descargará las facturas del día seleccionado y ENVIARÁ un correo real con los adjuntos (o el aviso de 'sin facturas'). ¿Continuar?"):
             return
         self.actualizar_estado("descargando facturas MADD")
-        self.btn_madd.configure(text="Ejecutando...", state="disabled")
+        self.btn_madd.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_madd, "Ejecutando")
         self.limpiar_caja(self.madd_log_box)
         madd_running = True
         threading.Thread(
@@ -3039,6 +3135,7 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("descarga de facturas MADD finalizada", self.widget_get("carpeta_facturas_madd_entry"))
         self.btn_madd.configure(text="Ejecutar ahora (prueba manual)", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        self.avisar("Descarga de facturas MADD terminada: revisa el registro.")
         self.actualizar_resumen()
 
     def activar_tarea_programada_madd(self):
@@ -3074,9 +3171,9 @@ class AppIntegrada(ctk.CTk):
         try:
             resultado = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Unregister-ScheduledTask -TaskName 'PalausaFacturasMADD' -Confirm:$false"], capture_output=True, text=True)
             if resultado.returncode == 0:
-                messagebox.showinfo("Hecho", "Tarea programada desactivada.")
+                self.avisar("Tarea programada desactivada.", "ok")
             else:
-                messagebox.showinfo("Aviso", "No había ninguna tarea programada activa (o ya se había desactivado).")
+                self.avisar("No había ninguna tarea programada activa (o ya se había desactivado).")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo desactivar la tarea: {e}")
 
@@ -3121,11 +3218,13 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("fichero Mopar generado", self.folder_mopar_entry.get())
         self.btn_mopar.configure(text="Generar fichero Mopar", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        self.avisar("Fichero Mopar terminado: revisa el registro.")
 
     def finalizar_stock_fiat(self):
         acc_color = self.color_principal
         self.actualizar_estado("Stock FIAT generado", self.folder_stock_fiat_entry.get())
         self.btn_stock_fiat.configure(text="Generar Stock FIAT", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        self.avisar("Stock FIAT terminado: revisa el registro.")
 
 def probar_navegador():
     """Comprueba que el Chromium incluido arranca (sirve para verificar un .exe recién compilado).

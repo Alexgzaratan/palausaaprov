@@ -14,6 +14,7 @@ import customtkinter as ctk
 from PIL import Image
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+import efectos
 import estilo
 from rutas_app import ruta_datos
 
@@ -509,7 +510,8 @@ class ModuloReclamacionesPowerLine:
         datos = {"litigio": self.litigio_entry.get().strip(), "pedido": self.pedido_entry.get().strip(),
                  "referencia": self.referencia_entry.get().strip(), "descripcion": self.descripcion_text.get("1.0", "end-1c").strip()}
         salida = Path(ruta_guardado) / f"Litigio {datos['litigio']}.docx"
-        self.btn_generar.configure(state="disabled", text="Generando...")
+        self.btn_generar.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_generar, "Generando")
         threading.Thread(target=self._generar_en_segundo_plano, args=(datos, salida), daemon=True).start()
 
     def _generar_en_segundo_plano(self, datos, salida):

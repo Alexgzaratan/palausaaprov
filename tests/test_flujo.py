@@ -46,6 +46,8 @@ def escenario(app, tmp_path, monkeypatch):
     app.respuesta_si = True
     app.preguntas = preguntas
     app.salida_rotacion = tmp_path / "quiter_ROTACION.xlsx"
+    app.capturas = []
+    monkeypatch.setattr(app, "mostrar_captura", lambda *datos: app.capturas.append(datos))
     return app
 
 
@@ -74,6 +76,8 @@ def test_flujo_completo_lanza_la_rotacion_tras_la_automatizacion(escenario, monk
     ws = openpyxl.load_workbook(escenario.salida_rotacion).active
     colores = [ws.cell(row=r, column=1).fill.start_color.rgb if ws.cell(row=r, column=1).fill.fill_type else None for r in range(1, 7)]
     assert colores == ["00FF0000", None, "00FF0000", None, "00FF0000", "00FF0000"]  # bajo 150 EUR queda sin marcar
+    assert escenario.capturas == [(4, 6, "quiter")]  # «¡Capturado!» con las líneas marcadas
+    assert ("ok", "Rotación completada: quiter_ROTACION.xlsx") in escenario.avisos.historial
 
 
 def test_flujo_con_incidencias_pregunta_y_continua_si_se_acepta(escenario, monkeypatch):
@@ -96,6 +100,7 @@ def test_flujo_con_incidencias_no_lanza_la_rotacion_si_se_rechaza(escenario, mon
     lanzar_flujo(escenario)
     assert len(llamadas) == 2
     assert not escenario.salida_rotacion.exists()
+    assert escenario.capturas == []
 
 
 def test_flujo_con_error_avisa_y_no_lanza_la_rotacion(escenario):
@@ -117,3 +122,12 @@ def test_hilo_que_falla_deja_el_flujo_como_incompleto(escenario, monkeypatch):
     lanzar_flujo(escenario)
     assert any("incidencias" in p for p in preguntas)
     assert not escenario.salida_rotacion.exists()
+
+
+def test_rotacion_suelta_no_muestra_capturado(escenario):
+    escenario.excel_quiter_entry.delete(0, "end")
+    escenario.excel_quiter_entry.insert(0, escenario.excel_auto_entry.get())
+    assert escenario.iniciar_filtro_rotacion()
+    ejecutar_hasta(escenario, lambda: escenario.btn_rotacion.cget("state") == "normal")
+    assert escenario.salida_rotacion.exists()
+    assert escenario.capturas == []
