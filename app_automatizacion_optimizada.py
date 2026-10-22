@@ -25,6 +25,9 @@ from concurrent.futures import ThreadPoolExecutor
 from reclamaciones_power_line import ModuloReclamacionesPowerLine
 import estilo
 import animacion_inicio
+import actualizaciones
+import cambio_version
+from version import VERSION
 from rutas_app import ruta_datos
 from configuracion import LOG_DETALLADO, cargar_configuracion, guardar_configuracion, registrar_error_detallado
 
@@ -1815,7 +1818,7 @@ class AppIntegrada(ctk.CTk):
         bloque = ctk.CTkFrame(cabecera_int, fg_color="transparent")
         bloque.pack(side="left")
         ctk.CTkLabel(bloque, text=texto_saludo(self.config.get("nombre_usuario", "")), font=estilo.fuente_titulo(estilo.TAM_APP), text_color=self.color_texto).pack(anchor="w")
-        self.crear_etiqueta(bloque, f"{fecha_larga()}  ·  Palausa Aprovisionamiento", secundario=True).pack(anchor="w")
+        self.crear_etiqueta(bloque, f"{fecha_larga()}  ·  Palausa Aprovisionamiento {VERSION}", secundario=True).pack(anchor="w")
         derecha = ctk.CTkFrame(cabecera_int, fg_color="transparent")
         derecha.pack(side="right")
         self.frame_resumen = ctk.CTkFrame(derecha, fg_color="transparent")
@@ -1866,6 +1869,109 @@ class AppIntegrada(ctk.CTk):
             if estilo.FUENTE_ICONOS:
                 ctk.CTkLabel(ficha, text=estilo.ICONOS[icono], font=estilo.fuente_icono(13), text_color=self.color_ok if correcto else self.color_texto_sec).pack(side="left", padx=(10, 6), pady=4)
             self.crear_etiqueta(ficha, texto, estilo.TAM_PEQUENO).pack(side="left", padx=(0 if estilo.FUENTE_ICONOS else 10, 10), pady=4)
+        texto_boton, comando = self.estado_boton_actualizacion()
+        if texto_boton:
+            self.btn_actualizacion = ctk.CTkButton(marco, text=texto_boton, command=comando, height=28, corner_radius=12, font=estilo.fuente(estilo.TAM_PEQUENO, True),
+                                                   fg_color=self.color_principal, hover_color=self.color_hover, text_color="#ffffff",
+                                                   text_color_disabled="#ffffff", state="normal" if comando else "disabled")
+            self.btn_actualizacion.pack(side="left", padx=(8, 0))
+
+    # ---------- actualizaciones (GitHub Releases; ver actualizaciones.py y cambio_version.py) ----------
+
+    def estado_boton_actualizacion(self):
+        """Texto y acción del botón de la cabecera: ('', None) si no hay nada que actualizar."""
+        if getattr(self, "descargando_actualizacion", False):
+            return "Descargando actualización...", None
+        preparada = getattr(self, "version_preparada", None)
+        if preparada:
+            return f"Reiniciar para actualizar a {preparada}", self.reiniciar_para_actualizar
+        info = getattr(self, "actualizacion_disponible", None)
+        if info:
+            return f"Actualizar a {info['version']}", self.iniciar_actualizacion
+        return "", None
+
+    def comprobar_actualizaciones_al_inicio(self):
+        """Al abrir: avisa si hay una versión publicada más nueva (en segundo plano; sin internet no pasa nada)."""
+        carpeta = actualizaciones.carpeta_instalacion()
+        if carpeta is None:
+            return
+        self.version_preparada = cambio_version.version_preparada(carpeta)
+        if self.version_preparada:
+            self.actualizar_resumen()
+            return
+
+        def buscar():
+            try:
+                info = actualizaciones.buscar_actualizacion()
+            except Exception:
+                return  # sin conexión o GitHub no responde: se volverá a mirar en el próximo arranque
+            if info:
+                self.after(0, self.mostrar_aviso_actualizacion, info)
+
+        threading.Thread(target=buscar, daemon=True).start()
+
+    def mostrar_aviso_actualizacion(self, info):
+        self.actualizacion_disponible = info
+        self.agregar_log(f"[ACTUALIZACIÓN] Hay una versión nueva: {info['version']} (tienes la {VERSION}). Pulsa «Actualizar a {info['version']}» arriba a la derecha.")
+        self.actualizar_resumen()
+
+    def iniciar_actualizacion(self):
+        info = getattr(self, "actualizacion_disponible", None)
+        carpeta = actualizaciones.carpeta_instalacion()
+        if not info or carpeta is None or getattr(self, "descargando_actualizacion", False):
+            return
+        notas = info["notas"] or "Sin notas de la versión."
+        if len(notas) > 1200:
+            notas = notas[:1200] + "..."
+        tamano = f" ({info['tamano'] / 1048576:.0f} MB)" if info.get("tamano") else ""
+        if not messagebox.askyesno("Actualización disponible", f"Hay una versión nueva: {info['version']} (tienes la {VERSION}).\n\nNovedades:\n{notas}\n\n"
+                                   f"Se descarga ahora{tamano} y se aplica al reiniciar la app. Tu configuración y tus datos no se tocan. ¿Descargar?"):
+            return
+        self.descargando_actualizacion = True
+        self.actualizar_resumen()
+        self.actualizar_estado(f"descargando la versión {info['version']}")
+        self._ultimo_porcentaje = -1
+
+        def trabajo():
+            try:
+                actualizaciones.descargar_y_preparar(info, carpeta, progreso=lambda v: self.after(0, self.actualizar_progreso, v))
+                self.after(0, self.actualizacion_descargada, info["version"], None)
+            except Exception as e:
+                registrar_error_detallado(f"Actualización a {info['version']}: {e}", traceback.format_exc())
+                self.after(0, self.actualizacion_descargada, info["version"], str(e))
+
+        threading.Thread(target=trabajo, daemon=True).start()
+
+    def actualizacion_descargada(self, version, error):
+        self.descargando_actualizacion = False
+        if error:
+            self.actualizar_estado("la actualización no se pudo descargar")
+            self.agregar_log(f"[ACTUALIZACIÓN] No se pudo descargar la versión {version}: {error}", "error")
+            messagebox.showwarning("Actualización", f"No se pudo descargar la versión {version}:\n{error}\n\nPuedes volver a intentarlo desde el botón de arriba.")
+            self.actualizar_resumen()
+            return
+        self.version_preparada = version
+        self.actualizar_resumen()
+        self.actualizar_estado(f"versión {version} lista para instalar")
+        self.agregar_log(f"[ACTUALIZACIÓN] Versión {version} descargada. Se instala al reiniciar la app.", "success")
+        if messagebox.askyesno("Actualización", f"La versión {version} está lista.\n\n¿Reiniciar la app ahora para instalarla?\n(Si no, se instalará la próxima vez que la abras.)"):
+            self.reiniciar_para_actualizar()
+
+    def reiniciar_para_actualizar(self):
+        carpeta = actualizaciones.carpeta_instalacion()
+        if carpeta is None or self.hay_tarea_activa():
+            return
+        try:
+            self.guardar_configuracion_ui_internal()
+        except Exception:
+            pass
+        lanzador = carpeta / cambio_version.NOMBRE_EJECUTABLE
+        try:
+            subprocess.Popen([str(lanzador)], cwd=str(carpeta))
+        except OSError as e:
+            messagebox.showwarning("Actualización", f"No se pudo reiniciar la app: {e}\n\nCiérrala y vuelve a abrirla para instalar la versión nueva.")
+            return
+        self.destroy()  # al cerrarse, el lanzador cambia la carpeta del programa y abre la versión nueva
 
     def construir_panel_actividad(self):
         """Un único panel inferior: estado y progreso en una fila, acciones en otra y registro plegable."""
@@ -3049,4 +3155,5 @@ if __name__ == "__main__":
         sys.exit(0)
     app = AppIntegrada()
     app.mostrar_animacion_inicio()
+    app.comprobar_actualizaciones_al_inicio()
     app.mainloop()
