@@ -29,6 +29,7 @@ import efectos
 import piezas_caras
 import actualizaciones
 import cambio_version
+import instancia_unica
 from version import VERSION
 import tareas
 from rutas_app import ruta_datos
@@ -1605,7 +1606,8 @@ def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email
         if finalizado_callback: finalizado_callback()
 
 def ejecutar_tarea_madd_standalone():
-    """Punto de entrada para la tarea programada de Windows (--tarea-madd), sin GUI."""
+    """Punto de entrada para la tarea programada de Windows (--tarea-madd), sin GUI. Devuelve el código de
+    salida: 0 si terminó bien y 1 si falló o falta configuración, para que el Programador de tareas lo muestre."""
     config = cargar_configuracion()
     usuario = config.get("usuario_madd", "")
     password = config.get("password_madd", "")
@@ -1615,8 +1617,10 @@ def ejecutar_tarea_madd_standalone():
     filtro_dia = config.get("filtro_dia_facturas_madd", "Ayer")
     if not usuario or not password or not carpeta or not email_destino:
         registrar_error_detallado("Configuración incompleta para la tarea MADD (usuario/password/carpeta/email).", "", ref="madd_standalone")
-        return
-    tarea_facturas_madd(usuario, password, carpeta, email_destino, email_aviso, filtro_dia=filtro_dia, log_callback=None)
+        return 1
+    resultados = []
+    tarea_facturas_madd(usuario, password, carpeta, email_destino, email_aviso, filtro_dia=filtro_dia, log_callback=None, resultado_callback=resultados.append)
+    return 1 if not resultados or resultados[-1].get("error") else 0
 
 # ---------- «Última vez» de cada tarea (se guarda en la configuración, clave ultimas_ejecuciones) ----------
 
@@ -4081,10 +4085,13 @@ def probar_navegador():
 
 if __name__ == "__main__":
     if "--tarea-madd" in sys.argv:
-        ejecutar_tarea_madd_standalone()
-        sys.exit(0)
+        sys.exit(ejecutar_tarea_madd_standalone())
     if "--probar-navegador" in sys.argv:
         probar_navegador()
+        sys.exit(0)
+    mutex_instancia = instancia_unica.tomar()  # se conserva hasta salir
+    if mutex_instancia is None:
+        instancia_unica.traer_al_frente()
         sys.exit(0)
     app = AppIntegrada()
     app.mostrar_animacion_inicio()

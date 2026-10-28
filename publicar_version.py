@@ -6,7 +6,8 @@ Uso:
 
 Pasos: comprueba que el repositorio está limpio, pone la versión en version.py, pasa las pruebas,
 compila programa y lanzador, comprueba que el navegador incluido arranca, crea el zip, hace commit y
-etiqueta vX.Y.Z, sube a GitHub y crea la release con el zip. Si un paso falla, se detiene ahí.
+etiqueta vX.Y.Z, sube a GitHub y crea la release con el zip. Si un paso falla, se detiene ahí; si se
+cortó después de crear la etiqueta, al repetir la misma orden solo sube lo que falta.
 Necesita GitHub CLI con sesión iniciada (gh auth login)."""
 import argparse
 import os
@@ -84,7 +85,7 @@ def programa_abierto():
 
 def crear_zip(version):
     SALIDA.mkdir(exist_ok=True)
-    destino = SALIDA / f"Palausa_Aprovisionamiento_{version}.zip"
+    destino = ruta_paquete(version)
     if destino.exists():
         destino.unlink()
     programa = DIST / "programa"
@@ -95,6 +96,35 @@ def crear_zip(version):
             if archivo.is_file():
                 paquete.write(archivo, "programa/" + archivo.relative_to(programa).as_posix())
     return destino
+
+
+def ruta_paquete(version):
+    return SALIDA / f"Palausa_Aprovisionamiento_{version}.zip"
+
+
+def release_existe(etiqueta):
+    return subprocess.run([ruta_gh(), "release", "view", etiqueta], cwd=RAIZ, capture_output=True).returncode == 0
+
+
+def crear_release(etiqueta, paquete, version, notas):
+    print("7. Release en GitHub")
+    ejecutar([ruta_gh(), "release", "create", etiqueta, paquete, "--title", f"Palausa Aprovisionamiento {version}", "--notes", notas])
+    print(f"Publicada la versión {version}. Las demás instalaciones la verán al abrir la app.")
+
+
+def reanudar(version, etiqueta, notas):
+    """La etiqueta ya existe pero falta la release (falló la subida a medias): solo se sube lo que falta,
+    con el paquete ya compilado de esa versión."""
+    if release_existe(etiqueta):
+        sys.exit(f"ERROR: la versión {version} ya está publicada (existe la release {etiqueta}).")
+    paquete = ruta_paquete(version)
+    if not paquete.exists():
+        sys.exit(f"ERROR: existe la etiqueta {etiqueta} pero no el paquete {paquete.name}. "
+                 f"Borra la etiqueta (git tag -d {etiqueta}) y vuelve a publicar.")
+    print(f"La etiqueta {etiqueta} ya existe pero falta la release: se reanuda la publicación con {paquete.name}.")
+    print("6. Git")
+    ejecutar(["git", "push", "origin", "main", etiqueta])
+    crear_release(etiqueta, paquete, version, notas)
 
 
 def main():
@@ -114,12 +144,15 @@ def main():
         sys.exit("ERROR: hay cambios sin guardar en git. Haz commit antes de publicar.")
     if salida_de(["git", "branch", "--show-current"]) != "main":
         sys.exit("ERROR: hay que publicar desde la rama main.")
-    if salida_de(["git", "tag", "-l", etiqueta]):
-        sys.exit(f"ERROR: la versión {version} ya está publicada (existe la etiqueta {etiqueta}).")
-    if programa_abierto():
-        sys.exit("ERROR: cierra la app antes de compilar (la carpeta dist\\programa está en uso).")
     if not args.sin_publicar and subprocess.run([ruta_gh(), "auth", "status"], capture_output=True).returncode != 0:
         sys.exit("ERROR: GitHub CLI no tiene sesión iniciada. Ejecuta: gh auth login")
+    if salida_de(["git", "tag", "-l", etiqueta]):
+        if args.sin_publicar:
+            sys.exit(f"ERROR: la versión {version} ya tiene etiqueta ({etiqueta}).")
+        reanudar(version, etiqueta, args.notas)
+        return
+    if programa_abierto():
+        sys.exit("ERROR: cierra la app antes de compilar (la carpeta dist\\programa está en uso).")
 
     anterior = version_actual()
     poner_version(version)
@@ -153,9 +186,7 @@ def main():
         ejecutar(["git", "commit", "-q", "-m", f"Versión {version}\n\n{args.notas}"])
     ejecutar(["git", "tag", "-a", etiqueta, "-m", f"Versión {version}"])
     ejecutar(["git", "push", "origin", "main", etiqueta])
-    print("7. Release en GitHub")
-    ejecutar([ruta_gh(), "release", "create", etiqueta, paquete, "--title", f"Palausa Aprovisionamiento {version}", "--notes", args.notas])
-    print(f"Publicada la versión {version}. Las demás instalaciones la verán al abrir la app.")
+    crear_release(etiqueta, paquete, version, args.notas)
 
 
 if __name__ == "__main__":
