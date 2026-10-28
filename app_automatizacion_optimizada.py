@@ -16,9 +16,10 @@ import string
 import subprocess
 import tkinter
 import tkinter.font
+import queue
 from datetime import datetime, timedelta
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from tkinter import filedialog, messagebox
 from openpyxl.styles import PatternFill
 from concurrent.futures import ThreadPoolExecutor
@@ -73,7 +74,7 @@ hoja_pedidos_running = False
 avisos_running = False
 madd_running = False
 auto_completada_ok = False
-auto_resultado = "error"  # "completa", "incompleta", "detenida" o "error"
+auto_resultado = "error"  # "completa", "incompleta", "detenida", "credenciales" o "error"
 stop_event_auto = threading.Event()
 stop_event_pedidos = threading.Event()
 stop_event_comparador = threading.Event()
@@ -571,13 +572,130 @@ def guardar_resultado_excel(ruta_excel, fila_idx, resultado, intentos=4, espera=
                 raise
             time.sleep(espera)
 
+URL_PORTAL = "https://parts.citroen.com/zzlogpl0"
+INTENTOS_ACCESO = 3           # entrar al portal: 1 intento + 2 reintentos
+PAUSA_REINTENTO_ACCESO = 5.0  # segundos entre intentos de acceso
+ERRORES_SEGUIDOS_RECARGA = 2  # tras tantos errores seguidos se vuelve a cargar el portal
+ESCALA_ESPERAS = 1.0          # multiplica los tiempos de espera del portal (las pruebas lo reducen)
+credenciales_incorrectas = threading.Event()  # el portal respondió 401: paran todos los hilos
+
+
+class Detenido(Exception):
+    """Se pulsó Detener (o el portal rechazó el usuario): el hilo sale en cuanto lo ve."""
+
+
+class CredencialesIncorrectas(Exception):
+    pass
+
+
+class ColaReferencias:
+    """Referencias pendientes compartidas por todos los hilos: cada uno coge la siguiente libre, así que si un
+    hilo no consigue entrar al portal los demás hacen su parte. Se recorre con un for normal."""
+
+    def __init__(self, filas):
+        self._cola = queue.SimpleQueue()
+        for fila in filas:
+            self._cola.put(fila)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return self._cola.get_nowait()
+        except queue.Empty:
+            raise StopIteration
+
+
 def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, log_callback, update_global_progress, stop_event):
     def log(texto, tag=None):
         log_callback(f"[HILO {worker_id}] {texto}", tag)
 
+    def debe_parar():
+        return stop_event.is_set() or credenciales_incorrectas.is_set()
+
+    def pausa(segundos):
+        fin = time.monotonic() + segundos
+        while time.monotonic() < fin:
+            if debe_parar():
+                raise Detenido()
+            time.sleep(min(0.2, max(0.0, fin - time.monotonic())))
+        if debe_parar():
+            raise Detenido()
+
+    def esperar(locator, state="visible", timeout=15000):
+        """wait_for en tramos de 1 s para que Detener se note enseguida."""
+        fin = time.monotonic() + timeout * ESCALA_ESPERAS / 1000
+        while True:
+            if debe_parar():
+                raise Detenido()
+            restante_ms = (fin - time.monotonic()) * 1000
+            try:
+                locator.wait_for(state=state, timeout=max(1, min(1000, restante_ms)))
+                return
+            except PlaywrightTimeoutError:
+                if time.monotonic() >= fin:
+                    raise
+
     def esperar_y_hacer_click(locator, timeout=15000):
-        locator.wait_for(state="visible", timeout=timeout)
+        esperar(locator, timeout=timeout)
         locator.click()
+
+    def entrar(page):
+        """Abre el portal hasta el menú de trabajo y devuelve su marco, o None si no se pudo tras varios intentos."""
+        for intento in range(1, INTENTOS_ACCESO + 1):
+            try:
+                respuesta = page.goto(URL_PORTAL, timeout=45000, wait_until="commit")
+                if respuesta is not None and respuesta.status == 401:
+                    raise CredencialesIncorrectas()
+                if respuesta is not None and respuesta.status >= 500:
+                    raise RuntimeError(f"el portal respondió con el error {respuesta.status}")
+                idioma = page.locator("text=/Espa.ol/").first
+                esperar(idioma, timeout=20000)
+                idioma.click()
+                esperar(page.locator("text=/Referencia/").first, timeout=25000)
+                for f in page.frames:
+                    try:
+                        if f.locator("text=/Referencia/").count() > 0:
+                            return f
+                    except Exception:
+                        continue
+                raise RuntimeError("no se encontró el marco de trabajo")
+            except (Detenido, CredencialesIncorrectas):
+                raise
+            except Exception as e:
+                if intento == INTENTOS_ACCESO:
+                    log(f"Error de acceso/login tras {INTENTOS_ACCESO} intentos: {e}. Los demás hilos harán sus referencias.", "error")
+                    registrar_error_detallado(str(e), traceback.format_exc())
+                    return None
+                log(f"No se pudo entrar al portal (intento {intento} de {INTENTOS_ACCESO}): {str(e).splitlines()[0]}. Se reintenta...", "error")
+                pausa(PAUSA_REINTENTO_ACCESO)
+        return None
+
+    def campo_referencia(frame):
+        return frame.locator('input[name="mara-matnr[1]"]').first
+
+    def preparar_formulario(frame, formulario_listo):
+        campo_ref = campo_referencia(frame)
+        # Tras «Otro Articulo» el portal ya muestra el formulario vacío: no hace falta volver a pasar por los menús
+        if not (formulario_listo and campo_ref.is_visible()):
+            esperar_y_hacer_click(frame.locator("text=Referencia").first, timeout=20000)
+            esperar_y_hacer_click(frame.locator("text=Mostrar disponibilidad pieza").first, timeout=20000)
+            esperar(campo_ref, timeout=20000)
+        campo_ref.click()
+        campo_ref.fill("")
+        return campo_ref
+
+    def pasar_a_otro_articulo(frame):
+        """Vuelve al formulario para la siguiente referencia; True si quedó listo."""
+        try:
+            esperar_y_hacer_click(frame.locator("text=Otro Articulo").first, timeout=10000)
+            esperar(campo_referencia(frame), timeout=5000)
+            return True
+        except Detenido:
+            raise
+        except Exception:
+            return False
 
     try:
         with sync_playwright() as p:
@@ -586,57 +704,32 @@ def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, log_c
                 context = browser.new_context(http_credentials={"username": usuario, "password": password})
                 context.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2}", lambda route: route.abort())
                 page = context.new_page()
-                url_acceso = "https://parts.citroen.com/zzlogpl0"
-                try:
-                    page.goto(url_acceso, timeout=45000)
-                    page.wait_for_selector("text=/Espa.ol/", timeout=20000)
-                    page.locator("text=/Espa.ol/").first.click()
-                    page.wait_for_selector("text=/Referencia/", timeout=25000)
-                except Exception as e:
-                    log(f"Error de acceso/login: {e}", "error")
-                    registrar_error_detallado(str(e), traceback.format_exc())
+                target_frame = entrar(page)
+                if target_frame is None:
                     return
-                target_frame = None
-                for f in page.frames:
-                    try:
-                        if f.locator("text=/Referencia/").count() > 0:
-                            target_frame = f
-                            break
-                    except Exception:
-                        continue
-                if not target_frame:
-                    log("No se encontró el frame de trabajo.", "error")
-                    return
-
-                def preparar_formulario():
-                    btn_referencia = target_frame.locator("text=Referencia").first
-                    btn_disponibilidad = target_frame.locator("text=Mostrar disponibilidad pieza").first
-                    esperar_y_hacer_click(btn_referencia, timeout=20000)
-                    esperar_y_hacer_click(btn_disponibilidad, timeout=20000)
-                    campo_ref = target_frame.locator('input[name="mara-matnr[1]"]').first
-                    campo_ref.wait_for(state="visible", timeout=20000)
-                    campo_ref.click()
-                    campo_ref.fill("")
-                    return campo_ref
+                formulario_listo = False
+                errores_seguidos = 0
 
                 for fila_idx, referencia in sub_filas:
-                    if stop_event.is_set():
+                    if debe_parar():
                         break
                     log(f"Consultando: {referencia}")
                     try:
                         ultimo_error = None
                         for intento in range(2):
                             try:
-                                campo_ref = preparar_formulario()
+                                campo_ref = preparar_formulario(target_frame, formulario_listo)
                                 campo_ref.fill(str(referencia))
                                 radio = target_frame.locator('input[type="radio"]').nth(1)
-                                radio.wait_for(state="attached", timeout=10000)
+                                esperar(radio, state="attached", timeout=10000)
                                 radio.click(force=True)
-                                btn_ejecutar = target_frame.locator("text=Ejecutar programa").first
-                                esperar_y_hacer_click(btn_ejecutar, timeout=15000)
+                                esperar_y_hacer_click(target_frame.locator("text=Ejecutar programa").first, timeout=15000)
                                 break
+                            except Detenido:
+                                raise
                             except Exception as intento_error:
                                 ultimo_error = intento_error
+                                formulario_listo = False
                                 if intento == 0:
                                     log(f"Reintentando {referencia}: el formulario no estaba listo.", "error")
                                     try:
@@ -645,30 +738,38 @@ def worker_playwright(worker_id, sub_filas, ruta_excel, usuario, password, log_c
                                             btn_otro.click()
                                     except Exception:
                                         pass
-                                    page.wait_for_timeout(1200)
+                                    pausa(1.2)
                                     continue
                                 raise ultimo_error
                         selector = "tr.moduloTableauBlanc td"
-                        target_frame.locator(selector).first.wait_for(state="visible", timeout=15000)
+                        esperar(target_frame.locator(selector).first, timeout=15000)
                         resultado = target_frame.locator(selector).first.inner_text().strip()
+                        errores_seguidos = 0
                         try:
                             guardar_resultado_excel(ruta_excel, fila_idx, resultado)
+                            log(f"OK {referencia}: {resultado}")
                         except PermissionError:
                             log(f"No se pudo guardar {referencia} porque el Excel está abierto. Ciérralo y repite esa referencia. Resultado obtenido: {resultado}", "error")
-                            update_global_progress()
-                            continue
-                        log(f"OK {referencia}: {resultado}")
-                        try:
-                            btn_otro = target_frame.locator("text=Otro Articulo").first
-                            esperar_y_hacer_click(btn_otro, timeout=10000)
-                            page.wait_for_timeout(700)
-                        except Exception:
-                            pass
+                        formulario_listo = pasar_a_otro_articulo(target_frame)
+                    except Detenido:
+                        raise
                     except Exception as e:
                         log(f"Error en {referencia}: {e}", "error")
+                        formulario_listo = False
+                        errores_seguidos += 1
                     update_global_progress()
+                    if errores_seguidos >= ERRORES_SEGUIDOS_RECARGA and not debe_parar():
+                        log(f"{errores_seguidos} errores seguidos: se vuelve a cargar el portal.", "error")
+                        errores_seguidos = 0
+                        target_frame = entrar(page)
+                        if target_frame is None:
+                            return
             finally:
                 browser.close()
+    except Detenido:
+        pass
+    except CredencialesIncorrectas:
+        credenciales_incorrectas.set()
     except Exception as e:
         log(f"Error critico en hilo: {e}", "error")
 
@@ -683,11 +784,6 @@ def filas_a_consultar(filas_trabajo, precio_minimo):
             continue
     return resultado
 
-def repartir_filas(filas, num_hilos):
-    """Reparte las filas de forma alternada entre los hilos para que todos tengan una carga parecida."""
-    hilos = max(1, min(num_hilos, len(filas)))
-    return [filas[i::hilos] for i in range(hilos)]
-
 def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, num_hilos, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None):
     global automation_running, auto_completada_ok, auto_resultado
     automation_running = True
@@ -696,6 +792,7 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
     cierre_notificado = False
     if stop_event:
         stop_event.clear()
+    credenciales_incorrectas.clear()
     try:
         wb = openpyxl.load_workbook(ruta_excel)
         sheet = wb.active
@@ -736,11 +833,16 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
                 if finalizado_callback:
                     finalizado_callback()
 
-        chunks = repartir_filas(filas, num_hilos)
-        log_callback(f"[SISTEMA] Consultando {total_tareas} de {len(filas_trabajo)} referencias (precio mínimo {precio_minimo:g} EUR) con {len(chunks)} hilos paralelos...")
-        with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
-            for i, chunk in enumerate(chunks):
-                executor.submit(worker_playwright, i + 1, chunk, ruta_excel, usuario, password, log_callback, update_progress, stop_event)
+        hilos = max(1, min(num_hilos, total_tareas))
+        pendientes = ColaReferencias(filas)
+        log_callback(f"[SISTEMA] Consultando {total_tareas} de {len(filas_trabajo)} referencias (precio mínimo {precio_minimo:g} EUR) con {hilos} hilos paralelos...")
+        with ThreadPoolExecutor(max_workers=hilos) as executor:
+            for i in range(hilos):
+                executor.submit(worker_playwright, i + 1, pendientes, ruta_excel, usuario, password, log_callback, update_progress, stop_event)
+        if credenciales_incorrectas.is_set():
+            auto_resultado = "credenciales"
+            log_callback("❌ El portal ha rechazado el usuario o la contraseña: revísalos en la pestaña Configuración.", "error")
+            return
         if stop_event.is_set():
             auto_resultado = "detenida"
             return
@@ -3332,7 +3434,7 @@ class AppIntegrada(ctk.CTk):
                 self.btn_flujo.configure(state="normal")
                 return
         elif estado != "completa":
-            motivo = "se detuvo" if estado == "detenida" else "falló"
+            motivo = {"detenida": "se detuvo", "credenciales": "no pudo entrar al portal (usuario o contraseña incorrectos)"}.get(estado, "falló")
             self.log_callback_rotacion(f"Flujo completo detenido: la automatización {motivo}, no se lanza la rotación.", "error")
             messagebox.showwarning("Flujo completo", f"La automatización {motivo}, así que no se ha lanzado el filtro de rotación. Revisa el registro de la automatización.")
             self.btn_flujo.configure(state="normal")
@@ -3352,6 +3454,9 @@ class AppIntegrada(ctk.CTk):
         if stop_event_auto.is_set() or auto_resultado == "detenida":
             self.avisar("Automatización detenida.")
             self.registrar_ejecucion("auto", "detenida")
+        elif auto_resultado == "credenciales":
+            self.avisar("El portal ha rechazado el usuario o la contraseña: revísalos en Configuración.", "aviso")
+            self.registrar_ejecucion("auto", "usuario o contraseña incorrectos")
         elif auto_resultado == "completa":
             self.avisar("Automatización terminada: se han consultado todas las referencias.", "ok", accion=abrir)
             self.registrar_ejecucion("auto", f"{Path(ruta_excel).stem} completa")

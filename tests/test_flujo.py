@@ -59,6 +59,7 @@ def worker_completo(worker_id, sub_filas, ruta_excel, usuario, password, log_cal
 
 def worker_que_deja_filas_sin_procesar(worker_id, sub_filas, ruta_excel, usuario, password, log_callback, update_progress, stop_event):
     if worker_id == 1:
+        next(iter(sub_filas), None)  # el hilo se cae con una referencia en la mano: esa queda sin consultar
         return
     worker_completo(worker_id, sub_filas, ruta_excel, usuario, password, log_callback, update_progress, stop_event)
 

@@ -11,13 +11,17 @@ def test_filas_a_consultar_aplica_el_precio_minimo():
     assert app.filas_a_consultar(filas, 0) == [(2, "A"), (3, "B"), (4, "C"), (7, "F")]
 
 
-def test_repartir_filas_equilibra_y_no_pierde_nada():
-    filas = [(i, f"R{i}") for i in range(10)]
-    trozos = app.repartir_filas(filas, 3)
-    assert [len(t) for t in trozos] == [4, 3, 3]
-    assert sorted(f for t in trozos for f in t) == filas
-    assert len(app.repartir_filas(filas[:2], 5)) == 2
-    assert app.repartir_filas([], 3) == [[]]
+def test_cola_compartida_no_pierde_ni_repite_nada():
+    filas = [(i, f"R{i}") for i in range(200)]
+    cola = app.ColaReferencias(filas)
+    cogidas = [[] for _ in range(4)]
+    hilos = [threading.Thread(target=lambda destino=destino: destino.extend(cola)) for destino in cogidas]
+    for hilo in hilos:
+        hilo.start()
+    for hilo in hilos:
+        hilo.join()
+    assert sorted(f for lista in cogidas for f in lista) == filas
+    assert list(app.ColaReferencias([])) == []
 
 
 def crear_quiter(ruta, precios):
