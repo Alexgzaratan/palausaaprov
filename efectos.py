@@ -1,6 +1,7 @@
 """Efectos de la interfaz: avisos que no interrumpen, botones con indicador de actividad, tarjetas que
 responden al ratón y arrastrar archivos a los campos. Todo con customtkinter y temporizadores after()."""
 import time
+import tkinter
 
 import customtkinter as ctk
 
@@ -202,6 +203,63 @@ def activar_resalte(app, tarjeta, pasos=6, intervalo_ms=20, vigilancia_ms=200):
     tarjeta.bind("<Enter>", entrar, add="+")
     tarjeta._resalte = estado
     tarjeta._entrar_resalte = entrar
+    return estado
+
+
+# ---------- pistas al pasar el ratón ----------
+
+def poner_pista(app, widget, texto, espera_ms=450):
+    """Rótulo pequeño bajo el control al dejar el ratón encima. `texto` puede ser una función, para que
+    diga siempre lo actual (p. ej. el nombre del archivo que se va a abrir)."""
+    estado = {"ventana": None, "espera": None}
+
+    def mostrar():
+        estado["espera"] = None
+        if estado["ventana"] is not None or not widget.winfo_exists():
+            return
+        contenido = texto() if callable(texto) else texto
+        if not contenido:
+            return
+        ventana = tkinter.Toplevel(widget)
+        ventana.overrideredirect(True)
+        ventana.attributes("-topmost", True)
+        # Tamaño negativo = píxeles, como los textos de customtkinter (en positivo Tk usa puntos y sale más grande)
+        fuente = (estilo.FUENTE, -round(estilo.TAM_PEQUENO * escala(widget)))
+        tkinter.Label(ventana, text=contenido, bg=app.color_texto, fg=app.color_superficie, font=fuente,
+                      padx=round(8 * escala(widget)), pady=round(4 * escala(widget))).pack()
+        ventana.update_idletasks()
+        x = widget.winfo_rootx() + (widget.winfo_width() - ventana.winfo_width()) // 2
+        x = max(0, min(x, widget.winfo_screenwidth() - ventana.winfo_width()))
+        ventana.geometry(f"+{x}+{widget.winfo_rooty() + widget.winfo_height() + 6}")
+        estado["ventana"] = ventana
+
+    def ocultar(evento=None):
+        if estado["espera"] is not None:
+            try:
+                widget.after_cancel(estado["espera"])
+            except Exception:
+                pass
+            estado["espera"] = None
+        if estado["ventana"] is not None:
+            try:
+                estado["ventana"].destroy()
+            except Exception:
+                pass
+            estado["ventana"] = None
+
+    def entrar(evento=None):
+        if estado["ventana"] is None and estado["espera"] is None:
+            estado["espera"] = widget.after(espera_ms, mostrar)
+
+    def salir(evento=None):
+        # Entre el fondo y el texto de un botón también hay «salidas»: solo se oculta si el ratón ya no está encima
+        widget.after(60, lambda: None if (widget.winfo_exists() and puntero_dentro(widget)) else ocultar())
+
+    widget.bind("<Enter>", entrar, add="+")
+    widget.bind("<Leave>", salir, add="+")
+    widget.bind("<Button-1>", ocultar, add="+")
+    widget._pista = estado
+    widget._mostrar_pista, widget._ocultar_pista = mostrar, ocultar
     return estado
 
 

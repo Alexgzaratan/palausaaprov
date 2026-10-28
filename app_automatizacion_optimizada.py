@@ -111,6 +111,7 @@ CAMPOS_CONFIG = (
     ("filtro_dia_facturas_madd", "filtro_dia_madd_option", "Ayer"),
     ("color_resaltado", "color_optionmenu", "Amarillo"),
     ("nombre_usuario", "nombre_entry", ""),
+    ("ruta_carpeta_informes", "carpeta_informes_entry", ""),
 )
 
 DIAS_ES = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
@@ -775,6 +776,39 @@ def ruta_hoja_pedidos_del_dia(carpeta_hojas, fecha=None):
     carpeta_mes = Path(carpeta_hojas) / str(fecha.year) / MESES_ES[fecha.month]
     nombre = fecha.strftime("%d-%m-%Y") + ".xlsx"
     return carpeta_mes / nombre
+
+EXTENSIONES_INFORME = (".xlsx", ".xlsm", ".xls", ".csv")
+
+
+def fecha_en_nombre(nombre):
+    """Fecha dd-mm-aaaa (o dd-mm-aa, con - _ o .) del nombre de un archivo, o None."""
+    encontrada = re.search(r"(\d{1,2})[-_.](\d{1,2})[-_.](\d{4}|\d{2})(?!\d)", nombre)
+    if not encontrada:
+        return None
+    dia, mes, anio = (int(n) for n in encontrada.groups())
+    try:
+        return datetime(anio + 2000 if anio < 100 else anio, mes, dia).date()
+    except ValueError:
+        return None
+
+
+def informe_diario_anterior(carpeta, hoy=None):
+    """El informe más reciente anterior a hoy de la carpeta (por la fecha del nombre; si ningún nombre
+    tiene fecha, por la fecha de modificación). None si no hay ninguno."""
+    hoy = hoy or datetime.now().date()
+    try:
+        archivos = [a for a in Path(carpeta).iterdir()
+                    if a.is_file() and a.suffix.lower() in EXTENSIONES_INFORME and not a.name.startswith("~$")]
+    except OSError:
+        return None
+    con_fecha = [(fecha_en_nombre(a.name), a) for a in archivos]
+    con_fecha = [(f, a) for f, a in con_fecha if f is not None and f < hoy]
+    if con_fecha:
+        return max(con_fecha, key=lambda par: (par[0], par[1].stat().st_mtime))[1]
+    inicio_de_hoy = datetime.combine(hoy, datetime.min.time()).timestamp()
+    anteriores = [a for a in archivos if fecha_en_nombre(a.name) is None and a.stat().st_mtime < inicio_de_hoy]
+    return max(anteriores, key=lambda a: a.stat().st_mtime) if anteriores else None
+
 
 def generar_hoja_pedidos_task(ruta_plantilla, carpeta_hojas, log_callback=None, progreso_callback=None, finalizado_callback=None, forzar=False, fecha=None):
     global hoja_pedidos_running
@@ -1714,7 +1748,7 @@ class AppIntegrada(ctk.CTk):
             ocupa_todo = columnas == 2 and posicion == len(tarjetas) - 1 and len(tarjetas) % 2 == 1
             card.grid(row=fila, column=0 if ocupa_todo else columna, columnspan=2 if ocupa_todo else 1, sticky="nsew", padx=estilo.PAD_TARJETA, pady=estilo.PAD_TARJETA)
 
-    def crear_fila_archivo(self, parent, label_text, entry_attr, config_key, placeholder, button_text, command, extensiones=(".xlsx",)):
+    def crear_fila_archivo(self, parent, label_text, entry_attr, config_key, placeholder, button_text, command, extensiones=(".xlsx",), abrir=False):
         """Fila con campo de ruta y botón Examinar/Carpeta; también admite soltar encima un archivo o carpeta
         (de carpeta si el botón es «Carpeta»; si no, un archivo con alguna de las extensiones indicadas)."""
         self.crear_etiqueta(parent, label_text, negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(0, 4))
@@ -1725,6 +1759,9 @@ class AppIntegrada(ctk.CTk):
         entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         setattr(self, entry_attr, entry)
         self.crear_boton_secundario(row, button_text, command, width=92).pack(side="right")
+        if abrir:  # icono pequeño a la izquierda de «Examinar» que abre el archivo del campo
+            self.crear_boton_abrir_icono(row, lambda campo=entry: self.abrir_archivo(campo.get(), "Elige primero el Excel."),
+                                         lambda campo=entry: f"Abrir {Path(campo.get()).name} en Excel" if campo.get().strip() else "Abrir el Excel").pack(side="right", padx=(0, 8))
         if self.arrastre_activo:
             tipo = "carpeta" if button_text == "Carpeta" else "archivo"
             try:
@@ -2176,7 +2213,7 @@ class AppIntegrada(ctk.CTk):
         contenedor = ctk.CTkScrollableFrame(self.tab_auto, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
         card = self.crear_tarjeta_tab(contenedor, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.", en_rejilla=True, icono="buscar")
-        self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]))
+        self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]), abrir=True)
         fila = self.crear_fila_ajuste(card, "Precio mínimo (EUR)")
         self.precio_entry = self.crear_entrada(fila, width=120, justify="center")
         self.precio_entry.insert(0, self.config.get("precio_min", "0"))
@@ -2231,8 +2268,13 @@ class AppIntegrada(ctk.CTk):
         card_hoja = self.crear_tarjeta_tab(contenedor, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.", en_rejilla=True, icono="calendario")
         self.crear_fila_archivo(card_hoja, "Plantilla de hoja", "plantilla_hoja_entry", "ruta_plantilla_hojas", "HOJA DE PEDIDOS.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.plantilla_hoja_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_hoja, "Carpeta HOJAS DE PEDIDO", "carpeta_hojas_entry", "ruta_carpeta_hojas", "Carpeta HOJAS DE PEDIDO...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_hojas_entry))
-        self.btn_hoja_pedidos = self.crear_boton_principal(card_hoja, "Generar hoja de hoy", self.iniciar_hoja_pedidos)
-        self.btn_hoja_pedidos.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
+        fila_hoja = ctk.CTkFrame(card_hoja, fg_color="transparent")
+        fila_hoja.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
+        self.btn_hoja_pedidos = self.crear_boton_principal(fila_hoja, "Generar hoja de hoy", self.iniciar_hoja_pedidos)
+        self.btn_hoja_pedidos.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.btn_abrir_hoja = self.crear_boton_secundario(fila_hoja, "Abrir hoja de hoy", self.abrir_hoja_de_hoy, alto=estilo.ALTO_BOTON, width=150)
+        self.btn_abrir_hoja.pack(side="right")
+        efectos.poner_pista(self, self.btn_abrir_hoja, lambda: f"Abrir {self.ruta_hoja_de_hoy().name}" if self.ruta_hoja_de_hoy() else "")
 
         card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.", en_rejilla=True, icono="correo")
         self.crear_fila_archivo(card_avisos, "Hoja de pedido a procesar", "hoja_avisos_entry", "ruta_hoja_avisos", "Hoja dd-mm-aaaa.xlsx ya rellenada...", "Examinar", lambda: self.seleccionar_archivo(self.hoja_avisos_entry, [("Excel files", "*.xlsx")]))
@@ -2255,8 +2297,13 @@ class AppIntegrada(ctk.CTk):
         self.color_optionmenu = self.crear_menu(fila, ["Amarillo", "Rojo", "Verde", "Azul", "Naranja"])
         self.color_optionmenu.set(self.config.get("color_resaltado", "Amarillo"))
         self.color_optionmenu.pack(side="right", padx=estilo.PAD_FILA, pady=6)
-        self.btn_comparador = self.crear_boton_principal(card, "Comparar Excels", self.toggle_comparador)
-        self.btn_comparador.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
+        fila_comparar = ctk.CTkFrame(card, fg_color="transparent")
+        fila_comparar.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
+        self.btn_comparador = self.crear_boton_principal(fila_comparar, "Comparar Excels", self.toggle_comparador)
+        self.btn_comparador.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.btn_informe_anterior = self.crear_boton_secundario(fila_comparar, "Abrir informe anterior", self.abrir_informe_anterior, alto=estilo.ALTO_BOTON, width=170)
+        self.btn_informe_anterior.pack(side="right")
+        efectos.poner_pista(self, self.btn_informe_anterior, self.pista_informe_anterior)
         self.construir_tarjeta_tareas(contenedor)
 
     def build_tab_mopar(self, acc_color):
@@ -2329,6 +2376,8 @@ class AppIntegrada(ctk.CTk):
         self.nombre_entry = self.crear_entrada(fila, width=220, placeholder_text="Opcional")
         self.nombre_entry.insert(0, self.config.get("nombre_usuario", ""))
         self.nombre_entry.pack(side="right", padx=estilo.PAD_FILA, pady=6)
+        self.crear_fila_archivo(card, "Carpeta de informes diarios (botón «Abrir informe anterior» del Comparador)", "carpeta_informes_entry", "ruta_carpeta_informes",
+                                "Carpeta de informes diarios...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_informes_entry))
         fila = self.crear_fila_ajuste(card, "Animaciones (apertura y «¡Capturado!»)")
         self.animacion_var = ctk.BooleanVar(value=self.config.get("animacion_inicio", True))
         ctk.CTkSwitch(fila, text="", variable=self.animacion_var, width=46, progress_color=self.color_principal).pack(side="right", padx=estilo.PAD_FILA, pady=6)
@@ -2530,6 +2579,83 @@ class AppIntegrada(ctk.CTk):
         campo = getattr(self, "nueva_tarea_entry", None)
         if campo is not None and campo.winfo_exists():
             campo.focus_set()
+
+    # ---------- abrir los Excel de un clic ----------
+
+    def crear_boton_abrir_icono(self, padre, comando, pista):
+        """Botón pequeño (solo icono) para abrir un archivo, con un rótulo al pasar el ratón."""
+        if estilo.FUENTE_ICONOS:
+            boton = self.crear_boton_secundario(padre, estilo.ICONOS["abrir"], comando, width=estilo.ALTO_CONTROL, font=estilo.fuente_icono(15))
+        else:
+            boton = self.crear_boton_secundario(padre, "Abrir", comando, width=60)
+        efectos.poner_pista(self, boton, pista)
+        return boton
+
+    def abrir_archivo(self, ruta, sin_ruta="Elige primero el archivo."):
+        """Abre un archivo con su programa (Excel); si falta, avisa sin ventanas."""
+        ruta = str(ruta or "").strip()
+        if not ruta:
+            self.avisar(sin_ruta)
+            return False
+        if not os.path.isfile(ruta):
+            self.avisar(f"No se encuentra {Path(ruta).name}: puede que se haya movido o borrado.", "aviso")
+            return False
+        if not abrir_ruta_en_sistema(ruta):
+            self.avisar(f"No se pudo abrir {Path(ruta).name}.", "aviso")
+            return False
+        return True
+
+    def ruta_hoja_de_hoy(self):
+        carpeta = self.valor_widget_o_config("carpeta_hojas_entry", "ruta_carpeta_hojas", "")
+        return ruta_hoja_pedidos_del_dia(carpeta) if carpeta else None
+
+    def abrir_hoja_de_hoy(self):
+        ruta = self.ruta_hoja_de_hoy()
+        if ruta is None:
+            self.avisar("Elige primero la carpeta de hojas de pedido.")
+            return False
+        if not ruta.exists():
+            self.avisar("Todavía no hay hoja de hoy: pulsa «Generar hoja de hoy».")
+            return False
+        return self.abrir_archivo(ruta)
+
+    def carpeta_informes(self, preguntar=False):
+        """Carpeta de los informes diarios (Configuración). Si no está puesta y se pide, se elige una vez y se guarda."""
+        carpeta = str(self.valor_widget_o_config("carpeta_informes_entry", "ruta_carpeta_informes", "") or "").strip()
+        if carpeta or not preguntar:
+            return carpeta
+        carpeta = filedialog.askdirectory(title="Elige la carpeta de los informes diarios")
+        if carpeta:
+            completa = cargar_configuracion()
+            completa["ruta_carpeta_informes"] = carpeta
+            guardar_configuracion(completa)
+            self.config["ruta_carpeta_informes"] = carpeta
+            campo = getattr(self, "carpeta_informes_entry", None)
+            if campo is not None and campo.winfo_exists():
+                campo.delete(0, "end")
+                campo.insert(0, carpeta)
+            self.avisar("Carpeta de informes diarios guardada. Puedes cambiarla en Configuración.", "ok")
+        return carpeta
+
+    def abrir_informe_anterior(self):
+        carpeta = self.carpeta_informes(preguntar=True)
+        if not carpeta:
+            return False
+        if not os.path.isdir(carpeta):
+            self.avisar(f"No se encuentra la carpeta de informes diarios ({Path(carpeta).name}). Cámbiala en Configuración.", "aviso")
+            return False
+        informe = informe_diario_anterior(carpeta)
+        if informe is None:
+            self.avisar(f"No hay ningún informe anterior a hoy en {Path(carpeta).name}.")
+            return False
+        return self.abrir_archivo(informe)
+
+    def pista_informe_anterior(self):
+        carpeta = self.carpeta_informes()
+        if not carpeta:
+            return "Elige la carpeta de informes diarios y abre el anterior a hoy"
+        informe = informe_diario_anterior(carpeta) if os.path.isdir(carpeta) else None
+        return f"Abrir {informe.name}" if informe else "No hay ningún informe anterior a hoy"
 
     def seleccionar_archivo(self, entry, tipos):
         ruta = filedialog.askopenfilename(filetypes=tipos)
