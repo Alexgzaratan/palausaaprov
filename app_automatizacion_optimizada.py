@@ -26,6 +26,7 @@ from reclamaciones_power_line import ModuloReclamacionesPowerLine
 import estilo
 import animacion_inicio
 import efectos
+import piezas_caras
 import actualizaciones
 import cambio_version
 from version import VERSION
@@ -370,17 +371,21 @@ def colores_rotacion(ruta_rotacion):
     'rojo', 'amarillo', 'revisar' o ''. La fila N del archivo es la línea N del pedido en Quiter (el filtro quita la cabecera)."""
     wb = load_workbook(ruta_rotacion)
     try:
-        filas = []
-        for fila in range(1, wb.active.max_row + 1):
-            celda = wb.active.cell(row=fila, column=2)
-            if celda.value is None or not str(celda.value).strip():
-                continue
-            relleno = str(celda.fill.fgColor.rgb or "")[-6:].upper() if celda.fill.fill_type == "solid" else ""
-            color = {COLOR_ROJO_ROTACION: "rojo", COLOR_AMARILLO_ROTACION: "amarillo", COLOR_REVISAR_ROTACION: "revisar"}.get(relleno, "")
-            filas.append((fila, str(celda.value).strip(), color, precio_fila_rotacion(wb.active.cell(row=fila, column=5).value)))
-        return filas
+        return colores_rotacion_hoja(wb.active)
     finally:
         wb.close()
+
+
+def colores_rotacion_hoja(ws):
+    filas = []
+    for fila in range(1, ws.max_row + 1):
+        celda = ws.cell(row=fila, column=2)
+        if celda.value is None or not str(celda.value).strip():
+            continue
+        relleno = str(celda.fill.fgColor.rgb or "")[-6:].upper() if celda.fill.fill_type == "solid" else ""
+        color = {COLOR_ROJO_ROTACION: "rojo", COLOR_AMARILLO_ROTACION: "amarillo", COLOR_REVISAR_ROTACION: "revisar"}.get(relleno, "")
+        filas.append((fila, str(celda.value).strip(), color, precio_fila_rotacion(ws.cell(row=fila, column=5).value)))
+    return filas
 
 
 def lineas_marcadas_rotacion(ruta_rotacion):
@@ -389,26 +394,53 @@ def lineas_marcadas_rotacion(ruta_rotacion):
     return [(linea, ref, color) for linea, ref, color, _ in filas if color in ("rojo", "amarillo")], len(filas)
 
 
-def lineas_a_revisar_rotacion(ruta_rotacion):
-    """Líneas en azul (piezas caras que decide Álex): [(línea, referencia, precio unitario)]."""
-    return [(linea, ref, unitario) for linea, ref, color, unitario in colores_rotacion(ruta_rotacion) if color == "revisar"]
+def piezas_caras_rotacion(ruta_rotacion):
+    """Piezas en azul del Excel _ROTACION.xlsx (aún sin decidir), con lo necesario para decidir:
+    [{"linea", "referencia", "descripcion", "pedidas", "unitario", "total"}]."""
+    wb = load_workbook(ruta_rotacion)
+    try:
+        ws = wb.active
+        piezas = []
+        for linea, ref, color, unitario in colores_rotacion_hoja(ws):
+            if color == "revisar":
+                piezas.append({"linea": linea, "referencia": ref, "descripcion": ws.cell(row=linea, column=3).value or "",
+                               "pedidas": piezas_caras.numero(ws.cell(row=linea, column=4).value), "unitario": unitario,
+                               "total": precio_fila_rotacion(ws.cell(row=linea, column=6).value)})
+        return piezas
+    finally:
+        wb.close()
 
 
-def euros(importe):
-    """1850.5 -> '1.850,50 €'."""
-    return f"{importe:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".") + " €"
+def decidir_piezas_caras_en_excel(ruta_rotacion, decisiones):
+    """Aplica lo decidido a las filas azules: pedir -> sin relleno (blanco), poner a 0 -> rojo. Solo toca filas
+    que sigan en azul. Devuelve (para pedir, a cero). Lanza PermissionError si el Excel está abierto."""
+    wb = load_workbook(ruta_rotacion)
+    try:
+        ws = wb.active
+        rojo = PatternFill(start_color=COLOR_ROJO_ROTACION, end_color=COLOR_ROJO_ROTACION, fill_type="solid")
+        azules = {linea for linea, _, color, _ in colores_rotacion_hoja(ws) if color == "revisar"}
+        pedir = cero = 0
+        for linea, decision in decisiones.items():
+            if linea not in azules:
+                continue
+            for celda in ws[linea]:
+                celda.fill = rojo if decision == piezas_caras.A_CERO else PatternFill(fill_type=None)
+            if decision == piezas_caras.A_CERO:
+                cero += 1
+            else:
+                pedir += 1
+        wb.save(ruta_rotacion)
+        return pedir, cero
+    finally:
+        wb.close()
 
 
-def texto_lista_quiter(pedido, marcadas, total, revisar=()):
-    """Texto para pegar en Claude (skill quiter-lineas-a-cero). Las piezas a revisar van aparte: no se ponen a 0."""
+def texto_lista_quiter(pedido, marcadas, total):
+    """Texto para pegar en Claude (skill quiter-lineas-a-cero)."""
     if not marcadas:
-        lineas = [f"rotación {pedido}: ninguna línea marcada de {total}"]
-    else:
-        lineas = [f"rotación {pedido}: {len(marcadas)} de {total} líneas a poner a 0"]
-        lineas += [f"Lín. {linea} · {ref} ({color})" for linea, ref, color in marcadas]
-    if revisar:
-        lineas.append("Para decidir tú (piezas caras en azul, no poner a 0):")
-        lineas += [f"Lín. {linea} · {ref} ({euros(unitario)}/ud)" if unitario is not None else f"Lín. {linea} · {ref}" for linea, ref, unitario in revisar]
+        return f"rotación {pedido}: ninguna línea marcada de {total}"
+    lineas = [f"rotación {pedido}: {len(marcadas)} de {total} líneas a poner a 0"]
+    lineas += [f"Lín. {linea} · {ref} ({color})" for linea, ref, color in marcadas]
     return "\n".join(lineas)
 
 
@@ -3598,14 +3630,71 @@ class AppIntegrada(ctk.CTk):
             self.avisar("El filtro de rotación terminó sin generar el Excel: revisa el registro de rotación.", "aviso")
             return
         self.avisar(f"Rotación completada: {Path(generado).name}", "ok", accion=("Abrir", lambda: self.abrir_archivo(generado)))
+
+        def continuar(aplicado=True):
+            try:
+                marcadas, total = lineas_marcadas_rotacion(generado)
+            except Exception:
+                marcadas, total = [], 0
+            pedido = Path(generado).stem.removesuffix("_ROTACION")
+            self.registrar_ejecucion("rotacion", f"{pedido}: {len(marcadas)} de {total} líneas" if total else pedido)
+            if del_flujo:
+                self.mostrar_captura(len(marcadas), total, pedido)
+
         try:
-            marcadas, total = lineas_marcadas_rotacion(generado)
+            caras = piezas_caras_rotacion(generado)
         except Exception:
-            marcadas, total = [], 0
-        pedido = Path(generado).stem.removesuffix("_ROTACION")
-        self.registrar_ejecucion("rotacion", f"{pedido}: {len(marcadas)} de {total} líneas" if total else pedido)
-        if del_flujo:
-            self.mostrar_captura(len(marcadas), total, pedido)
+            caras = []
+        if caras:
+            self.decidir_piezas_caras(generado, caras, al_terminar=continuar)
+        else:
+            continuar()
+
+    # ---------- piezas caras: pedirlas o ponerlas a 0 (ventana en piezas_caras.py) ----------
+
+    def decidir_piezas_caras(self, ruta, piezas, al_terminar=None):
+        """Pregunta qué hacer con cada pieza en azul y lo guarda en el Excel (blanco o rojo)."""
+        nombre = Path(ruta).name
+
+        def al_decidir(decisiones):
+            if decisiones is None:
+                quedan = len(piezas)
+                self.avisar(f"Quedan {quedan} pieza{'s' if quedan != 1 else ''} cara{'s' if quedan != 1 else ''} en azul en {nombre}: decídelas antes de pasarlo a Quiter.",
+                            accion=("Decidir", lambda: self.decidir_piezas_caras_pendientes(ruta)))
+                if al_terminar:
+                    al_terminar(False)
+                return True
+            try:
+                pedir, cero = decidir_piezas_caras_en_excel(ruta, decisiones)
+            except PermissionError:
+                messagebox.showwarning("Piezas caras", f"No se puede guardar {nombre}: está abierto en Excel. Ciérralo y pulsa «Aplicar» otra vez.")
+                return False
+            except Exception as e:
+                registrar_error_detallado(f"Piezas caras: {e}", traceback.format_exc())
+                messagebox.showwarning("Piezas caras", f"No se pudo guardar la decisión en {nombre}: {e}")
+                return False
+            self.log_callback_rotacion(f"Piezas caras decididas: {pedir} para pedir (en blanco) y {cero} a 0 (en rojo).", "success")
+            self.avisar(f"Piezas caras: {pedir} para pedir y {cero} a 0. {nombre} actualizado.", "ok")
+            if al_terminar:
+                al_terminar(True)
+            return True
+
+        self.dialogo_piezas_caras = piezas_caras.DialogoPiezasCaras(self, piezas, Path(ruta).stem.removesuffix("_ROTACION"), self.limite_revisar() or 0, al_decidir)
+        if os.path.exists(ICONO_PATH):  # customtkinter pone su icono a los 200 ms: se cambia después
+            ventana = self.dialogo_piezas_caras.ventana
+            ventana.after(260, lambda: ventana.winfo_exists() and ventana.iconbitmap(ICONO_PATH))
+        return self.dialogo_piezas_caras
+
+    def decidir_piezas_caras_pendientes(self, ruta):
+        try:
+            piezas = piezas_caras_rotacion(ruta)
+        except Exception as e:
+            self.avisar(f"No se pudo leer {Path(ruta).name}: {e}", "aviso")
+            return None
+        if not piezas:
+            self.avisar("No quedan piezas caras por decidir.")
+            return None
+        return self.decidir_piezas_caras(ruta, piezas)
 
     # ---------- vista previa del umbral y lista para Quiter ----------
 
@@ -3720,20 +3809,23 @@ class AppIntegrada(ctk.CTk):
             self.avisar("Todavía no hay Excel de rotación para este Excel de Quiter. Ejecuta primero «Resaltar por rotación».")
             return None
         try:
+            caras = piezas_caras_rotacion(ruta)
             marcadas, total = lineas_marcadas_rotacion(ruta)
-            revisar = lineas_a_revisar_rotacion(ruta)
         except Exception as e:
             messagebox.showwarning("Lista para Quiter", f"No se pudo leer {Path(ruta).name}: {e}")
             return None
+        if caras:  # a Quiter no llega nada en azul: primero se decide
+            self.decidir_piezas_caras(ruta, caras, al_terminar=lambda aplicado: self.copiar_lista_quiter() if aplicado else
+                                      self.avisar("Decide primero las piezas caras para copiar la lista."))
+            return None
         pedido = Path(ruta).stem.removesuffix("_ROTACION")
-        texto = texto_lista_quiter(pedido, marcadas, total, revisar)
+        texto = texto_lista_quiter(pedido, marcadas, total)
         self.clipboard_clear()
         self.clipboard_append(texto)
         self.update_idletasks()
         generado = datetime.fromtimestamp(os.path.getmtime(ruta)).strftime("%d/%m %H:%M")
         self.log_callback_rotacion(f"Lista copiada: {len(marcadas)} de {total} líneas de {Path(ruta).name} (generado el {generado}). Pégala en Claude.", "success")
-        aparte = f" (y {len(revisar)} en azul para que decidas tú)" if revisar else ""
-        self.avisar(f"Lista copiada: {len(marcadas)} de {total} líneas a poner a 0{aparte}. Pégala en Claude.", "ok")
+        self.avisar(f"Lista copiada: {len(marcadas)} de {total} líneas a poner a 0. Pégala en Claude.", "ok")
         return texto
 
     def toggle_mopar(self):

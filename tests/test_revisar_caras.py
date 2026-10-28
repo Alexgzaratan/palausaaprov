@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 import app_automatizacion_optimizada as app_mod
+import piezas_caras
 
 # (referencia, pedidas, precio unitario, resultado, media)
 FILAS = [
@@ -64,7 +65,7 @@ def test_el_filtro_pinta_de_azul_solo_las_caras_que_quedarian_en_blanco(archivos
 def test_sin_limite_no_hay_azules(archivos):
     quiter, propuesta, carpeta = archivos
     _, salida = filtrar(quiter, propuesta, carpeta, limite=0)
-    assert app_mod.lineas_a_revisar_rotacion(str(salida)) == []
+    assert app_mod.piezas_caras_rotacion(str(salida)) == []
 
 
 def test_la_vista_previa_cuenta_las_azules_igual_que_el_filtro(archivos):
@@ -73,23 +74,37 @@ def test_la_vista_previa_cuenta_las_azules_igual_que_el_filtro(archivos):
     assert previsto == {"rojo": 1, "amarillo": 1, "revisar": 1, "precio": 1, "blanco": 2}
 
 
-def test_las_azules_no_van_a_poner_a_cero_sino_aparte(archivos):
+def test_datos_de_las_piezas_caras(archivos):
     quiter, propuesta, carpeta = archivos
     _, salida = filtrar(quiter, propuesta, carpeta)
+    assert app_mod.piezas_caras_rotacion(str(salida)) == [
+        {"linea": 1, "referencia": "CARA", "descripcion": "", "pedidas": 1.0, "unitario": 1850.0, "total": 1850.0}]
     marcadas, total = app_mod.lineas_marcadas_rotacion(str(salida))
-    assert [ref for _, ref, _ in marcadas] == ["CARA_ROJA", "CARA_AMARILLA"] and total == 6
-    revisar = app_mod.lineas_a_revisar_rotacion(str(salida))
-    assert revisar == [(1, "CARA", 1850.0)]
-    texto = app_mod.texto_lista_quiter("S40P", marcadas, total, revisar)
-    assert texto.splitlines() == ["rotación S40P: 2 de 6 líneas a poner a 0", "Lín. 2 · CARA_ROJA (rojo)", "Lín. 3 · CARA_AMARILLA (amarillo)",
-                                  "Para decidir tú (piezas caras en azul, no poner a 0):", "Lín. 1 · CARA (1.850,00 €/ud)"]
-    assert app_mod.texto_lista_quiter("S40P", [], 6, revisar).splitlines()[0] == "rotación S40P: ninguna línea marcada de 6"
+    assert [ref for _, ref, _ in marcadas] == ["CARA_ROJA", "CARA_AMARILLA"] and total == 6  # la azul no va a poner a 0
+
+
+def color_de(salida, referencia):
+    ws = openpyxl.load_workbook(salida).active
+    celda = next(ws.cell(row=f, column=2) for f in range(1, ws.max_row + 1) if ws.cell(row=f, column=2).value == referencia)
+    return celda.fill.start_color.rgb if celda.fill.fill_type else None
+
+
+@pytest.mark.parametrize("decision,color", [(piezas_caras.PEDIR, None), (piezas_caras.A_CERO, "00FF0000")])
+def test_decidir_cambia_el_color_en_el_excel(archivos, decision, color):
+    quiter, propuesta, carpeta = archivos
+    _, salida = filtrar(quiter, propuesta, carpeta)
+    resultado = app_mod.decidir_piezas_caras_en_excel(str(salida), {1: decision, 2: piezas_caras.PEDIR})  # la 2 ya es roja: no se toca
+    assert resultado == ((1, 0) if decision == piezas_caras.PEDIR else (0, 1))
+    assert color_de(salida, "CARA") == color and color_de(salida, "CARA_ROJA") == "00FF0000"
+    assert app_mod.piezas_caras_rotacion(str(salida)) == []  # ya no queda nada en azul para la skill
+    marcadas, _ = app_mod.lineas_marcadas_rotacion(str(salida))
+    assert ("CARA" in [ref for _, ref, _ in marcadas]) == (decision == piezas_caras.A_CERO)
 
 
 def test_formato_euros():
-    assert app_mod.euros(1850) == "1.850,00 €"
-    assert app_mod.euros(12345.5) == "12.345,50 €"
-    assert app_mod.euros(99.9) == "99,90 €"
+    assert piezas_caras.euros(1850) == "1.850,00 €"
+    assert piezas_caras.euros(12345.5) == "12.345,50 €"
+    assert piezas_caras.euros(99.9) == "99,90 €"
 
 
 @pytest.mark.parametrize("escrito,valor", [("1600", 1600.0), ("1.600", 1600.0), ("1.600,50", 1600.5), ("1600,5", 1600.5),
@@ -100,12 +115,79 @@ def test_importe_para_revisar(app, escrito, valor):
     assert app.limite_revisar() == valor
 
 
-def test_copiar_lista_incluye_las_azules_aparte(app, archivos):
-    quiter, propuesta, carpeta = archivos
-    filtrar(quiter, propuesta, carpeta)
-    for campo, valor in ((app.excel_quiter_entry, quiter), (app.folder_rot_entry, carpeta)):
+def preparar_campos(app, quiter, carpeta):
+    for campo, valor in ((app.excel_quiter_entry, quiter), (app.folder_rot_entry, carpeta), (app.limite_revisar_entry, "1600")):
         campo.delete(0, "end")
         campo.insert(0, str(valor))
-    texto = app.copiar_lista_quiter()
-    assert "Para decidir tú" in texto and "CARA (1.850,00 €/ud)" in texto
-    assert app.avisos.historial[-1] == ("ok", "Lista copiada: 2 de 6 líneas a poner a 0 (y 1 en azul para que decidas tú). Pégala en Claude.")
+
+
+def test_ventana_de_decision(app, archivos):
+    quiter, propuesta, carpeta = archivos
+    _, salida = filtrar(quiter, propuesta, carpeta)
+    preparar_campos(app, quiter, carpeta)
+    terminado = []
+    dialogo = app.decidir_piezas_caras(str(salida), app_mod.piezas_caras_rotacion(str(salida)), al_terminar=terminado.append)
+    app.update()
+    assert dialogo.ventana.winfo_exists() and dialogo.btn_aplicar.cget("state") == "disabled"  # hasta decidir todas
+    dialogo.elegir(1, piezas_caras.A_CERO)
+    assert dialogo.btn_aplicar.cget("state") == "normal"
+    assert dialogo.botones[1][piezas_caras.A_CERO].cget("fg_color") == app.color_peligro
+    assert dialogo.aplicar()
+    assert terminado == [True] and not dialogo.ventana.winfo_exists()
+    assert color_de(salida, "CARA") == "00FF0000"
+    assert app.avisos.historial[-1] == ("ok", "Piezas caras: 0 para pedir y 1 a 0. S40P_ROTACION.xlsx actualizado.")
+
+
+def test_mas_tarde_deja_la_azul_y_avisa(app, archivos):
+    quiter, propuesta, carpeta = archivos
+    _, salida = filtrar(quiter, propuesta, carpeta)
+    preparar_campos(app, quiter, carpeta)
+    terminado = []
+    dialogo = app.decidir_piezas_caras(str(salida), app_mod.piezas_caras_rotacion(str(salida)), al_terminar=terminado.append)
+    dialogo.mas_tarde()
+    assert terminado == [False] and color_de(salida, "CARA") == "009DC3E6"
+    aviso = app.avisos.activos[-1]
+    assert "Quedan 1 pieza cara en azul" in aviso.texto and aviso.boton_accion.cget("text") == "Decidir"
+
+
+def test_con_el_excel_abierto_la_ventana_sigue(app, archivos, monkeypatch):
+    quiter, propuesta, carpeta = archivos
+    _, salida = filtrar(quiter, propuesta, carpeta)
+    preparar_campos(app, quiter, carpeta)
+
+    def abierto(*a):
+        raise PermissionError("en uso")
+
+    monkeypatch.setattr(app_mod, "decidir_piezas_caras_en_excel", abierto)
+    dialogo = app.decidir_piezas_caras(str(salida), app_mod.piezas_caras_rotacion(str(salida)))
+    dialogo.todas(piezas_caras.PEDIR)
+    assert dialogo.aplicar() is False and dialogo.ventana.winfo_exists() and app.mensajes
+    dialogo.mas_tarde()
+
+
+def test_copiar_lista_pregunta_antes_las_azules(app, archivos):
+    quiter, propuesta, carpeta = archivos
+    _, salida = filtrar(quiter, propuesta, carpeta)
+    preparar_campos(app, quiter, carpeta)
+    assert app.copiar_lista_quiter() is None  # no copia con piezas en azul: abre la ventana
+    dialogo = app.dialogo_piezas_caras
+    dialogo.todas(piezas_caras.PEDIR)
+    dialogo.aplicar()
+    texto = app.clipboard_get()
+    assert texto.splitlines() == ["rotación S40P: 2 de 6 líneas a poner a 0", "Lín. 2 · CARA_ROJA (rojo)", "Lín. 3 · CARA_AMARILLA (amarillo)"]
+
+
+def test_al_terminar_el_filtro_se_decide_antes_de_contar(app, archivos, monkeypatch):
+    quiter, propuesta, carpeta = archivos
+    filtrar(quiter, propuesta, carpeta)
+    preparar_campos(app, quiter, carpeta)
+    capturas = []
+    monkeypatch.setattr(app, "mostrar_captura", lambda *datos: capturas.append(datos))
+    app._inicio_rotacion = 0
+    app._rotacion_del_flujo = True
+    app.finalizar_filtro_rotacion()
+    assert capturas == []  # espera a la decisión
+    app.dialogo_piezas_caras.todas(piezas_caras.A_CERO)
+    app.dialogo_piezas_caras.aplicar()
+    assert capturas == [(3, 6, "S40P")]  # la cara puesta a 0 ya cuenta
+    assert app.etiquetas_ultima_vez["rotacion"].cget("text").endswith("S40P: 3 de 6 líneas")
