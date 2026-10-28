@@ -921,22 +921,45 @@ def _normalizar_cliente_dms(valor):
         return str(int(valor))
     return str(valor).strip()
 
+def _columnas_clientes(cabecera, columnas):
+    """Índices (nombre, email) de clientes.xlsx. Se buscan por la cabecera (CORREO/EMAIL, NOMBRE/TALLER); si no se
+    reconoce: A=num_cliente, B=email con dos columnas, o A=num_cliente, B=nombre, C=email con tres."""
+    titulos = [str(valor or "").strip().upper() for valor in cabecera]
+    email = next((i for i, t in enumerate(titulos) if i > 0 and ("CORREO" in t or "MAIL" in t)), None)
+    nombre = next((i for i, t in enumerate(titulos) if i > 0 and ("NOMBRE" in t or "TALLER" in t)), None)
+    if email is None:
+        email = 1 if columnas <= 2 else 2
+        if nombre is None and columnas > 2:
+            nombre = 1
+    return nombre, email
+
 def cargar_clientes_excel(ruta_clientes):
-    """Lee clientes.xlsx (A=num_cliente, B=nombre, C=email, varios separados por ';') -> {num_cliente: {"nombre", "email"}}."""
+    """Lee clientes.xlsx -> {num_cliente: {"nombre", "email"}}. Vale con A=num_cliente, B=email (sin nombre del taller)
+    o con A=num_cliente, B=nombre, C=email; varios emails separados por ';'."""
     clientes = {}
     wb = openpyxl.load_workbook(ruta_clientes, data_only=True)
     ws = wb.active
+    cabecera = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
+    col_nombre, col_email = _columnas_clientes(cabecera, ws.max_column)
+
+    def celda(fila, indice):
+        if indice is None or len(fila) <= indice or fila[indice] in (None, ""):
+            return ""
+        return str(fila[indice]).strip()
+
     for fila in ws.iter_rows(min_row=2, values_only=True):
         if not fila or fila[0] is None:
             continue
         num = _normalizar_cliente_dms(fila[0])
         if not num:
             continue
-        nombre = str(fila[1]).strip() if len(fila) > 1 and fila[1] not in (None, "") else ""
-        email = str(fila[2]).strip() if len(fila) > 2 and fila[2] not in (None, "") else ""
-        clientes[num] = {"nombre": nombre, "email": email}
+        clientes[num] = {"nombre": celda(fila, col_nombre), "email": celda(fila, col_email)}
     wb.close()
     return clientes
+
+def nombre_cliente_aviso(entrada):
+    """'TALLER (8049)' si el Excel de clientes trae el nombre; si no, 'Cliente 8049'."""
+    return f"{entrada['nombre']} ({entrada['cliente']})" if entrada.get("nombre") else f"Cliente {entrada['cliente']}"
 
 def extraer_avisos(ruta_hoja, log=lambda *a, **k: None):
     """Lee la hoja de pedido en streaming (una sola pasada) y devuelve (no_suministra, sustituciones), agrupados por cliente DMS.
@@ -1117,10 +1140,10 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
                 entrada = {"cliente": cliente_num, "nombre": nombre, "email": email, "detalle": detalle}
                 if enviar_directo:
                     bucket["enviados"].append(entrada)
-                    log(f"✅ Correo enviado ({tipo_label}) a {nombre or cliente_num} ({len(detalle)} ref.)", "success")
+                    log(f"✅ Correo enviado ({tipo_label}) a {nombre or f'cliente {cliente_num}'} ({len(detalle)} ref.)", "success")
                 elif email:
                     bucket["borradores"].append(entrada)
-                    log(f"✅ Borrador creado ({tipo_label}) para {nombre or cliente_num} ({len(detalle)} ref.)", "success")
+                    log(f"✅ Borrador creado ({tipo_label}) para {nombre or f'cliente {cliente_num}'} ({len(detalle)} ref.)", "success")
                 else:
                     bucket["sin_correo"].append(entrada)
                     log(f"⚠️ Cliente {cliente_num} sin email en el Excel de clientes ({tipo_label}); borrador creado sin destinatario.", "error")
@@ -3506,11 +3529,11 @@ class AppIntegrada(ctk.CTk):
             if enviados:
                 lineas.append(f"Correos enviados: {len(enviados)}")
                 for entrada in enviados:
-                    lineas.append(f"  • {entrada['nombre'] or entrada['cliente']} ({entrada['cliente']}): {', '.join(entrada['detalle'])}")
+                    lineas.append(f"  • {nombre_cliente_aviso(entrada)}: {', '.join(entrada['detalle'])}")
             if borradores:
                 lineas.append(f"Borradores generados: {len(borradores)}")
                 for entrada in borradores:
-                    lineas.append(f"  • {entrada['nombre'] or entrada['cliente']} ({entrada['cliente']}): {', '.join(entrada['detalle'])}")
+                    lineas.append(f"  • {nombre_cliente_aviso(entrada)}: {', '.join(entrada['detalle'])}")
             if sin_correo:
                 lineas.append(f"Sin email en el Excel de clientes ({len(sin_correo)}), borrador creado sin destinatario:")
                 for entrada in sin_correo:
