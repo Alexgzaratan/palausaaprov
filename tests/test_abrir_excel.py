@@ -59,23 +59,33 @@ def abiertos(monkeypatch):
     return lista
 
 
-def test_icono_abre_el_excel_de_stock(app, tmp_path, abiertos):
-    excel = crear(tmp_path / "S40P.xlsx")
-    app.excel_auto_entry.delete(0, "end")
-    app.excel_auto_entry.insert(0, str(excel))
-    fila = app.excel_auto_entry.master
-    icono = next(h for h in fila.winfo_children() if hasattr(h, "_pista"))
-    icono.invoke()
+def test_abrir_pedidos_stock(app, tmp_path, abiertos, monkeypatch):
+    app.config["ruta_excel_pedidos_stock"] = ""
+    excel = crear(tmp_path / "PEDIDOS STOCK.xlsx")
+    # Sin configurar: se elige una vez y queda guardado
+    monkeypatch.setattr(app_mod.filedialog, "askopenfilename", lambda **k: str(excel))
+    app.btn_pedidos_stock.invoke()
     assert abiertos == [str(excel)]
-    app.excel_auto_entry.delete(0, "end")
-    app.excel_auto_entry.insert(0, str(tmp_path / "movido.xlsx"))
-    icono.invoke()
-    assert abiertos == [str(excel)]
-    assert app.avisos.historial[-1] == ("aviso", "No se encuentra movido.xlsx: puede que se haya movido o borrado.")
+    assert configuracion.cargar_configuracion()["ruta_excel_pedidos_stock"] == str(excel)
+    assert app.pista_pedidos_stock() == "Abrir PEDIDOS STOCK.xlsx"
+    monkeypatch.setattr(app_mod.filedialog, "askopenfilename", lambda **k: pytest.fail("no debe volver a preguntar"))
+    app.btn_pedidos_stock.invoke()
+    assert abiertos == [str(excel)] * 2
+    excel.unlink()
+    app.btn_pedidos_stock.invoke()
+    assert abiertos == [str(excel)] * 2
+    assert app.avisos.historial[-1] == ("aviso", "No se encuentra PEDIDOS STOCK.xlsx: puede que se haya movido o borrado.")
 
 
-def test_solo_el_excel_de_stock_tiene_icono_de_abrir(app):
-    for campo in (app.excel_quiter_entry, app.excel_rot_entry, app.folder_rot_entry):
+def test_si_no_se_elige_nada_no_se_abre_ni_se_guarda(app, abiertos, monkeypatch):
+    app.config["ruta_excel_pedidos_stock"] = ""
+    monkeypatch.setattr(app_mod.filedialog, "askopenfilename", lambda **k: "")
+    assert app.abrir_pedidos_stock() is False
+    assert abiertos == [] and not configuracion.cargar_configuracion().get("ruta_excel_pedidos_stock")
+
+
+def test_el_excel_de_stock_no_tiene_boton_de_abrir(app):
+    for campo in (app.excel_auto_entry, app.excel_quiter_entry, app.excel_rot_entry):
         assert not any(hasattr(h, "_pista") for h in campo.master.winfo_children())
 
 
@@ -108,13 +118,17 @@ def test_abrir_informe_anterior(app, tmp_path, abiertos, monkeypatch):
     assert abiertos == [str(ayer)] * 2
 
 
-def test_carpeta_de_informes_en_configuracion(app, tmp_path):
+def test_rutas_de_los_botones_en_configuracion(app, tmp_path):
     app.tabview.set("Configuración")
     app.al_cambiar_pestana()
     app.carpeta_informes_entry.delete(0, "end")
     app.carpeta_informes_entry.insert(0, str(tmp_path))
+    app.excel_pedidos_stock_entry.delete(0, "end")
+    app.excel_pedidos_stock_entry.insert(0, str(tmp_path / "PEDIDOS STOCK.xlsx"))
     app.guardar_configuracion_ui_internal()
-    assert configuracion.cargar_configuracion()["ruta_carpeta_informes"] == str(tmp_path)
+    guardada = configuracion.cargar_configuracion()
+    assert guardada["ruta_carpeta_informes"] == str(tmp_path)
+    assert guardada["ruta_excel_pedidos_stock"] == str(tmp_path / "PEDIDOS STOCK.xlsx")
 
 
 # ---------- pista al pasar el ratón ----------

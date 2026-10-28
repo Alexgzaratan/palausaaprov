@@ -34,7 +34,7 @@ ICONOS = {
     "buscar": "", "filtro": "", "carrito": "", "calendario": "", "correo": "",
     "comparar": "", "documento": "", "coche": "", "factura": "", "reloj": "",
     "ajustes": "", "aviso": "", "check": "", "carpeta": "", "info": "",
-    "estrella": "", "estrella_llena": "", "cerrar": "", "tareas": "", "abrir": "",
+    "estrella": "", "estrella_llena": "", "cerrar": "", "tareas": "",
 }
 
 

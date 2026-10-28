@@ -112,6 +112,7 @@ CAMPOS_CONFIG = (
     ("color_resaltado", "color_optionmenu", "Amarillo"),
     ("nombre_usuario", "nombre_entry", ""),
     ("ruta_carpeta_informes", "carpeta_informes_entry", ""),
+    ("ruta_excel_pedidos_stock", "excel_pedidos_stock_entry", ""),
 )
 
 DIAS_ES = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
@@ -1748,7 +1749,7 @@ class AppIntegrada(ctk.CTk):
             ocupa_todo = columnas == 2 and posicion == len(tarjetas) - 1 and len(tarjetas) % 2 == 1
             card.grid(row=fila, column=0 if ocupa_todo else columna, columnspan=2 if ocupa_todo else 1, sticky="nsew", padx=estilo.PAD_TARJETA, pady=estilo.PAD_TARJETA)
 
-    def crear_fila_archivo(self, parent, label_text, entry_attr, config_key, placeholder, button_text, command, extensiones=(".xlsx",), abrir=False):
+    def crear_fila_archivo(self, parent, label_text, entry_attr, config_key, placeholder, button_text, command, extensiones=(".xlsx",)):
         """Fila con campo de ruta y botón Examinar/Carpeta; también admite soltar encima un archivo o carpeta
         (de carpeta si el botón es «Carpeta»; si no, un archivo con alguna de las extensiones indicadas)."""
         self.crear_etiqueta(parent, label_text, negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(0, 4))
@@ -1759,9 +1760,6 @@ class AppIntegrada(ctk.CTk):
         entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         setattr(self, entry_attr, entry)
         self.crear_boton_secundario(row, button_text, command, width=92).pack(side="right")
-        if abrir:  # icono pequeño a la izquierda de «Examinar» que abre el archivo del campo
-            self.crear_boton_abrir_icono(row, lambda campo=entry: self.abrir_archivo(campo.get(), "Elige primero el Excel."),
-                                         lambda campo=entry: f"Abrir {Path(campo.get()).name} en Excel" if campo.get().strip() else "Abrir el Excel").pack(side="right", padx=(0, 8))
         if self.arrastre_activo:
             tipo = "carpeta" if button_text == "Carpeta" else "archivo"
             try:
@@ -2213,7 +2211,7 @@ class AppIntegrada(ctk.CTk):
         contenedor = ctk.CTkScrollableFrame(self.tab_auto, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
         card = self.crear_tarjeta_tab(contenedor, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.", en_rejilla=True, icono="buscar")
-        self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]), abrir=True)
+        self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]))
         fila = self.crear_fila_ajuste(card, "Precio mínimo (EUR)")
         self.precio_entry = self.crear_entrada(fila, width=120, justify="center")
         self.precio_entry.insert(0, self.config.get("precio_min", "0"))
@@ -2223,7 +2221,13 @@ class AppIntegrada(ctk.CTk):
         self.btn_flujo = self.crear_boton_secundario(card, "Flujo completo: automatización + filtro de rotación", self.iniciar_flujo_completo, alto=estilo.ALTO_BOTON, font=estilo.fuente(estilo.TAM_BOTON, True))
         self.btn_flujo.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
         self.crear_registro(card, "Referencias consultadas", "auto_log_box", 140)
-        self.crear_boton_secundario(card, "Abrir carpeta del Excel", self.abrir_carpeta_auto).pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        botones_auto = ctk.CTkFrame(card, fg_color="transparent")
+        botones_auto.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        botones_auto.grid_columnconfigure((0, 1), weight=1, uniform="botones_auto")
+        self.crear_boton_secundario(botones_auto, "Abrir carpeta del Excel", self.abrir_carpeta_auto).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.btn_pedidos_stock = self.crear_boton_secundario(botones_auto, "Abrir pedidos stock", self.abrir_pedidos_stock)
+        self.btn_pedidos_stock.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        efectos.poner_pista(self, self.btn_pedidos_stock, self.pista_pedidos_stock)
 
         card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación según el umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.", en_rejilla=True, icono="filtro")
         self.crear_fila_archivo(card_rotacion, "Excel de Quiter", "excel_quiter_entry", "ruta_excel_quiter", "Excel de Quiter (DMS)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")]))
@@ -2376,6 +2380,9 @@ class AppIntegrada(ctk.CTk):
         self.nombre_entry = self.crear_entrada(fila, width=220, placeholder_text="Opcional")
         self.nombre_entry.insert(0, self.config.get("nombre_usuario", ""))
         self.nombre_entry.pack(side="right", padx=estilo.PAD_FILA, pady=6)
+        self.crear_fila_archivo(card, "Excel de pedidos stock (botón «Abrir pedidos stock» de Automatización)", "excel_pedidos_stock_entry", "ruta_excel_pedidos_stock",
+                                "PEDIDOS STOCK.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.excel_pedidos_stock_entry, [("Excel files", "*.xlsx *.xlsm *.xls")]),
+                                extensiones=(".xlsx", ".xlsm", ".xls"))
         self.crear_fila_archivo(card, "Carpeta de informes diarios (botón «Abrir informe anterior» del Comparador)", "carpeta_informes_entry", "ruta_carpeta_informes",
                                 "Carpeta de informes diarios...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_informes_entry))
         fila = self.crear_fila_ajuste(card, "Animaciones (apertura y «¡Capturado!»)")
@@ -2582,15 +2589,6 @@ class AppIntegrada(ctk.CTk):
 
     # ---------- abrir los Excel de un clic ----------
 
-    def crear_boton_abrir_icono(self, padre, comando, pista):
-        """Botón pequeño (solo icono) para abrir un archivo, con un rótulo al pasar el ratón."""
-        if estilo.FUENTE_ICONOS:
-            boton = self.crear_boton_secundario(padre, estilo.ICONOS["abrir"], comando, width=estilo.ALTO_CONTROL, font=estilo.fuente_icono(15))
-        else:
-            boton = self.crear_boton_secundario(padre, "Abrir", comando, width=60)
-        efectos.poner_pista(self, boton, pista)
-        return boton
-
     def abrir_archivo(self, ruta, sin_ruta="Elige primero el archivo."):
         """Abre un archivo con su programa (Excel); si falta, avisa sin ventanas."""
         ruta = str(ruta or "").strip()
@@ -2626,16 +2624,38 @@ class AppIntegrada(ctk.CTk):
             return carpeta
         carpeta = filedialog.askdirectory(title="Elige la carpeta de los informes diarios")
         if carpeta:
-            completa = cargar_configuracion()
-            completa["ruta_carpeta_informes"] = carpeta
-            guardar_configuracion(completa)
-            self.config["ruta_carpeta_informes"] = carpeta
-            campo = getattr(self, "carpeta_informes_entry", None)
-            if campo is not None and campo.winfo_exists():
-                campo.delete(0, "end")
-                campo.insert(0, carpeta)
-            self.avisar("Carpeta de informes diarios guardada. Puedes cambiarla en Configuración.", "ok")
+            self.guardar_ruta_elegida("ruta_carpeta_informes", "carpeta_informes_entry", carpeta, "Carpeta de informes diarios guardada")
         return carpeta
+
+    def guardar_ruta_elegida(self, clave, atributo, ruta, mensaje):
+        """Guarda una ruta elegida desde un botón y la refleja en su campo de Configuración si está abierto."""
+        completa = cargar_configuracion()
+        completa[clave] = ruta
+        guardar_configuracion(completa)
+        self.config[clave] = ruta
+        campo = getattr(self, atributo, None)
+        if campo is not None and campo.winfo_exists():
+            campo.delete(0, "end")
+            campo.insert(0, ruta)
+        self.avisar(f"{mensaje}. Puedes cambiarla en Configuración.", "ok")
+
+    def excel_pedidos_stock(self, preguntar=False):
+        """Excel de pedidos stock (Configuración). Si no está puesto y se pide, se elige una vez y se guarda."""
+        ruta = str(self.valor_widget_o_config("excel_pedidos_stock_entry", "ruta_excel_pedidos_stock", "") or "").strip()
+        if ruta or not preguntar:
+            return ruta
+        ruta = filedialog.askopenfilename(title="Elige el Excel de pedidos stock", filetypes=[("Excel files", "*.xlsx *.xlsm *.xls")])
+        if ruta:
+            self.guardar_ruta_elegida("ruta_excel_pedidos_stock", "excel_pedidos_stock_entry", ruta, "Excel de pedidos stock guardado")
+        return ruta
+
+    def abrir_pedidos_stock(self):
+        ruta = self.excel_pedidos_stock(preguntar=True)
+        return self.abrir_archivo(ruta) if ruta else False
+
+    def pista_pedidos_stock(self):
+        ruta = self.excel_pedidos_stock()
+        return f"Abrir {Path(ruta).name}" if ruta else "Elige el Excel de pedidos stock y ábrelo"
 
     def abrir_informe_anterior(self):
         carpeta = self.carpeta_informes(preguntar=True)
