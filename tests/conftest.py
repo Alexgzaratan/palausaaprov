@@ -41,6 +41,8 @@ def app(ventana_unica, monkeypatch):
     configuracion.guardar_configuracion(dict(CONFIG_BASE))
     ventana_unica.config.clear()
     ventana_unica.config.update(configuracion.cargar_configuracion())
+    if hasattr(ventana_unica, "tabview"):
+        ventana_unica.tabview.set("Automatización")  # cada test empieza con solo la primera pestaña construida
     ventana_unica.reconstruir_interfaz()
     ventana_unica.tabview.set("Automatización")
     ventana_unica.construir_pestana("Automatización")

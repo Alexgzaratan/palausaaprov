@@ -47,7 +47,8 @@ class GestorAvisos:
         app = self.app
         return {"ok": app.color_ok, "aviso": app.color_texto_error}.get(tipo, app.color_principal)
 
-    def mostrar(self, texto, tipo="info", duracion=None):
+    def mostrar(self, texto, tipo="info", duracion=None, accion=None):
+        """accion: (texto del botón, función), p. ej. ("Abrir", abrir_resultado); con acción dura más."""
         self.historial.append((tipo, texto))
         app = self.app
         self.activos = [m for m in self.activos if m.winfo_exists() and not getattr(m, "_cerrando", False)]
@@ -60,9 +61,23 @@ class GestorAvisos:
         if estilo.FUENTE_ICONOS:
             icono = {"ok": "check", "aviso": "aviso"}.get(tipo, "info")
             ctk.CTkLabel(marco, text=estilo.ICONOS[icono], font=estilo.fuente_icono(16), text_color=color).pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(marco, text=texto, font=estilo.fuente(), text_color=app.color_texto, wraplength=300, justify="left", anchor="w").pack(side="left", padx=(10, 16), pady=10)
+        boton = None
+        if accion:
+            texto_boton, funcion = accion
+
+            def ejecutar(m=marco, f=funcion):
+                self.cerrar(m)
+                f()
+
+            boton = ctk.CTkButton(marco, text=texto_boton, command=ejecutar, width=64, height=28, corner_radius=8, font=estilo.fuente(estilo.TAM_PEQUENO, True),
+                                  fg_color=app.color_principal, hover_color=app.color_hover, text_color="#ffffff")  # el del tema: contraste AA con blanco
+            boton.pack(side="right", padx=(0, 12), pady=10)
+            duracion = duracion or 7000
+        ctk.CTkLabel(marco, text=texto, font=estilo.fuente(), text_color=app.color_texto, wraplength=300, justify="left", anchor="w").pack(side="left", padx=(10, 12 if boton else 16), pady=10)
         for widget in [marco] + marco.winfo_children():
-            widget.bind("<Button-1>", lambda evento, m=marco: self.cerrar(m))
+            if widget is not boton:
+                widget.bind("<Button-1>", lambda evento, m=marco: self.cerrar(m))
+        marco.boton_accion = boton
         marco.texto = texto
         marco._desplazamiento = self.FUERA
         marco._y = 0

@@ -141,6 +141,8 @@ def resumen_del_dia(config, ahora=None):
             fichas.append(("calendario", "Hoja de pedidos de hoy pendiente", False))
     if config.get("usuario_madd") and ahora.weekday() < 5 and os.path.exists(LOG_FACTURAS_MADD):
         hoy = ahora.strftime("%Y-%m-%d")
+        # Las facturas que envía hoy la tarea diaria son las del día laborable anterior (o las de hoy, según la configuración)
+        objetivo = (ahora.date() if config.get("filtro_dia_facturas_madd") == "Hoy" else _dia_laborable_anterior(ahora.date())).isoformat()
         estado = None
         try:
             with open(LOG_FACTURAS_MADD, encoding="utf-8") as f:
@@ -148,6 +150,8 @@ def resumen_del_dia(config, ahora=None):
                 for linea in f:
                     if linea.startswith("--- CORREO [" + hoy):
                         bloque_hoy = linea.split(" ")[3][:5]  # "--- CORREO [AAAA-MM-DD HH:MM:SS] ---" -> "HH:MM"
+                    elif bloque_hoy and linea.startswith("Fecha objetivo:") and linea.split(":", 1)[1].strip() != objetivo:
+                        bloque_hoy = None  # correo de otro día (p. ej. un reenvío)
                     elif bloque_hoy and linea.startswith("Estado:"):
                         estado = (bloque_hoy, linea.split(":", 1)[1].strip())
                         bloque_hoy = None
@@ -1477,14 +1481,14 @@ def _madd_enviar_aviso_fallo(email_aviso, fecha_objetivo, resultado, log):
         log(f"⚠️ El aviso de fallo para {email_aviso} sigue en la bandeja de salida de Outlook.", "error")
     registrar_estado_correo_madd(fecha_objetivo, f"aviso de fallo: {estado}", f"Destinatarios: {email_aviso}")
 
-def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email_aviso_fallo, filtro_dia="Ayer", log_callback=None, finalizado_callback=None, resultado_callback=None):
+def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email_aviso_fallo, filtro_dia="Ayer", log_callback=None, finalizado_callback=None, resultado_callback=None, fecha_objetivo=None):
     global madd_running
     madd_running = True
     def log(texto, tag=None):
         if log_callback: log_callback(f"[FACTURAS MADD] {texto}", tag)
     log("Iniciando descarga de facturas Stellantis MADD...")
     hoy = datetime.now().date()
-    fecha_objetivo = hoy if filtro_dia == "Hoy" else _dia_laborable_anterior(hoy)
+    fecha_objetivo = fecha_objetivo or (hoy if filtro_dia == "Hoy" else _dia_laborable_anterior(hoy))
     resultado = {"facturas": [], "error": None, "paso_fallido": None}
     try:
         resultado = ejecutar_descarga_facturas_madd(usuario, password, carpeta_destino, {fecha_objetivo}, log)
@@ -1507,6 +1511,8 @@ def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email
             log(f"❌ No se pudo enviar el aviso de fallo: {e2}", "error")
     finally:
         madd_running = False
+        detalle = "falló" if resultado.get("error") else f"{len(resultado.get('facturas') or [])} facturas del {fecha_objetivo:%d/%m}"
+        registrar_ultima_ejecucion("madd", detalle)
         if resultado_callback: resultado_callback(resultado)
         if finalizado_callback: finalizado_callback()
 
@@ -1523,6 +1529,78 @@ def ejecutar_tarea_madd_standalone():
         registrar_error_detallado("Configuración incompleta para la tarea MADD (usuario/password/carpeta/email).", "", ref="madd_standalone")
         return
     tarea_facturas_madd(usuario, password, carpeta, email_destino, email_aviso, filtro_dia=filtro_dia, log_callback=None)
+
+# ---------- «Última vez» de cada tarea (se guarda en la configuración, clave ultimas_ejecuciones) ----------
+
+def registrar_ultima_ejecucion(clave, detalle="", ahora=None):
+    """Apunta cuándo terminó una tarea. Lo usan la app y la tarea programada de facturas."""
+    try:
+        completa = cargar_configuracion()
+        ultimas = dict(completa.get("ultimas_ejecuciones") or {})
+        ultimas[clave] = {"cuando": (ahora or datetime.now()).isoformat(timespec="seconds"), "detalle": detalle}
+        completa["ultimas_ejecuciones"] = ultimas
+        guardar_configuracion(completa)
+        return ultimas[clave]
+    except Exception as e:
+        registrar_error_detallado(f"No se pudo guardar la última ejecución de {clave}: {e}", traceback.format_exc())
+        return None
+
+
+def texto_ultima_vez(info, ahora=None):
+    """'Última vez: hoy 09:42 · 24 de 46 líneas' (ayer / dd/mm para días anteriores); '' si nunca."""
+    if not info or not info.get("cuando"):
+        return ""
+    try:
+        cuando = datetime.fromisoformat(info["cuando"])
+    except ValueError:
+        return ""
+    hoy = (ahora or datetime.now()).date()
+    if cuando.date() == hoy:
+        dia = "hoy"
+    elif cuando.date() == hoy - timedelta(days=1):
+        dia = "ayer"
+    else:
+        dia = cuando.strftime("%d/%m")
+    detalle = info.get("detalle") or ""
+    return f"Última vez: {dia} {cuando:%H:%M}" + (f" · {detalle}" if detalle else "")
+
+
+# ---------- reenviar las facturas de un día ----------
+
+def interpretar_fecha_pasada(texto, hoy=None):
+    """'hoy', 'ayer', 'dd/mm' o 'dd/mm/aa(aa)' -> date de hoy o anterior (un dd/mm aún por llegar es del año pasado).
+    Lanza ValueError si no se entiende o si es futura."""
+    hoy = hoy or datetime.now().date()
+    texto = (texto or "").strip().lower()
+    if texto == "hoy":
+        return hoy
+    if texto == "ayer":
+        return hoy - timedelta(days=1)
+    partes = re.fullmatch(r"(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2}|\d{4}))?", texto)
+    if not partes:
+        raise ValueError("Escribe el día como dd/mm (por ejemplo 06/10) o «ayer».")
+    dia, mes, anio = int(partes.group(1)), int(partes.group(2)), partes.group(3)
+    try:
+        if anio:
+            fecha = datetime(int(anio) + (2000 if len(anio) == 2 else 0), mes, dia).date()
+        else:
+            fecha = datetime(hoy.year, mes, dia).date()
+            if fecha > hoy:
+                fecha = datetime(hoy.year - 1, mes, dia).date()
+    except ValueError:
+        raise ValueError(f"El día {texto} no existe.")
+    if fecha > hoy:
+        raise ValueError("No se pueden enviar facturas de un día que aún no ha llegado.")
+    return fecha
+
+
+def facturas_locales_del_dia(carpeta, fecha):
+    """PDF ya descargados de ese día en la carpeta de facturas (Factura_<número>_AAAA-MM-DD.pdf)."""
+    try:
+        return sorted(Path(carpeta).glob(f"Factura_*_{fecha.isoformat()}.pdf"))
+    except OSError:
+        return []
+
 
 # ---------------------------------------------------
 # 6. INTERFAZ GRÁFICA
@@ -1688,7 +1766,7 @@ class AppIntegrada(ctk.CTk):
         kw.setdefault("dropdown_font", estilo.fuente())
         return ctk.CTkOptionMenu(parent, values=valores, height=estilo.ALTO_CONTROL, corner_radius=estilo.RADIO, fg_color=self.color_principal, button_color=self.color_principal, button_hover_color=self.color_hover, command=comando, **kw)
 
-    def crear_tarjeta_tab(self, tab, titulo, subtitulo, en_rejilla=False, icono=None):
+    def crear_tarjeta_tab(self, tab, titulo, subtitulo, en_rejilla=False, icono=None, ultima_vez=None):
         card = ctk.CTkFrame(tab, fg_color=self.color_superficie, corner_radius=estilo.RADIO_TARJETA, border_width=1, border_color=self.color_borde)
         if en_rejilla:
             self.registrar_tarjeta(tab, card)
@@ -1699,6 +1777,12 @@ class AppIntegrada(ctk.CTk):
         if icono and estilo.FUENTE_ICONOS:
             ctk.CTkLabel(fila_titulo, text=estilo.ICONOS[icono], font=estilo.fuente_icono(), text_color=self.color_principal).pack(side="left", padx=(0, 10))
         ctk.CTkLabel(fila_titulo, text=titulo, font=estilo.fuente_titulo(), text_color=self.color_texto).pack(side="left")
+        if ultima_vez:  # cuándo se hizo por última vez, a la derecha del título (sin ocupar más alto)
+            etiqueta = self.crear_etiqueta(fila_titulo, texto_ultima_vez((self.config.get("ultimas_ejecuciones") or {}).get(ultima_vez)), estilo.TAM_PEQUENO, secundario=True)
+            etiqueta.pack(side="right", padx=(12, 0))
+            if not hasattr(self, "etiquetas_ultima_vez"):
+                self.etiquetas_ultima_vez = {}
+            self.etiquetas_ultima_vez[ultima_vez] = etiqueta
         etiqueta_subtitulo = self.crear_etiqueta(card, subtitulo, secundario=True, wraplength=470, justify="left")
         etiqueta_subtitulo.pack(anchor="w", padx=estilo.PAD_X, pady=(0, 8))
         card.bind("<Configure>", lambda evento, etiqueta=etiqueta_subtitulo: self.ajustar_subtitulo(etiqueta, evento.width), add="+")
@@ -1758,6 +1842,8 @@ class AppIntegrada(ctk.CTk):
         entry = self.crear_entrada(row, placeholder_text=placeholder)
         entry.insert(0, self.config.get(config_key, ""))
         entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        entry._valor_anterior = entry.get().strip()
+        entry.bind("<FocusOut>", lambda evento, campo=entry: self.campo_cambiado(campo), add="+")
         setattr(self, entry_attr, entry)
         self.crear_boton_secundario(row, button_text, command, width=92).pack(side="right")
         if self.arrastre_activo:
@@ -1785,12 +1871,14 @@ class AppIntegrada(ctk.CTk):
             return False
         entrada.delete(0, "end")
         entrada.insert(0, ruta.replace("\\", "/"))  # mismo formato que «Examinar»
+        self.campo_cambiado(entrada)
         return True
 
-    def avisar(self, texto, tipo="info", duracion=None):
-        """Aviso que no interrumpe (abajo a la derecha, se va solo). tipo: 'info', 'ok' o 'aviso'."""
+    def avisar(self, texto, tipo="info", duracion=None, accion=None):
+        """Aviso que no interrumpe (abajo a la derecha, se va solo). tipo: 'info', 'ok' o 'aviso'.
+        accion: (texto del botón, función), p. ej. ("Abrir", ...)."""
         try:
-            return self.avisos.mostrar(texto, tipo, duracion)
+            return self.avisos.mostrar(texto, tipo, duracion, accion)
         except Exception:
             self.agregar_log(texto, "error" if tipo == "aviso" else ("success" if tipo == "ok" else None))
             return None
@@ -2210,8 +2298,9 @@ class AppIntegrada(ctk.CTk):
     def build_tab_auto(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_auto, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.", en_rejilla=True, icono="buscar")
+        card = self.crear_tarjeta_tab(contenedor, "Consulta de disponibilidad", "Carga tu Excel y ejecuta la consulta paralela contra el portal.", en_rejilla=True, ultima_vez="auto", icono="buscar")
         self.crear_fila_archivo(card, "Excel de stock", "excel_auto_entry", "ruta_excel_auto", "Excel de stock...", "Examinar", lambda: self.seleccionar_archivo(self.excel_auto_entry, [("Excel files", "*.xlsx")]))
+        self.excel_auto_entry._al_cambiar = self.al_cambiar_excel_stock
         fila = self.crear_fila_ajuste(card, "Precio mínimo (EUR)")
         self.precio_entry = self.crear_entrada(fila, width=120, justify="center")
         self.precio_entry.insert(0, self.config.get("precio_min", "0"))
@@ -2229,7 +2318,7 @@ class AppIntegrada(ctk.CTk):
         self.btn_pedidos_stock.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         efectos.poner_pista(self, self.btn_pedidos_stock, self.pista_pedidos_stock)
 
-        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación según el umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.", en_rejilla=True, icono="filtro")
+        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación según el umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.", en_rejilla=True, ultima_vez="rotacion", icono="filtro")
         self.crear_fila_archivo(card_rotacion, "Excel de Quiter", "excel_quiter_entry", "ruta_excel_quiter", "Excel de Quiter (DMS)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_rotacion, "Archivo de propuesta", "excel_rot_entry", "ruta_excel_rotacion", "Archivo PROPUESTAPEDIDO.xls...", "Examinar", lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")]), extensiones=(".xls", ".xlsx"))
         self.crear_fila_archivo(card_rotacion, "Carpeta destino", "folder_rot_entry", "ruta_folder_rotacion", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_rot_entry))
@@ -2262,14 +2351,14 @@ class AppIntegrada(ctk.CTk):
     def build_tab_pedidos(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_pedidos, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.", en_rejilla=True, icono="carrito")
+        card = self.crear_tarjeta_tab(contenedor, "Generación de pedidos", "Convierte el Excel urgente en lotes CSV y guarda copia de seguridad antes de limpiar.", en_rejilla=True, ultima_vez="pedidos", icono="carrito")
         self.crear_fila_archivo(card, "Excel urgente", "excel_pedidos_entry", "ruta_excel_pedidos", "Excel URGENTE.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.excel_pedidos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_pedidos_entry", "ruta_folder_pedidos", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_pedidos_entry))
         self.btn_pedidos = self.crear_boton_principal(card, "Generar pedidos", self.toggle_pedidos)
         self.btn_pedidos.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
         self.crear_registro(card, "Números de pedido generados", "pedidos_generados_box", 90, pady_final=14)
 
-        card_hoja = self.crear_tarjeta_tab(contenedor, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.", en_rejilla=True, icono="calendario")
+        card_hoja = self.crear_tarjeta_tab(contenedor, "Hoja de pedidos del día", "Crea una copia en blanco de la plantilla, guardada con la fecha de hoy dentro de HOJAS DE PEDIDO.", en_rejilla=True, ultima_vez="hoja", icono="calendario")
         self.crear_fila_archivo(card_hoja, "Plantilla de hoja", "plantilla_hoja_entry", "ruta_plantilla_hojas", "HOJA DE PEDIDOS.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.plantilla_hoja_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_hoja, "Carpeta HOJAS DE PEDIDO", "carpeta_hojas_entry", "ruta_carpeta_hojas", "Carpeta HOJAS DE PEDIDO...", "Carpeta", lambda: self.seleccionar_carpeta(self.carpeta_hojas_entry))
         fila_hoja = ctk.CTkFrame(card_hoja, fg_color="transparent")
@@ -2280,8 +2369,11 @@ class AppIntegrada(ctk.CTk):
         self.btn_abrir_hoja.pack(side="right")
         efectos.poner_pista(self, self.btn_abrir_hoja, lambda: f"Abrir {self.ruta_hoja_de_hoy().name}" if self.ruta_hoja_de_hoy() else "")
 
-        card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.", en_rejilla=True, icono="correo")
+        card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.", en_rejilla=True, ultima_vez="avisos", icono="correo")
         self.crear_fila_archivo(card_avisos, "Hoja de pedido a procesar", "hoja_avisos_entry", "ruta_hoja_avisos", "Hoja dd-mm-aaaa.xlsx ya rellenada...", "Examinar", lambda: self.seleccionar_archivo(self.hoja_avisos_entry, [("Excel files", "*.xlsx")]))
+        boton_hoy = self.crear_boton_secundario(self.hoja_avisos_entry.master, "Hoy", self.usar_hoja_de_hoy_en_avisos, width=56)
+        boton_hoy.pack(side="right", padx=(0, 8))
+        efectos.poner_pista(self, boton_hoy, lambda: f"Usar la hoja de hoy ({self.ruta_hoja_de_hoy().name})" if self.ruta_hoja_de_hoy() else "")
         self.crear_fila_archivo(card_avisos, "Excel de clientes", "clientes_avisos_entry", "ruta_excel_clientes", "clientes.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.clientes_avisos_entry, [("Excel files", "*.xlsx")]))
         self.crear_campo_en_fila(card_avisos, "Correo(s) de compañeros (se les envía la hoja de pedido completa)", "email_companeros_avisos_entry", "email_companeros_avisos", "", placeholder_text="correo1@palausa.es; correo2@palausa.es")
         self.avisos_auto_var = ctk.BooleanVar(value=self.config.get("avisos_envio_automatico", True))
@@ -2289,11 +2381,12 @@ class AppIntegrada(ctk.CTk):
         self.btn_avisos = self.crear_boton_principal(card_avisos, "Generar avisos de no suministro", self.iniciar_avisos_no_suministro)
         self.btn_avisos.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
         self.crear_registro(card_avisos, "Registro de avisos", "avisos_log_box", 110, pady_final=14)
+        self.after(400, self.sugerir_hoja_de_hoy_en_avisos)
 
     def build_tab_comparador(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_comparador, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.", en_rejilla=True, icono="comparar")
+        card = self.crear_tarjeta_tab(contenedor, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.", en_rejilla=True, ultima_vez="comparador", icono="comparar")
         self.crear_fila_archivo(card, "Excel antiguo", "excel_old_entry", "ruta_excel_antiguo", "Excel antiguo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_old_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Excel nuevo", "excel_new_entry", "ruta_excel_nuevo", "Excel nuevo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_new_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_comp_entry", "ruta_folder_comparador", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_comp_entry))
@@ -2313,7 +2406,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_mopar(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_mopar, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.", en_rejilla=True, icono="documento")
+        card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.", en_rejilla=True, ultima_vez="mopar", icono="documento")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]), extensiones=(".xls",))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_mopar_entry", "ruta_folder_mopar", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_mopar_entry))
         self.btn_mopar = self.crear_boton_principal(card, "Generar fichero Mopar", self.toggle_mopar)
@@ -2323,7 +2416,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_stock_fiat(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_stock_fiat, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.", en_rejilla=True, icono="coche")
+        card = self.crear_tarjeta_tab(contenedor, "Stock FIAT", "Transforma el Excel en ficheros TXT con el mismo formato final de Mopar.", en_rejilla=True, ultima_vez="stock_fiat", icono="coche")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files (.xls)", "*.xls")]), extensiones=(".xls",))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_stock_fiat_entry", "ruta_folder_stock_fiat", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_stock_fiat_entry))
         self.btn_stock_fiat = self.crear_boton_principal(card, "Generar Stock FIAT", self.toggle_stock_fiat)
@@ -2332,7 +2425,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_madd(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_madd, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Facturas Stellantis MADD", "Descarga diaria de facturas desde el portal MADD (www.madd.stellantis.com) y envía un correo con los PDF adjuntos.", en_rejilla=True, icono="factura")
+        card = self.crear_tarjeta_tab(contenedor, "Facturas Stellantis MADD", "Descarga diaria de facturas desde el portal MADD (www.madd.stellantis.com) y envía un correo con los PDF adjuntos.", en_rejilla=True, ultima_vez="madd", icono="factura")
         self.crear_bloque_credenciales(card, [
             ("Usuario MADD", "usuario_madd_entry", "usuario_madd", "", False),
             ("Contraseña MADD", "password_madd_entry", "password_madd", "", True),
@@ -2346,6 +2439,13 @@ class AppIntegrada(ctk.CTk):
         self.filtro_dia_madd_option.pack(side="right", padx=estilo.PAD_FILA, pady=6)
         self.btn_madd = self.crear_boton_principal(card, "Ejecutar ahora (prueba manual)", self.iniciar_facturas_madd)
         self.btn_madd.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
+        fila = self.crear_fila_ajuste(card, "Reenviar las facturas de un día")
+        self.btn_reenviar_madd = self.crear_boton_secundario(fila, "Reenviar", self.reenviar_facturas_dia, width=92)
+        self.btn_reenviar_madd.pack(side="right", padx=(0, estilo.PAD_FILA), pady=6)
+        self.fecha_reenvio_madd_entry = self.crear_entrada(fila, width=130, placeholder_text="dd/mm o «ayer»", justify="center")
+        self.fecha_reenvio_madd_entry.pack(side="right", padx=(0, 8), pady=6)
+        self.fecha_reenvio_madd_entry.bind("<Return>", lambda evento: (self.reenviar_facturas_dia(), "break")[1])
+        efectos.poner_pista(self, self.btn_reenviar_madd, "Usa los PDF de ese día que ya estén en la carpeta; si no hay, los descarga de MADD")
         self.crear_registro(card, "Registro de la ejecución", "madd_log_box", 140, pady_final=14)
 
         card_prog = self.crear_tarjeta_tab(contenedor, "Programación diaria", "Cuando compruebes que la ejecución manual funciona bien, activa la tarea de Windows para que corra sola todos los días laborables a las 07:00 (despierta el PC si está en suspensión).", en_rejilla=True, icono="reloj")
@@ -2677,11 +2777,188 @@ class AppIntegrada(ctk.CTk):
         informe = informe_diario_anterior(carpeta) if os.path.isdir(carpeta) else None
         return f"Abrir {informe.name}" if informe else "No hay ningún informe anterior a hoy"
 
+    # ---------- «Última vez» en el título de cada tarjeta ----------
+
+    def registrar_ejecucion(self, clave, detalle=""):
+        info = registrar_ultima_ejecucion(clave, detalle)
+        if info is not None:
+            self.config.setdefault("ultimas_ejecuciones", {})[clave] = info
+        self.refrescar_ultima_vez(clave, desde_disco=False)
+
+    def refrescar_ultima_vez(self, clave, desde_disco=True):
+        if desde_disco:  # la tarea programada de facturas escribe en el archivo desde otro proceso
+            self.config["ultimas_ejecuciones"] = cargar_configuracion().get("ultimas_ejecuciones") or {}
+        etiqueta = getattr(self, "etiquetas_ultima_vez", {}).get(clave)
+        if etiqueta is not None and etiqueta.winfo_exists():
+            etiqueta.configure(text=texto_ultima_vez((self.config.get("ultimas_ejecuciones") or {}).get(clave)))
+
+    # ---------- rellenar solos los campos del pedido de la semana ----------
+
+    def campo_cambiado(self, entrada):
+        """Avisa al campo de que su valor ha cambiado (Examinar, soltar un archivo o escribir y salir)."""
+        actual = entrada.get().strip()
+        anterior = getattr(entrada, "_valor_anterior", "")
+        if actual == anterior:
+            return
+        entrada._valor_anterior = actual
+        al_cambiar = getattr(entrada, "_al_cambiar", None)
+        if al_cambiar:
+            al_cambiar(actual, anterior)
+
+    def poner_en_campo(self, atributo, valor):
+        campo = getattr(self, atributo, None)
+        if campo is None or not campo.winfo_exists():
+            return False
+        campo.delete(0, "end")
+        campo.insert(0, valor)
+        campo._valor_anterior = valor
+        return True
+
+    def al_cambiar_excel_stock(self, ruta, anterior):
+        """Al elegir el Excel de stock de un pedido (p. ej. S40P.xlsx) se ponen también el Excel de Quiter
+        (si seguía al de stock) y la propuesta S40PR.xls de la carpeta de rotación, si ya está exportada."""
+        if not ruta:
+            return
+        pedido = Path(ruta).stem
+        cambios = []
+        quiter = getattr(self, "excel_quiter_entry", None)
+        if quiter is not None and quiter.winfo_exists() and quiter.get().strip() in ("", anterior) and quiter.get().strip() != ruta:
+            self.poner_en_campo("excel_quiter_entry", ruta)
+            cambios.append("el Excel de Quiter")
+        carpeta_rotacion = str(self.valor_widget_o_config("folder_rot_entry", "ruta_folder_rotacion", "") or "").strip()
+        carpetas = [Path(c) for c in (carpeta_rotacion, str(Path(ruta).parent / "ROTACION")) if c]
+        propuesta = next((carpeta / f"{pedido}R{extension}" for carpeta in carpetas for extension in (".xls", ".xlsx")
+                          if (carpeta / f"{pedido}R{extension}").is_file()), None)
+        if propuesta is not None:
+            valor = propuesta.as_posix()
+            if self.widget_get("excel_rot_entry").strip() != valor and self.poner_en_campo("excel_rot_entry", valor):
+                cambios.append(f"su propuesta {propuesta.name}")
+        falta = f"Aún no está la propuesta {pedido}R.xls en {Path(carpeta_rotacion).name}: elígela cuando la exportes." if propuesta is None and carpeta_rotacion else ""
+        if cambios:
+            self.avisar(f"Pedido {pedido}: he puesto también " + " y ".join(cambios) + "." + (f" {falta}" if falta else ""), "info" if falta else "ok")
+        elif falta:
+            self.avisar(falta)
+
+    def sugerir_hoja_de_hoy_en_avisos(self):
+        """Si la hoja a procesar en Avisos no es la de hoy y la de hoy existe, lo propone con un botón (sin cambiarla sola)."""
+        campo = getattr(self, "hoja_avisos_entry", None)
+        hoja = self.ruta_hoja_de_hoy()
+        if campo is None or not campo.winfo_exists() or hoja is None or not hoja.exists():
+            return
+        actual = campo.get().strip()
+        if actual and Path(actual).resolve() == hoja.resolve():
+            return
+        texto = f"En Avisos de no suministro tienes la hoja {Path(actual).name}." if actual else "En Avisos de no suministro no hay hoja elegida."
+        self.avisar(texto + " ¿Usar la de hoy?", accion=("Usar", self.usar_hoja_de_hoy_en_avisos), duracion=9000)
+
+    def usar_hoja_de_hoy_en_avisos(self):
+        hoja = self.ruta_hoja_de_hoy()
+        if hoja is None or not hoja.exists():
+            self.avisar("Todavía no hay hoja de hoy: pulsa «Generar hoja de hoy».")
+            return False
+        self.poner_en_campo("hoja_avisos_entry", hoja.as_posix())
+        return True
+
+    # ---------- recordatorio de tareas al abrir ----------
+
+    def recordar_tareas(self):
+        hoy = datetime.now().date()
+        pendientes = [t for t in self.lista_tareas.tareas if not t["hecha"]]
+        para_hoy = sum(1 for t in pendientes if tareas.estado_fecha(t["fecha"], hoy) == "hoy")
+        vencidas = sum(1 for t in pendientes if tareas.estado_fecha(t["fecha"], hoy) == "vencida")
+        if not para_hoy and not vencidas:
+            return None
+        partes = []
+        if para_hoy:
+            partes.append(f"{para_hoy} tarea{'s' if para_hoy != 1 else ''} para hoy")
+        if vencidas:
+            partes.append(f"{vencidas} vencida{'s' if vencidas != 1 else ''}")
+        return self.avisar("Tienes " + " y ".join(partes) + ".", "aviso" if vencidas else "info", duracion=9000, accion=("Ver", self.ir_a_tareas))
+
+    # ---------- reenviar las facturas de un día ----------
+
+    def reenviar_facturas_dia(self):
+        global madd_running
+        if self.hay_tarea_activa():
+            return False
+        self.guardar_configuracion_ui_internal()
+        try:
+            fecha = interpretar_fecha_pasada(self.widget_get("fecha_reenvio_madd_entry"))
+        except ValueError as e:
+            self.avisar(str(e), "aviso")
+            return False
+        carpeta = self.widget_get("carpeta_facturas_madd_entry")
+        email_destino = self.widget_get("email_facturas_madd_entry")
+        if not self.validar_carpeta(carpeta, "Selecciona la carpeta donde se guardan las facturas."):
+            return False
+        if not email_destino or correos_invalidos(email_destino):
+            messagebox.showwarning("Aviso", "Revisa el correo de destino de las facturas (varios separados por ;).")
+            return False
+        rutas = facturas_locales_del_dia(carpeta, fecha)
+        dia = fecha.strftime("%d/%m/%Y")
+        if rutas:
+            if not messagebox.askyesno("Reenviar facturas", f"Se enviará a {email_destino} el correo «Facturas Stellantis del {fecha.isoformat()}» "
+                                       f"con las {len(rutas)} facturas del {dia} que ya tienes en la carpeta.\n\n¿Enviar?"):
+                return False
+
+            def trabajo():
+                global madd_running
+                log = lambda t, tag=None: self.after(0, self.log_callback_madd, f"[FACTURAS MADD] {t}", tag)
+                error = None
+                try:
+                    log(f"Reenviando las {len(rutas)} facturas del {dia}...")
+                    _madd_enviar_correo_resultado(email_destino, fecha, [str(r) for r in rutas], log)
+                except Exception as e:
+                    error = str(e)
+                    log(f"❌ No se pudo reenviar: {e}", "error")
+                    registrar_error_detallado(str(e), traceback.format_exc(), ref="reenviar_facturas_dia")
+                finally:
+                    madd_running = False
+                    self.after(0, self.finalizar_reenvio_facturas, fecha, len(rutas), error)
+
+            hilo = threading.Thread(target=trabajo, daemon=True)
+        else:
+            usuario, password = self.widget_get("usuario_madd_entry"), self.widget_get("password_madd_entry")
+            if not usuario or not password:
+                messagebox.showwarning("Aviso", f"No hay facturas del {dia} en la carpeta. Para descargarlas de MADD completa el usuario y la contraseña.")
+                return False
+            if not messagebox.askyesno("Reenviar facturas", f"No hay facturas del {dia} en la carpeta.\n\n¿Descargarlas de MADD y enviarlas a {email_destino}? "
+                                       "(Si ese día no hubo facturas, se enviará el aviso de «no hay facturas».)"):
+                return False
+            hilo = threading.Thread(target=tarea_facturas_madd, args=(usuario, password, carpeta, email_destino, self.widget_get("email_aviso_fallo_madd_entry")),
+                                    kwargs={"fecha_objetivo": fecha,
+                                            "log_callback": lambda t, tag=None: self.after(0, self.log_callback_madd, t, tag),
+                                            "finalizado_callback": lambda: self.after(0, self.finalizar_reenvio_facturas, fecha, None, None)},
+                                    daemon=True)
+        self.actualizar_estado(f"reenviando las facturas del {dia}")
+        self.btn_reenviar_madd.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_reenviar_madd, "Enviando")
+        self.limpiar_caja(self.madd_log_box)
+        madd_running = True
+        hilo.start()
+        return True
+
+    def finalizar_reenvio_facturas(self, fecha, cuantas, error):
+        dia = fecha.strftime("%d/%m")
+        boton = getattr(self, "btn_reenviar_madd", None)
+        if boton is not None and boton.winfo_exists():
+            boton.configure(text="Reenviar", state="normal")
+        self.actualizar_estado(f"reenvío de las facturas del {dia} terminado")
+        if error:
+            self.avisar(f"No se pudieron reenviar las facturas del {dia}: revisa el registro.", "aviso")
+        else:
+            self.avisar(f"Reenvío de las facturas del {dia} terminado: revisa el registro.", "ok")
+            if cuantas is not None:  # con descarga, la propia tarea apunta la última vez
+                self.registrar_ejecucion("madd", f"reenvío del {dia} ({cuantas} facturas)")
+        self.refrescar_ultima_vez("madd")
+        self.actualizar_resumen()
+
     def seleccionar_archivo(self, entry, tipos):
         ruta = filedialog.askopenfilename(filetypes=tipos)
         if ruta:
             entry.delete(0, "end")
             entry.insert(0, ruta)
+            self.campo_cambiado(entry)
 
     def seleccionar_carpeta(self, entry):
         ruta = filedialog.askdirectory()
@@ -2972,12 +3249,17 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("automatización finalizada", self.excel_auto_entry.get())
         self.btn_auto.configure(text="Iniciar automatización", fg_color=acc_color, hover_color=self.color_hover, state="normal")
+        ruta_excel = self.excel_auto_entry.get()
+        abrir = ("Abrir", lambda: self.abrir_archivo(ruta_excel))
         if stop_event_auto.is_set() or auto_resultado == "detenida":
             self.avisar("Automatización detenida.")
+            self.registrar_ejecucion("auto", "detenida")
         elif auto_resultado == "completa":
-            self.avisar("Automatización terminada: se han consultado todas las referencias.", "ok")
+            self.avisar("Automatización terminada: se han consultado todas las referencias.", "ok", accion=abrir)
+            self.registrar_ejecucion("auto", f"{Path(ruta_excel).stem} completa")
         else:
-            self.avisar("La automatización terminó con incidencias: revisa el registro.", "aviso")
+            self.avisar("La automatización terminó con incidencias: revisa el registro.", "aviso", accion=abrir)
+            self.registrar_ejecucion("auto", f"{Path(ruta_excel).stem} con incidencias")
 
     def toggle_pedidos(self):
         global pedidos_running
@@ -3009,7 +3291,9 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("pedidos generados", self.folder_pedidos_entry.get())
         self.btn_pedidos.configure(text="Generar pedidos", fg_color=acc_color, hover_color=self.color_hover, state="normal")
-        self.avisar("Generación de pedidos terminada: revisa el registro.")
+        carpeta_pedidos = self.folder_pedidos_entry.get()
+        self.avisar("Generación de pedidos terminada: revisa el registro.", accion=("Carpeta", lambda: self.abrir_directorio(carpeta_pedidos)))
+        self.registrar_ejecucion("pedidos")
 
     def iniciar_hoja_pedidos(self, forzar=False, automatico=False):
         global hoja_pedidos_running
@@ -3052,7 +3336,8 @@ class AppIntegrada(ctk.CTk):
         if boton is not None:
             boton.configure(text="Generar hoja de hoy", fg_color=acc_color, hover_color=self.color_hover, state="normal")
         if ruta.exists():
-            self.avisar(f"Hoja de pedidos de hoy lista: {ruta.name}", "ok")
+            self.avisar(f"Hoja de pedidos de hoy lista: {ruta.name}", "ok", accion=("Abrir", lambda: self.abrir_archivo(ruta)))
+            self.registrar_ejecucion("hoja", ruta.stem)
 
     def comprobar_hoja_pedidos_al_inicio(self):
         plantilla = self.config.get("ruta_plantilla_hojas", "")
@@ -3126,6 +3411,7 @@ class AppIntegrada(ctk.CTk):
         self.actualizar_estado("avisos de no suministro procesados")
         self.btn_avisos.configure(text="Generar avisos de no suministro", fg_color=acc_color, hover_color=self.color_hover, state="normal")
         self.avisar("Avisos de no suministro procesados: revisa el registro.")
+        self.registrar_ejecucion("avisos", Path(self.widget_get("hoja_avisos_entry")).stem)
 
     def mostrar_resultado_avisos(self, resultado):
         if resultado.get("error"):
@@ -3198,7 +3484,9 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("comparación finalizada", str(Path(self.folder_comp_entry.get()) / "resultado_comparacion.xlsx"))
         self.btn_comparador.configure(text="Comparar Excels", fg_color=acc_color, hover_color=self.color_hover, state="normal")
-        self.avisar("Comparación terminada: resultado_comparacion.xlsx")
+        resultado = Path(self.folder_comp_entry.get()) / "resultado_comparacion.xlsx"
+        self.avisar("Comparación terminada: resultado_comparacion.xlsx", accion=("Abrir", lambda: self.abrir_archivo(resultado)) if resultado.exists() else None)
+        self.registrar_ejecucion("comparador")
 
     def iniciar_filtro_rotacion(self):
         global filtro_rotacion_running
@@ -3253,13 +3541,15 @@ class AppIntegrada(ctk.CTk):
         if generado is None:
             self.avisar("El filtro de rotación terminó sin generar el Excel: revisa el registro de rotación.", "aviso")
             return
-        self.avisar(f"Rotación completada: {Path(generado).name}", "ok")
+        self.avisar(f"Rotación completada: {Path(generado).name}", "ok", accion=("Abrir", lambda: self.abrir_archivo(generado)))
+        try:
+            marcadas, total = lineas_marcadas_rotacion(generado)
+        except Exception:
+            marcadas, total = [], 0
+        pedido = Path(generado).stem.removesuffix("_ROTACION")
+        self.registrar_ejecucion("rotacion", f"{pedido}: {len(marcadas)} de {total} líneas" if total else pedido)
         if del_flujo:
-            try:
-                marcadas, total = lineas_marcadas_rotacion(generado)
-            except Exception:
-                marcadas, total = [], 0
-            self.mostrar_captura(len(marcadas), total, Path(generado).stem.removesuffix("_ROTACION"))
+            self.mostrar_captura(len(marcadas), total, pedido)
 
     # ---------- vista previa del umbral y lista para Quiter ----------
 
@@ -3496,7 +3786,9 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("descarga de facturas MADD finalizada", self.widget_get("carpeta_facturas_madd_entry"))
         self.btn_madd.configure(text="Ejecutar ahora (prueba manual)", fg_color=acc_color, hover_color=self.color_hover, state="normal")
-        self.avisar("Descarga de facturas MADD terminada: revisa el registro.")
+        carpeta_facturas = self.widget_get("carpeta_facturas_madd_entry")
+        self.avisar("Descarga de facturas MADD terminada: revisa el registro.", accion=("Carpeta", lambda: self.abrir_directorio(carpeta_facturas)))
+        self.refrescar_ultima_vez("madd")
         self.actualizar_resumen()
 
     def activar_tarea_programada_madd(self):
@@ -3579,13 +3871,17 @@ class AppIntegrada(ctk.CTk):
         acc_color = self.color_principal
         self.actualizar_estado("fichero Mopar generado", self.folder_mopar_entry.get())
         self.btn_mopar.configure(text="Generar fichero Mopar", fg_color=acc_color, hover_color=self.color_hover, state="normal")
-        self.avisar("Fichero Mopar terminado: revisa el registro.")
+        carpeta_mopar = self.folder_mopar_entry.get()
+        self.avisar("Fichero Mopar terminado: revisa el registro.", accion=("Carpeta", lambda: self.abrir_directorio(carpeta_mopar)))
+        self.registrar_ejecucion("mopar")
 
     def finalizar_stock_fiat(self):
         acc_color = self.color_principal
         self.actualizar_estado("Stock FIAT generado", self.folder_stock_fiat_entry.get())
         self.btn_stock_fiat.configure(text="Generar Stock FIAT", fg_color=acc_color, hover_color=self.color_hover, state="normal")
-        self.avisar("Stock FIAT terminado: revisa el registro.")
+        carpeta_fiat = self.folder_stock_fiat_entry.get()
+        self.avisar("Stock FIAT terminado: revisa el registro.", accion=("Carpeta", lambda: self.abrir_directorio(carpeta_fiat)))
+        self.registrar_ejecucion("stock_fiat")
 
 def probar_navegador():
     """Comprueba que el Chromium incluido arranca (sirve para verificar un .exe recién compilado).
@@ -3616,4 +3912,5 @@ if __name__ == "__main__":
     app = AppIntegrada()
     app.mostrar_animacion_inicio()
     app.comprobar_actualizaciones_al_inicio()
+    app.after(2500, app.recordar_tareas)
     app.mainloop()
