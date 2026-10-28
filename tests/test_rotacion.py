@@ -91,7 +91,7 @@ def test_vista_previa_en_la_pestana(app, archivos):
     poner(app.umbral_entry, "0.12")
     poner(app.precio_entry, "150")
     app.actualizar_vista_previa_umbral(en_segundo_plano=False)
-    assert app.vista_previa_umbral.cget("text") == "Con 0.12: 3 en rojo · 1 en amarillo · 1 sin marcar por precio · 1 en blanco"
+    assert app.vista_previa_umbral.cget("text") == "Con 0.12: 3 en rojo · 1 en amarillo · 0 en azul para revisar · 1 sin marcar por precio · 1 en blanco"
     poner(app.umbral_entry, "0.08")
     app.actualizar_vista_previa_umbral(en_segundo_plano=False)
     assert app.vista_previa_umbral.cget("text").startswith("Con 0.08: 2 en rojo")

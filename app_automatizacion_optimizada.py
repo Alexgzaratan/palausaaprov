@@ -99,6 +99,7 @@ CAMPOS_CONFIG = (
     ("ruta_excel_rotacion", "excel_rot_entry", ""),
     ("ruta_folder_rotacion", "folder_rot_entry", ""),
     ("umbral_rotacion", "umbral_entry", "0.08"),
+    ("limite_revisar_rotacion", "limite_revisar_entry", "1600"),
     ("ruta_excel_mopar", "excel_mopar_entry", ""),
     ("ruta_folder_mopar", "folder_mopar_entry", ""),
     ("ruta_excel_stock_fiat", "excel_stock_fiat_entry", ""),
@@ -289,6 +290,7 @@ def obtener_ruta_para_contador(carpeta_base, contador):
 RESULTADOS_DISPONIBLES = ("pieza disponible", "disponible")
 COLOR_ROJO_ROTACION = "FF0000"
 COLOR_AMARILLO_ROTACION = "FFFF00"
+COLOR_REVISAR_ROTACION = "9DC3E6"  # azul claro: piezas caras que decide Álex
 
 
 def precio_fila_rotacion(valor):
@@ -308,14 +310,18 @@ def resultado_disponibilidad(valor):
     return "" if valor is None else " ".join(str(valor).strip().lower().split())
 
 
-def clasificar_fila_rotacion(precio, media, resultado, umbral_media, precio_minimo):
-    """'precio' (se deja sin marcar), 'rojo' (baja rotación), 'amarillo' (no disponible) o 'blanco'."""
+def clasificar_fila_rotacion(precio, media, resultado, umbral_media, precio_minimo, precio_unitario=None, limite_revisar=0):
+    """'precio' (se deja sin marcar), 'rojo' (baja rotación), 'amarillo' (no disponible), 'revisar' (pieza cara:
+    el precio unitario supera el límite; la decide Álex) o 'blanco'. El rojo y el amarillo mandan sobre el azul.
+    precio es el total de la línea (columna F) y precio_unitario el precio de compra (columna E)."""
     if precio is not None and precio < precio_minimo:
         return "precio"
     if media < umbral_media:
         return "rojo"
     if resultado and resultado not in RESULTADOS_DISPONIBLES:
         return "amarillo"
+    if limite_revisar and precio_unitario is not None and precio_unitario > limite_revisar:
+        return "revisar"
     return "blanco"
 
 
@@ -338,56 +344,75 @@ def leer_medias_propuesta(ruta_propuesta_xls):
 
 
 def leer_filas_quiter(ruta_excel_quiter):
-    """(precio, referencia, resultado) de cada fila del Excel de Quiter, sin la cabecera."""
+    """(total de la línea, referencia, resultado, precio unitario) de cada fila del Excel de Quiter, sin la cabecera."""
     wb = load_workbook(ruta_excel_quiter, read_only=True)
     try:
         filas = []
         for valores in wb.active.iter_rows(min_row=2, max_col=18, values_only=True):
             valores = tuple(valores) + (None,) * (18 - len(valores))
-            filas.append((precio_fila_rotacion(valores[5]), referencia_rotacion(valores[1]), resultado_disponibilidad(valores[17])))
+            filas.append((precio_fila_rotacion(valores[5]), referencia_rotacion(valores[1]), resultado_disponibilidad(valores[17]),
+                          precio_fila_rotacion(valores[4])))
         return filas
     finally:
         wb.close()
 
 
-def contar_rotacion(filas, dict_medias, umbral_media, precio_minimo):
-    conteo = {"rojo": 0, "amarillo": 0, "precio": 0, "blanco": 0}
-    for precio, ref, resultado in filas:
-        conteo[clasificar_fila_rotacion(precio, dict_medias.get(ref, 0.0), resultado, umbral_media, precio_minimo)] += 1
+def contar_rotacion(filas, dict_medias, umbral_media, precio_minimo, limite_revisar=0):
+    conteo = {"rojo": 0, "amarillo": 0, "revisar": 0, "precio": 0, "blanco": 0}
+    for precio, ref, resultado, *unitario in filas:
+        conteo[clasificar_fila_rotacion(precio, dict_medias.get(ref, 0.0), resultado, umbral_media, precio_minimo,
+                                        unitario[0] if unitario else None, limite_revisar)] += 1
     return conteo
 
 
-def lineas_marcadas_rotacion(ruta_rotacion):
-    """Líneas en rojo o amarillo del Excel _ROTACION.xlsx ya generado: ([(línea, referencia, color)], total de líneas).
-    La fila N del archivo es la línea N del pedido en Quiter (el filtro quita la cabecera)."""
+def colores_rotacion(ruta_rotacion):
+    """Filas del Excel _ROTACION.xlsx ya generado: [(línea, referencia, color, precio unitario)], con color
+    'rojo', 'amarillo', 'revisar' o ''. La fila N del archivo es la línea N del pedido en Quiter (el filtro quita la cabecera)."""
     wb = load_workbook(ruta_rotacion)
     try:
-        marcadas, total = [], 0
+        filas = []
         for fila in range(1, wb.active.max_row + 1):
             celda = wb.active.cell(row=fila, column=2)
             if celda.value is None or not str(celda.value).strip():
                 continue
-            total += 1
-            color = str(celda.fill.fgColor.rgb or "")[-6:].upper() if celda.fill.fill_type == "solid" else ""
-            if color == COLOR_ROJO_ROTACION:
-                marcadas.append((fila, str(celda.value).strip(), "rojo"))
-            elif color == COLOR_AMARILLO_ROTACION:
-                marcadas.append((fila, str(celda.value).strip(), "amarillo"))
-        return marcadas, total
+            relleno = str(celda.fill.fgColor.rgb or "")[-6:].upper() if celda.fill.fill_type == "solid" else ""
+            color = {COLOR_ROJO_ROTACION: "rojo", COLOR_AMARILLO_ROTACION: "amarillo", COLOR_REVISAR_ROTACION: "revisar"}.get(relleno, "")
+            filas.append((fila, str(celda.value).strip(), color, precio_fila_rotacion(wb.active.cell(row=fila, column=5).value)))
+        return filas
     finally:
         wb.close()
 
 
-def texto_lista_quiter(pedido, marcadas, total):
-    """Texto para pegar en Claude (skill quiter-lineas-a-cero)."""
+def lineas_marcadas_rotacion(ruta_rotacion):
+    """Líneas en rojo o amarillo (las que se ponen a 0): ([(línea, referencia, color)], total de líneas)."""
+    filas = colores_rotacion(ruta_rotacion)
+    return [(linea, ref, color) for linea, ref, color, _ in filas if color in ("rojo", "amarillo")], len(filas)
+
+
+def lineas_a_revisar_rotacion(ruta_rotacion):
+    """Líneas en azul (piezas caras que decide Álex): [(línea, referencia, precio unitario)]."""
+    return [(linea, ref, unitario) for linea, ref, color, unitario in colores_rotacion(ruta_rotacion) if color == "revisar"]
+
+
+def euros(importe):
+    """1850.5 -> '1.850,50 €'."""
+    return f"{importe:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".") + " €"
+
+
+def texto_lista_quiter(pedido, marcadas, total, revisar=()):
+    """Texto para pegar en Claude (skill quiter-lineas-a-cero). Las piezas a revisar van aparte: no se ponen a 0."""
     if not marcadas:
-        return f"rotación {pedido}: ninguna línea marcada de {total}"
-    lineas = [f"rotación {pedido}: {len(marcadas)} de {total} líneas a poner a 0"]
-    lineas += [f"Lín. {linea} · {ref} ({color})" for linea, ref, color in marcadas]
+        lineas = [f"rotación {pedido}: ninguna línea marcada de {total}"]
+    else:
+        lineas = [f"rotación {pedido}: {len(marcadas)} de {total} líneas a poner a 0"]
+        lineas += [f"Lín. {linea} · {ref} ({color})" for linea, ref, color in marcadas]
+    if revisar:
+        lineas.append("Para decidir tú (piezas caras en azul, no poner a 0):")
+        lineas += [f"Lín. {linea} · {ref} ({euros(unitario)}/ud)" if unitario is not None else f"Lín. {linea} · {ref}" for linea, ref, unitario in revisar]
     return "\n".join(lineas)
 
 
-def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida_folder, umbral_media, color_resaltado, precio_minimo=0.0, log_callback=None, progreso_callback=None, finalizado_callback=None):
+def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida_folder, umbral_media, color_resaltado, precio_minimo=0.0, log_callback=None, progreso_callback=None, finalizado_callback=None, limite_revisar=0.0):
     global filtro_rotacion_running
     filtro_rotacion_running = True
     def log(texto, tag=None):
@@ -409,14 +434,17 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
         ws = wb.active
         fill_color = PatternFill(start_color=color_resaltado, end_color=color_resaltado, fill_type="solid")
         fill_no_disponible = PatternFill(start_color=COLOR_AMARILLO_ROTACION, end_color=COLOR_AMARILLO_ROTACION, fill_type="solid")
+        fill_revisar = PatternFill(start_color=COLOR_REVISAR_ROTACION, end_color=COLOR_REVISAR_ROTACION, fill_type="solid")
         total_filas = max(ws.max_row - 1, 1)
         filas_baja_rotacion = 0
         filas_no_disponibles = 0
+        filas_revisar = 0
         filas_bajo_precio = 0
         for i in range(2, ws.max_row + 1):
             ref = referencia_rotacion(ws.cell(row=i, column=2).value)
             clase = clasificar_fila_rotacion(precio_fila_rotacion(ws.cell(row=i, column=6).value), dict_medias.get(ref, 0.0),
-                                             resultado_disponibilidad(ws.cell(row=i, column=18).value), umbral_media, precio_minimo)
+                                             resultado_disponibilidad(ws.cell(row=i, column=18).value), umbral_media, precio_minimo,
+                                             precio_fila_rotacion(ws.cell(row=i, column=5).value), limite_revisar)
             if clase == "precio":
                 filas_bajo_precio += 1
             elif clase == "rojo":
@@ -425,6 +453,9 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
             elif clase == "amarillo":
                 for cell in ws[i]: cell.fill = fill_no_disponible
                 filas_no_disponibles += 1
+            elif clase == "revisar":
+                for cell in ws[i]: cell.fill = fill_revisar
+                filas_revisar += 1
             if progreso_callback: progreso_callback((i - 1) / total_filas)
         
         # AJUSTE v13: Nombre original + rotacion
@@ -437,6 +468,8 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
         
         wb.save(ruta_final)
         wb.close()
+        if limite_revisar:
+            log(f"Piezas en azul para revisar (más de {limite_revisar:g} EUR la unidad): {filas_revisar}.", "success")
         log(f"Resumen rotacion: rojas por umbral {filas_baja_rotacion}, amarillas por disponibilidad {filas_no_disponibles}, sin marcar por precio inferior a {precio_minimo:g} EUR {filas_bajo_precio}.", "success")
         log(f"✅ Análisis completado. Guardado en: {ruta_final}", "success")
         if progreso_callback: progreso_callback(1)
@@ -2318,7 +2351,7 @@ class AppIntegrada(ctk.CTk):
         self.btn_pedidos_stock.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         efectos.poner_pista(self, self.btn_pedidos_stock, self.pista_pedidos_stock)
 
-        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación según el umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar.", en_rejilla=True, ultima_vez="rotacion", icono="filtro")
+        card_rotacion = self.crear_tarjeta_tab(contenedor, "Filtro de rotación", "Marca referencias de baja rotación según el umbral y la propuesta de pedido. Las filas con precio inferior al precio mínimo de Automatización se dejan sin marcar, y las piezas caras salen en azul para que decidas tú.", en_rejilla=True, ultima_vez="rotacion", icono="filtro")
         self.crear_fila_archivo(card_rotacion, "Excel de Quiter", "excel_quiter_entry", "ruta_excel_quiter", "Excel de Quiter (DMS)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_quiter_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card_rotacion, "Archivo de propuesta", "excel_rot_entry", "ruta_excel_rotacion", "Archivo PROPUESTAPEDIDO.xls...", "Examinar", lambda: self.seleccionar_archivo(self.excel_rot_entry, [("Excel files", "*.xls *.xlsx")]), extensiones=(".xls", ".xlsx"))
         self.crear_fila_archivo(card_rotacion, "Carpeta destino", "folder_rot_entry", "ruta_folder_rotacion", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_rot_entry))
@@ -2331,7 +2364,13 @@ class AppIntegrada(ctk.CTk):
         self.ayuda_umbral = self.crear_etiqueta(card_rotacion, "Se marcan en rojo las referencias cuya media en la propuesta es menor que este valor "
                                                 "(si no aparecen en la propuesta, cuentan como 0). Subirlo endurece el filtro: más filas en rojo. "
                                                 "Bajarlo lo suaviza.", estilo.TAM_PEQUENO, secundario=True, wraplength=470, justify="left")
-        self.ayuda_umbral.pack(anchor="w", padx=estilo.PAD_X + 4, pady=(0, 2))
+        self.ayuda_umbral.pack(anchor="w", padx=estilo.PAD_X + 4, pady=(0, estilo.PAD_Y))
+        fila = self.crear_fila_ajuste(card_rotacion, "Revisar si la unidad supera (EUR)")
+        self.limite_revisar_entry = self.crear_entrada(fila, width=120, justify="center")
+        self.limite_revisar_entry.insert(0, self.config.get("limite_revisar_rotacion", "1600"))
+        self.limite_revisar_entry.pack(side="right", padx=estilo.PAD_FILA, pady=6)
+        efectos.poner_pista(self, self.limite_revisar_entry, "Las piezas cuyo precio unitario (P. compra) supere este importe salen en azul para que decidas tú; 0 = no marcar")
+        fila.pack_configure(pady=(0, 2))
         # Vista previa: cuántas filas marcaría el filtro con el umbral escrito (se recalcula sola)
         self.vista_previa_umbral = self.crear_etiqueta(card_rotacion, "", estilo.TAM_PEQUENO, negrita=True, wraplength=470, justify="left")
         self.vista_previa_umbral.pack(anchor="w", padx=estilo.PAD_X + 4, pady=(0, estilo.PAD_Y))
@@ -3506,6 +3545,10 @@ class AppIntegrada(ctk.CTk):
         except Exception:
             messagebox.showwarning("Aviso", "Introduce un precio mínimo válido en la pestaña Automatización (se usa también en el filtro de rotación).")
             return False
+        limite_revisar = self.limite_revisar()
+        if limite_revisar is None:
+            messagebox.showwarning("Aviso", "El importe para revisar piezas caras debe ser un número, por ejemplo 1600 (o 0 para no marcarlas).")
+            return False
         if not self.validar_archivo(ruta_quiter, "Selecciona el Excel de Quiter."):
             return False
         if not self.validar_archivo(ruta_rot, "Selecciona el archivo de propuesta."):
@@ -3521,8 +3564,21 @@ class AppIntegrada(ctk.CTk):
         self.limpiar_caja(self.rotacion_log_box)
         filtro_rotacion_running = True
         self._inicio_rotacion = time.time()
-        threading.Thread(target=filtrar_por_rotacion_task, args=(ruta_quiter, ruta_rot, folder_salida, umbral, "FF0000", precio_minimo, lambda t, tag=None: self.after(0, self.log_callback_rotacion, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_filtro_rotacion)), daemon=True).start()
+        threading.Thread(target=filtrar_por_rotacion_task, args=(ruta_quiter, ruta_rot, folder_salida, umbral, "FF0000", precio_minimo, lambda t, tag=None: self.after(0, self.log_callback_rotacion, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_filtro_rotacion)), kwargs={"limite_revisar": limite_revisar}, daemon=True).start()
         return True
+
+    def limite_revisar(self):
+        """Importe unitario a partir del cual una pieza sale en azul (0 = no se marcan); None si no es un número."""
+        texto = str(self.valor_widget_o_config("limite_revisar_entry", "limite_revisar_rotacion", "1600") or "").strip()
+        if not texto:
+            return 0.0
+        texto = texto.replace("€", "").replace(" ", "")
+        if "," in texto or re.fullmatch(r"\d{1,3}(\.\d{3})+", texto):  # «1.600» o «1.600,50»: punto de miles
+            texto = texto.replace(".", "").replace(",", ".")
+        try:
+            return max(0.0, float(texto))
+        except ValueError:
+            return None
 
     def finalizar_filtro_rotacion(self):
         del_flujo = getattr(self, "_rotacion_del_flujo", False)
@@ -3604,9 +3660,10 @@ class AppIntegrada(ctk.CTk):
         ruta_propuesta = self.widget_get("excel_rot_entry").strip()
         texto_umbral = self.widget_get("umbral_entry").strip()
         texto_precio = self.widget_get("precio_entry", "0").strip()
+        limite_revisar = self.limite_revisar()
         fecha_quiter = os.path.getmtime(ruta_quiter) if os.path.isfile(ruta_quiter) else None
         fecha_propuesta = os.path.getmtime(ruta_propuesta) if os.path.isfile(ruta_propuesta) else None
-        firma = (ruta_quiter, fecha_quiter, ruta_propuesta, fecha_propuesta, texto_umbral, texto_precio)
+        firma = (ruta_quiter, fecha_quiter, ruta_propuesta, fecha_propuesta, texto_umbral, texto_precio, limite_revisar)
         if firma == self._firma_vista_previa:
             return
         if fecha_quiter is None or fecha_propuesta is None:
@@ -3616,9 +3673,11 @@ class AppIntegrada(ctk.CTk):
         try:
             umbral = float(texto_umbral)  # igual que el filtro: con punto decimal
             precio_minimo = float(texto_precio.replace(",", "."))
+            if limite_revisar is None:
+                raise ValueError("límite para revisar")
         except ValueError:
             self._firma_vista_previa = firma
-            self.poner_vista_previa("Escribe el umbral con punto decimal (por ejemplo 0.12) y un precio mínimo válido para ver la vista previa.")
+            self.poner_vista_previa("Escribe el umbral con punto decimal (por ejemplo 0.12), un precio mínimo y un importe para revisar válidos para ver la vista previa.")
             return
         filas = self.datos_rotacion_cacheados("quiter", ruta_quiter, fecha_quiter)
         medias = self.datos_rotacion_cacheados("propuesta", ruta_propuesta, fecha_propuesta)
@@ -3639,10 +3698,11 @@ class AppIntegrada(ctk.CTk):
         elif isinstance(medias, tuple):
             self.poner_vista_previa("No se puede leer el archivo de propuesta para la vista previa.")
         else:
-            conteo = contar_rotacion(filas, medias, umbral, precio_minimo)
-            texto = (f"Con {texto_umbral}: {conteo['rojo']} en rojo · {conteo['amarillo']} en amarillo · "
+            conteo = contar_rotacion(filas, medias, umbral, precio_minimo, limite_revisar)
+            azules = f"{conteo['revisar']} en azul para revisar · " if limite_revisar else ""
+            texto = (f"Con {texto_umbral}: {conteo['rojo']} en rojo · {conteo['amarillo']} en amarillo · {azules}"
                      f"{conteo['precio']} sin marcar por precio · {conteo['blanco']} en blanco")
-            if not any(resultado for _, _, resultado in filas):
+            if not any(fila[2] for fila in filas):
                 texto += " (el amarillo aparece tras la automatización)"
             self.poner_vista_previa(texto)
 
@@ -3661,17 +3721,19 @@ class AppIntegrada(ctk.CTk):
             return None
         try:
             marcadas, total = lineas_marcadas_rotacion(ruta)
+            revisar = lineas_a_revisar_rotacion(ruta)
         except Exception as e:
             messagebox.showwarning("Lista para Quiter", f"No se pudo leer {Path(ruta).name}: {e}")
             return None
         pedido = Path(ruta).stem.removesuffix("_ROTACION")
-        texto = texto_lista_quiter(pedido, marcadas, total)
+        texto = texto_lista_quiter(pedido, marcadas, total, revisar)
         self.clipboard_clear()
         self.clipboard_append(texto)
         self.update_idletasks()
         generado = datetime.fromtimestamp(os.path.getmtime(ruta)).strftime("%d/%m %H:%M")
         self.log_callback_rotacion(f"Lista copiada: {len(marcadas)} de {total} líneas de {Path(ruta).name} (generado el {generado}). Pégala en Claude.", "success")
-        self.avisar(f"Lista copiada: {len(marcadas)} de {total} líneas a poner a 0. Pégala en Claude.", "ok")
+        aparte = f" (y {len(revisar)} en azul para que decidas tú)" if revisar else ""
+        self.avisar(f"Lista copiada: {len(marcadas)} de {total} líneas a poner a 0{aparte}. Pégala en Claude.", "ok")
         return texto
 
     def toggle_mopar(self):
