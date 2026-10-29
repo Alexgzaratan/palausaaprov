@@ -502,32 +502,59 @@ def filtrar_por_rotacion_task(ruta_excel_quiter, ruta_propuesta_xls, ruta_salida
 # 2. LÓGICA DE COMPARADOR DE EXCEL
 # ---------------------------------------------------
 
-def comparar_excel_task(ruta_excel_antiguo, ruta_excel_nuevo, ruta_salida_excel, color_resaltado, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None):
+def ruta_resultado_comparacion(carpeta, ruta_excel_nuevo):
+    """'<nombre del Excel nuevo> comparado.xlsx' en la carpeta destino (no se pisa la comparación de otro día)."""
+    return str(Path(carpeta) / f"{Path(ruta_excel_nuevo).stem} comparado.xlsx")
+
+def dos_ultimos_excel(carpeta):
+    """(anterior, último) de los .xlsx de la carpeta, por la fecha del nombre (o la de modificación); sin los
+    resultados «comparado» ni los temporales de Excel. None si hay menos de dos."""
+    try:
+        archivos = [a for a in Path(carpeta).iterdir() if a.is_file() and a.suffix.lower() == ".xlsx"
+                    and not a.name.startswith("~$") and not a.stem.lower().endswith("comparado")]
+    except OSError:
+        return None
+    if len(archivos) < 2:
+        return None
+    orden = sorted(archivos, key=lambda a: (fecha_en_nombre(a.name) or datetime.fromtimestamp(a.stat().st_mtime).date(), a.stat().st_mtime))
+    return orden[-2], orden[-1]
+
+def comparar_excel_task(ruta_excel_antiguo, ruta_excel_nuevo, ruta_salida_excel, color_resaltado, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None, resultado_callback=None):
+    """Copia el Excel nuevo (con su formato y sus hojas) y colorea en su primera hoja las filas que ya estaban en el
+    antiguo. La fila 1 (cabecera) no se marca. resultado_callback recibe (repetidas, filas comparadas)."""
     global comparador_running
     def log(texto, tag=None):
         if log_callback: log_callback(f"[COMPARACIÓN] {texto}", tag)
     log(f"🔍 Iniciando comparación...")
     comparador_running = True
     try:
-        wb_antiguo = load_workbook(ruta_excel_antiguo, data_only=True)
-        ws_antiguo = wb_antiguo.active
-        lineas_antiguo = set(tuple(fila) for fila in ws_antiguo.iter_rows(values_only=True) if any(fila))
-        wb_nuevo = load_workbook(ruta_excel_nuevo, data_only=True)
-        ws_nuevo = wb_nuevo.active
-        wb_salida = openpyxl.Workbook()
+        wb_antiguo = load_workbook(ruta_excel_antiguo, data_only=True, read_only=True)
+        try:
+            lineas_antiguo = set(tuple(fila) for fila in wb_antiguo.active.iter_rows(values_only=True) if any(fila))
+        finally:
+            wb_antiguo.close()
+        wb_valores = load_workbook(ruta_excel_nuevo, data_only=True)
+        valores = [tuple(fila) for fila in wb_valores.active.iter_rows(values_only=True)]
+        wb_valores.close()
+        wb_salida = load_workbook(ruta_excel_nuevo)  # el propio Excel nuevo: se conservan formatos, anchos y hojas
         ws_salida = wb_salida.active
         fill_color = PatternFill(start_color=color_resaltado, end_color=color_resaltado, fill_type="solid")
-        total_lineas = ws_nuevo.max_row
-        for i, row in enumerate(ws_nuevo.iter_rows(values_only=True)):
+        total_lineas = max(1, len(valores))
+        repetidas = comparadas = 0
+        for i, fila in enumerate(valores):
             if stop_event and stop_event.is_set(): break
-            ws_salida.append(row)
-            if tuple(row) in lineas_antiguo:
-                for cell in ws_salida[ws_salida.max_row]: cell.fill = fill_color
+            if i > 0 and any(fila):
+                comparadas += 1
+                if fila in lineas_antiguo:
+                    repetidas += 1
+                    for cell in ws_salida[i + 1]: cell.fill = fill_color
             if progreso_callback: progreso_callback((i + 1) / total_lineas)
         if not (stop_event and stop_event.is_set()):
             Path(os.path.dirname(ruta_salida_excel)).mkdir(parents=True, exist_ok=True)
             wb_salida.save(ruta_salida_excel)
             log(f"✅ Resultado guardado en: {ruta_salida_excel}", "success")
+            log(f"{repetidas} de {comparadas} filas ya estaban en el Excel antiguo (coloreadas).", "success")
+            if resultado_callback: resultado_callback((repetidas, comparadas))
     except Exception as e:
         log(f"❌ Error: {e}", "error")
         registrar_error_detallado(str(e), traceback.format_exc())
@@ -2567,6 +2594,9 @@ class AppIntegrada(ctk.CTk):
         card = self.crear_tarjeta_tab(contenedor, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.", en_rejilla=True, ultima_vez="comparador", icono="comparar")
         self.crear_fila_archivo(card, "Excel antiguo", "excel_old_entry", "ruta_excel_antiguo", "Excel antiguo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_old_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Excel nuevo", "excel_new_entry", "ruta_excel_nuevo", "Excel nuevo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_new_entry, [("Excel files", "*.xlsx")]))
+        boton_ultimos = self.crear_boton_secundario(self.excel_new_entry.master, "Últimos dos", self.usar_dos_ultimos_excel, width=96)
+        boton_ultimos.pack(side="right", padx=(0, 8))
+        efectos.poner_pista(self, boton_ultimos, "Pone como antiguo y nuevo los dos Excel más recientes de su carpeta")
         self.crear_fila_archivo(card, "Carpeta destino", "folder_comp_entry", "ruta_folder_comparador", "Carpeta destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_comp_entry))
         fila = self.crear_fila_ajuste(card, "Color de resaltado")
         self.color_optionmenu = self.crear_menu(fila, ["Amarillo", "Rojo", "Verde", "Azul", "Naranja"])
@@ -3773,21 +3803,46 @@ class AppIntegrada(ctk.CTk):
             return
         if not self.validar_carpeta(folder, "Selecciona una carpeta para el resultado comparado."):
             return
-        ruta_salida = str(Path(folder) / "resultado_comparacion.xlsx")
+        ruta_salida = ruta_resultado_comparacion(folder, ruta_nue)
+        self._resultado_comparacion = ruta_salida
+        self._repetidas_comparacion = None
         if self.excel_abierto(ruta_salida, "El resultado de la comparación anterior"):
             return
         self.actualizar_estado("comparando excels", ruta_salida)
         self.btn_comparador.configure(fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         efectos.marcar_ocupado(self.btn_comparador, "Detener")
         stop_event_comparador.clear()
-        threading.Thread(target=comparar_excel_task, args=(ruta_ant, ruta_nue, ruta_salida, colores_hex[color], lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_comparador), stop_event_comparador), daemon=True).start()
+        threading.Thread(target=comparar_excel_task, args=(ruta_ant, ruta_nue, ruta_salida, colores_hex[color], lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_comparador), stop_event_comparador),
+                         kwargs={"resultado_callback": lambda r: setattr(self, "_repetidas_comparacion", r)}, daemon=True).start()
+
+    def usar_dos_ultimos_excel(self):
+        """Rellena antiguo y nuevo con los dos Excel más recientes de la carpeta del Excel nuevo (o del antiguo);
+        si ninguna existe, pregunta la carpeta."""
+        carpeta = next((Path(r).parent for r in (self.excel_new_entry.get(), self.excel_old_entry.get()) if r and Path(r).parent.is_dir()), None)
+        if carpeta is None:
+            elegida = filedialog.askdirectory(title="Carpeta con los Excel a comparar")
+            if not elegida:
+                return None
+            carpeta = Path(elegida)
+        pareja = dos_ultimos_excel(carpeta)
+        if pareja is None:
+            self.avisar(f"En {carpeta.name} no hay dos Excel para comparar.", "aviso")
+            return None
+        for campo, ruta_excel in ((self.excel_old_entry, pareja[0]), (self.excel_new_entry, pareja[1])):
+            campo.delete(0, "end")
+            campo.insert(0, str(ruta_excel))
+        self.avisar(f"Se comparará {pareja[0].name} con {pareja[1].name}.")
+        return pareja
 
     def finalizar_comparador(self):
         acc_color = self.color_principal
-        self.actualizar_estado("comparación finalizada", str(Path(self.folder_comp_entry.get()) / "resultado_comparacion.xlsx"))
+        resultado = Path(getattr(self, "_resultado_comparacion", None) or ruta_resultado_comparacion(self.folder_comp_entry.get(), self.excel_new_entry.get()))
+        self.actualizar_estado("comparación finalizada", str(resultado))
         self.btn_comparador.configure(text="Comparar Excels", fg_color=acc_color, hover_color=self.color_hover, state="normal")
-        resultado = Path(self.folder_comp_entry.get()) / "resultado_comparacion.xlsx"
-        self.avisar("Comparación terminada: resultado_comparacion.xlsx", accion=("Abrir", lambda: self.abrir_archivo(resultado)) if resultado.exists() else None)
+        cuantas = getattr(self, "_repetidas_comparacion", None)
+        detalle = f": {cuantas[0]} de {cuantas[1]} filas ya estaban en el anterior" if cuantas else ""
+        self.avisar(f"Comparación terminada{detalle}. {resultado.name}", "ok" if cuantas else "info",
+                    accion=("Abrir", lambda: self.abrir_archivo(resultado)) if resultado.exists() else None)
         self.registrar_ejecucion("comparador")
 
     def iniciar_filtro_rotacion(self):

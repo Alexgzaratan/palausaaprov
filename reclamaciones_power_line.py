@@ -1,26 +1,37 @@
 """Módulo aislado para crear y consultar reclamaciones de Power Line."""
 
+import atexit
 import os
 import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageOps
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 import efectos
 import estilo
+from configuracion import registrar_error_detallado
 from rutas_app import ruta_datos
+
+try:  # fotos HEIC/HEIF (iPhone): si la librería no está, simplemente no se admiten
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    ADMITE_HEIC = True
+except Exception:
+    ADMITE_HEIC = False
 
 
 DATABASE_FILE = ruta_datos("reclamaciones_power_line.db")
-ERROR_LOG_FILE = ruta_datos("error_log_detallado.txt", migrar=False)
+PREFIJO_ADJUNTOS = "power_line_adjuntos_"
+EXTENSIONES_FOTO = "*.jpg *.jpeg *.png *.bmp *.tif *.tiff" + (" *.heic *.heif" if ADMITE_HEIC else "")
 PHOTO_FIELDS = (
     ("bulto", "Fotografía bulto completo"),
     ("deterioro", "Fotografía detalle del deterioro"),
@@ -39,11 +50,39 @@ PHOTO_BOOKMARKS = {
 
 
 def registrar_error_reclamacion(error, detalle, referencia):
-    with open(ERROR_LOG_FILE, "a", encoding="utf-8") as archivo:
-        archivo.write(
-            f"--- ERROR RECLAMACIONES POWER LINE [{datetime.now():%Y-%m-%d %H:%M:%S}] ---\n"
-            f"Referencia: {referencia or '-'}\nMensaje: {detalle}\nTraceback:\n{error}\n{'-' * 30}\n\n"
-        )
+    """Al registro común de la app (con rotación y sin fallar si no se puede escribir)."""
+    registrar_error_detallado(f"Reclamaciones Power Line: {detalle}", error, ref=referencia or "-")
+
+
+def limpiar_adjuntos_antiguos(horas=24, carpeta_temporal=None):
+    """Borra las carpetas temporales de fotos que dejaron sesiones anteriores. Devuelve cuántas se borraron."""
+    base = Path(carpeta_temporal or tempfile.gettempdir())
+    limite = time.time() - horas * 3600
+    borradas = 0
+    try:
+        candidatas = list(base.glob(PREFIJO_ADJUNTOS + "*"))
+    except OSError:
+        return 0
+    for carpeta in candidatas:
+        try:
+            if carpeta.is_dir() and carpeta.stat().st_mtime < limite:
+                shutil.rmtree(carpeta, ignore_errors=True)
+                borradas += not carpeta.exists()
+        except OSError:
+            continue
+    return borradas
+
+
+def abrir_imagen(origen):
+    """Imagen con la orientación correcta: las fotos del móvil en vertical guardan el giro en el EXIF."""
+    imagen = Image.open(origen)
+    try:
+        girada = ImageOps.exif_transpose(imagen)
+    except Exception:
+        return imagen
+    if girada is not imagen:
+        imagen.close()
+    return girada
 
 
 class HistorialReclamaciones:
@@ -116,7 +155,7 @@ class DocumentoPowerLine:
     @staticmethod
     def _preparar_foto(origen, carpeta_temporal, clave):
         destino = Path(carpeta_temporal) / f"{clave}.jpg"
-        with Image.open(origen) as imagen:
+        with abrir_imagen(origen) as imagen:
             imagen = imagen.convert("RGB")
             imagen.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
             imagen.save(destino, "JPEG", quality=82, optimize=True)
@@ -250,8 +289,16 @@ class ModuloReclamacionesPowerLine:
         self.fotos = {clave: "" for clave, _ in PHOTO_FIELDS}
         self.previews = {}
         self.imagenes_preview = {}
-        self.carpeta_adjuntos = Path(tempfile.mkdtemp(prefix="power_line_adjuntos_"))
+        self._carpeta_adjuntos = None  # se crea al adjuntar la primera foto y se borra al cerrar la app
         self.dnd_activo = False
+        threading.Thread(target=limpiar_adjuntos_antiguos, daemon=True).start()
+
+    @property
+    def carpeta_adjuntos(self):
+        if self._carpeta_adjuntos is None:
+            self._carpeta_adjuntos = Path(tempfile.mkdtemp(prefix=PREFIJO_ADJUNTOS))
+            atexit.register(shutil.rmtree, str(self._carpeta_adjuntos), True)
+        return self._carpeta_adjuntos
 
     def construir(self, tab):
         try:
@@ -337,7 +384,7 @@ class ModuloReclamacionesPowerLine:
             marco.dnd_bind("<<Drop>>", lambda event, foto=clave: self._soltar_foto(event, foto))
 
     def seleccionar_foto(self, clave):
-        ruta = filedialog.askopenfilename(filetypes=[("Imágenes", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"), ("Todos los archivos", "*.*")])
+        ruta = filedialog.askopenfilename(filetypes=[("Imágenes", EXTENSIONES_FOTO), ("Todos los archivos", "*.*")])
         if ruta:
             self.establecer_foto(clave, ruta)
 
@@ -361,7 +408,7 @@ class ModuloReclamacionesPowerLine:
         shutil.copy2(ruta, copia)
         self.fotos[clave] = str(copia)
         vista, etiqueta, _, _, titulo = self.previews[clave]
-        with Image.open(ruta) as imagen:
+        with abrir_imagen(ruta) as imagen:
             miniatura = imagen.convert("RGB")
             miniatura.thumbnail((50, 50), Image.Resampling.LANCZOS)
             preview = ctk.CTkImage(light_image=miniatura.copy(), dark_image=miniatura.copy(), size=miniatura.size)
@@ -512,18 +559,21 @@ class ModuloReclamacionesPowerLine:
         salida = Path(ruta_guardado) / f"Litigio {datos['litigio']}.docx"
         self.btn_generar.configure(state="disabled")
         efectos.marcar_ocupado(self.btn_generar, "Generando")
-        threading.Thread(target=self._generar_en_segundo_plano, args=(datos, salida), daemon=True).start()
+        generar_pdf = bool(self.pdf_var.get())  # las variables de Tk se leen aquí, no desde el hilo
+        threading.Thread(target=self._generar_en_segundo_plano, args=(datos, salida, generar_pdf), daemon=True).start()
 
-    def _generar_en_segundo_plano(self, datos, salida):
+    def _generar_en_segundo_plano(self, datos, salida, generar_pdf=False):
         try:
             datos_documento = {clave: datos[clave] for clave in ("pedido", "referencia", "descripcion")}
-            word, pdf = DocumentoPowerLine(self.configuracion["power_line_ruta_plantilla"], salida, datos_documento, self.fotos.copy(), self.pdf_var.get()).generar()
+            word, pdf = DocumentoPowerLine(self.configuracion["power_line_ruta_plantilla"], salida, datos_documento, self.fotos.copy(), generar_pdf).generar()
             self.historial.guardar(datos["litigio"], datos["pedido"], datos["referencia"], word, pdf)
             self.app.after(0, lambda: self._finalizar_generacion(word, pdf))
         except Exception as error:
             detalle = self._detalle_error(error)
-            registrar_error_reclamacion(traceback.format_exc(), detalle, datos.get("referencia"))
-            self.app.after(0, lambda mensaje=detalle: self._error_generacion(mensaje))
+            try:
+                registrar_error_reclamacion(traceback.format_exc(), detalle, datos.get("referencia"))
+            finally:
+                self.app.after(0, lambda mensaje=detalle: self._error_generacion(mensaje))
 
     @staticmethod
     def _detalle_error(error):

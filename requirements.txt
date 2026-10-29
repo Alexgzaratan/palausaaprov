@@ -8,6 +8,7 @@ playwright==1.58.0
 pywin32==312
 tkinterdnd2==0.6.2
 pillow==12.1.1
+pillow-heif==1.8.1   # fotos HEIC de iPhone en Reclamaciones Power Line
 
 # Para compilar el .exe y ejecutar los tests
 pyinstaller==6.19.0
