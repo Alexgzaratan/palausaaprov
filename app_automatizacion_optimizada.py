@@ -34,6 +34,7 @@ import instancia_unica
 import historial_madd
 import tarea_windows
 import avisos_clientes
+import ficheros_mopar
 import hashlib
 import json
 from version import VERSION
@@ -227,28 +228,6 @@ def crear_copia_seguridad(ruta_archivo, carpeta_destino=None):
     shutil.copy2(ruta_archivo, ruta_backup)
     return str(ruta_backup)
 
-def obtener_numero_mopar_del_dia(carpeta_salida, prefijo_clave="mopar"):
-    config = cargar_configuracion()
-    clave_fecha = f"{prefijo_clave}_fecha"
-    clave_numero = f"{prefijo_clave}_numero"
-    hoy = datetime.now().strftime("%Y-%m-%d")
-    ultimo_dia = config.get(clave_fecha)
-    ultimo_numero = config.get(clave_numero)
-
-    if ultimo_dia == hoy and ultimo_numero is not None:
-        return int(ultimo_numero)
-
-    ultimo_f = 0
-    for f in os.listdir(carpeta_salida):
-        m = re.match(r"F(\d+)", f)
-        if m:
-            ultimo_f = max(ultimo_f, int(m.group(1)))
-
-    proximo_f = ultimo_f + 1
-    config[clave_fecha] = hoy
-    config[clave_numero] = proximo_f
-    guardar_configuracion(config)
-    return proximo_f
 
 # ---------------------------------------------------
 # LÓGICA DE GESTIÓN DE CARPETAS POR RANGOS (PARA PEDIDOS)
@@ -1374,87 +1353,50 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
 # 5. LÓGICA DE FICHERO MOPAR (CON NOMBRES FXXXX + LETRAS) - v13
 # ---------------------------------------------------
 
-def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None, numero_callback=None):
-    global mopar_running
-    mopar_running = True
+def generar_ficheros_f_task(clave, nombre, leer_lineas, ruta_excel, carpeta_salida, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None, numero_callback=None):
+    """Mopar y Stock FIAT: lee el Excel, reserva un número F nuevo para este envío y escribe los TXT de 10 líneas
+    (F<n>.txt o F<n>A.txt, F<n>B.txt...). Nunca sobrescribe un fichero que ya exista."""
     def log(texto, tag=None):
-        if log_callback: log_callback(f"[MOPAR] {texto}", tag)
-    log(f"🚀 Iniciando generación de ficheros MOPAR...")
+        if log_callback: log_callback(f"[{nombre.upper()}] {texto}", tag)
+    log(f"🚀 Iniciando generación de ficheros {nombre}...")
     try:
         log("📖 Leyendo archivo Excel...")
+        avisos = []
         try:
-            wb = xlrd.open_workbook(ruta_excel)
-            ws = wb.sheet_by_index(0)
+            lineas = leer_lineas(ruta_excel, avisos)
+        except ValueError as e:
+            log(f"❌ Error: {e}", "error")
+            return
         except Exception as e:
             log(f"❌ Error al abrir el Excel: {e}", "error")
             return
-        headers = [str(ws.cell_value(0, i)).strip() for i in range(ws.ncols)]
-        try:
-            col_ref = headers.index("Referencia")
-            col_cant = headers.index("Cant")
-            col_cliente = headers.index("Cliente")
-        except ValueError as e:
-            col_faltante = str(e).split()[-1]
-            log(f"❌ Error: No se encuentra la columna {col_faltante} en el Excel.", "error")
-            return
-        total_filas = ws.nrows - 1
-        if total_filas <= 0:
+        for aviso in avisos:
+            log(f"⚠️ {aviso}", "error")
+        if progreso_callback: progreso_callback(0.5)
+        if not lineas:
             log("⚠️ El Excel no tiene datos de artículos.", "error")
             return
-        lineas_fichero = []
-        log(f"🔍 Procesando {total_filas} filas...")
-        for r in range(1, ws.nrows):
-            if stop_event and stop_event.is_set(): break
-            try:
-                ref_raw = str(ws.cell_value(r, col_ref)).strip()
-                ref_clean = ref_raw.replace("2/", "")
-                referencia = ref_clean.zfill(13)[:13]
-                try:
-                    cant_val = int(float(ws.cell_value(r, col_cant)))
-                except Exception:
-                    cant_val = 0
-                    log(f"⚠️ Cantidad no válida en fila {r+1}, se usará 0.", "error")
-                cantidad = str(cant_val).zfill(7)[:7]
-                cliente_raw = str(ws.cell_value(r, col_cliente)).strip()
-                cliente_nums = "".join(filter(str.isdigit, cliente_raw))
-                ubicacion = cliente_nums.zfill(8)[:8]
-                linea = f"{referencia}{cantidad}{ubicacion}"
-                lineas_fichero.append(linea)
-            except Exception as e:
-                log(f"⚠️ Error en fila {r+1}: {e}", "error")
-            if progreso_callback: progreso_callback(r / total_filas)
-        
-        if not (stop_event and stop_event.is_set()):
-            # AJUSTE v13: Lógica FXXXX + Letras
-            if not os.path.exists(carpeta_salida):
-                os.makedirs(carpeta_salida, exist_ok=True)
-
-            proximo_f = obtener_numero_mopar_del_dia(carpeta_salida)
-            letras = string.ascii_uppercase # A, B, C...
-            archivos_creados = 0
-            
-            for i in range(0, len(lineas_fichero), 10):
-                grupo = lineas_fichero[i:i+10]
-                # Si solo hay un archivo, no lleva letra. Si hay varios, llevan A, B, C...
-                if len(lineas_fichero) <= 10:
-                    nombre_fichero = f"F{proximo_f}.txt"
-                else:
-                    indice_letra = i // 10
-                    letra = letras[indice_letra % len(letras)]
-                    nombre_fichero = f"F{proximo_f}{letra}.txt"
-                
-                ruta_final = os.path.join(carpeta_salida, nombre_fichero)
-                with open(ruta_final, "w", encoding="utf-8") as f:
-                    f.write("\n".join(grupo))
-                
-                log(f"✅ Generado MOPAR: {nombre_fichero}", "success")
-                if numero_callback: numero_callback(nombre_fichero)
-                archivos_creados += 1
-
-            log(f"✨ Proceso completado. Se han generado {archivos_creados} archivos con prefijo F{proximo_f}.", "success")
+        if stop_event and stop_event.is_set():
+            log("Detenido: no se ha generado ningún fichero.", "error")
+            return
+        os.makedirs(carpeta_salida, exist_ok=True)
+        numero = ficheros_mopar.reservar_numero(carpeta_salida, clave)
+        nombres = ficheros_mopar.escribir(lineas, carpeta_salida, numero)
+        for nombre_fichero in nombres:
+            log(f"✅ Generado {nombre}: {nombre_fichero}", "success")
+            if numero_callback: numero_callback(nombre_fichero)
+        ficheros_mopar.anotar(clave, lineas, nombres)
+        if progreso_callback: progreso_callback(1)
+        log(f"✨ Proceso completado. Se han generado {len(nombres)} archivos con prefijo F{numero}.", "success")
     except Exception as e:
         log(f"❌ Error crítico: {e}", "error")
         registrar_error_detallado(str(e), traceback.format_exc())
+
+def generar_fichero_mopar_task(ruta_excel, carpeta_salida, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None, numero_callback=None):
+    global mopar_running
+    mopar_running = True
+    try:
+        generar_ficheros_f_task("mopar", "Mopar", ficheros_mopar.lineas_mopar, ruta_excel, carpeta_salida, log_callback, progreso_callback, None, stop_event, numero_callback)
     finally:
         mopar_running = False
         if finalizado_callback: finalizado_callback()
@@ -1904,87 +1846,11 @@ def facturas_locales_del_dia(carpeta, fecha):
 # 6. INTERFAZ GRÁFICA
 # ---------------------------------------------------
 
-def generar_fichero_stock_fiat_task(ruta_excel, carpeta_salida, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None):
+def generar_fichero_stock_fiat_task(ruta_excel, carpeta_salida, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None, numero_callback=None):
     global stock_fiat_running
     stock_fiat_running = True
-    def log(texto, tag=None):
-        if log_callback: log_callback(f"[STOCK FIAT] {texto}", tag)
-    log("Iniciando generacion de ficheros Stock FIAT...")
     try:
-        log("Leyendo archivo Excel...")
-        try:
-            wb = xlrd.open_workbook(ruta_excel)
-            ws = wb.sheet_by_index(0)
-        except Exception as e:
-            log(f"Error al abrir el Excel: {e}", "error")
-            return
-        if ws.ncols < 4:
-            log("Error: El Excel debe tener al menos columnas hasta la D.", "error")
-            return
-
-        col_ref = 1
-        col_cant = 3
-        total_filas = ws.nrows
-        if total_filas <= 0:
-            log("El Excel no tiene datos de articulos.", "error")
-            return
-
-        def valor_limpio(valor):
-            if isinstance(valor, float) and valor.is_integer():
-                return str(int(valor))
-            return str(valor).strip()
-
-        lineas_fichero = []
-        log(f"Procesando {total_filas} filas...")
-        for fila_idx in range(ws.nrows):
-            if stop_event and stop_event.is_set(): break
-            try:
-                ref_raw = valor_limpio(ws.cell_value(fila_idx, col_ref))
-                if not ref_raw:
-                    continue
-                ref_clean = ref_raw.replace("2/", "")
-                referencia = ref_clean.zfill(13)[:13]
-                try:
-                    cant_val = int(float(ws.cell_value(fila_idx, col_cant)))
-                except Exception:
-                    cant_val = 0
-                    log(f"Cantidad no válida en fila {fila_idx+1}, se usará 0.", "error")
-                cantidad = str(cant_val).zfill(7)[:7]
-                ubicacion = "00000000"
-                linea = f"{referencia}{cantidad}{ubicacion}"
-                lineas_fichero.append(linea)
-            except Exception as e:
-                log(f"Error en fila {fila_idx+1}: {e}", "error")
-            if progreso_callback: progreso_callback((fila_idx + 1) / total_filas)
-
-        if not (stop_event and stop_event.is_set()):
-            if not os.path.exists(carpeta_salida):
-                os.makedirs(carpeta_salida, exist_ok=True)
-
-            proximo_f = obtener_numero_mopar_del_dia(carpeta_salida, prefijo_clave="stock_fiat")
-            letras = string.ascii_uppercase
-            archivos_creados = 0
-
-            for i in range(0, len(lineas_fichero), 10):
-                grupo = lineas_fichero[i:i+10]
-                if len(lineas_fichero) <= 10:
-                    nombre_fichero = f"F{proximo_f}.txt"
-                else:
-                    indice_letra = i // 10
-                    letra = letras[indice_letra % len(letras)]
-                    nombre_fichero = f"F{proximo_f}{letra}.txt"
-
-                ruta_final = os.path.join(carpeta_salida, nombre_fichero)
-                with open(ruta_final, "w", encoding="utf-8") as f:
-                    f.write("\n".join(grupo))
-
-                log(f"Generado Stock FIAT: {nombre_fichero}", "success")
-                archivos_creados += 1
-
-            log(f"Proceso completado. Se han generado {archivos_creados} archivos con prefijo F{proximo_f}.", "success")
-    except Exception as e:
-        log(f"Error critico: {e}", "error")
-        registrar_error_detallado(str(e), traceback.format_exc())
+        generar_ficheros_f_task("stock_fiat", "Stock FIAT", ficheros_mopar.lineas_stock_fiat, ruta_excel, carpeta_salida, log_callback, progreso_callback, None, stop_event, numero_callback)
     finally:
         stock_fiat_running = False
         if finalizado_callback: finalizado_callback()
@@ -2718,7 +2584,7 @@ class AppIntegrada(ctk.CTk):
     def build_tab_mopar(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_mopar, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
-        card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar con numeración diaria persistente.", en_rejilla=True, ultima_vez="mopar", icono="documento")
+        card = self.crear_tarjeta_tab(contenedor, "Generador Mopar", "Transforma el Excel en ficheros TXT Mopar; cada envío lleva un número F nuevo.", en_rejilla=True, ultima_vez="mopar", icono="documento")
         self.crear_fila_archivo(card, "Excel de entrada", "excel_mopar_entry", "ruta_excel_mopar", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_mopar_entry, [("Excel files (.xls)", "*.xls")]), extensiones=(".xls",))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_mopar_entry", "ruta_folder_mopar", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_mopar_entry))
         self.btn_mopar = self.crear_boton_principal(card, "Generar fichero Mopar", self.toggle_mopar)
@@ -2732,7 +2598,8 @@ class AppIntegrada(ctk.CTk):
         self.crear_fila_archivo(card, "Excel de entrada", "excel_stock_fiat_entry", "ruta_excel_stock_fiat", "Excel de entrada (.xls)...", "Examinar", lambda: self.seleccionar_archivo(self.excel_stock_fiat_entry, [("Excel files (.xls)", "*.xls")]), extensiones=(".xls",))
         self.crear_fila_archivo(card, "Carpeta destino", "folder_stock_fiat_entry", "ruta_folder_stock_fiat", "Carpeta de destino...", "Carpeta", lambda: self.seleccionar_carpeta(self.folder_stock_fiat_entry))
         self.btn_stock_fiat = self.crear_boton_principal(card, "Generar Stock FIAT", self.toggle_stock_fiat)
-        self.btn_stock_fiat.pack(padx=estilo.PAD_X, pady=(2, 14), fill="x")
+        self.btn_stock_fiat.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
+        self.crear_registro(card, "Ficheros Stock FIAT generados", "stock_fiat_generados_box", 90, pady_final=14)
 
     def build_tab_madd(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_madd, fg_color="transparent")
@@ -3357,16 +3224,30 @@ class AppIntegrada(ctk.CTk):
         self.pedidos_generados_box.delete("1.0", "end")
         self.pedidos_generados_box.configure(state="disabled")
 
-    def agregar_mopar_generado(self, nombre_fichero):
-        self.mopar_generados_box.configure(state="normal")
-        self.mopar_generados_box.insert("end", f"{nombre_fichero}\n")
-        self.mopar_generados_box.configure(state="disabled")
-        self.mopar_generados_box.see("end")
+    def agregar_mopar_generado(self, nombre_fichero, caja="mopar_generados_box"):
+        caja = getattr(self, caja)
+        caja.configure(state="normal")
+        caja.insert("end", f"{nombre_fichero}\n")
+        caja.configure(state="disabled")
+        caja.see("end")
 
-    def limpiar_mopar_generados(self):
-        self.mopar_generados_box.configure(state="normal")
-        self.mopar_generados_box.delete("1.0", "end")
-        self.mopar_generados_box.configure(state="disabled")
+    def limpiar_mopar_generados(self, caja="mopar_generados_box"):
+        caja = getattr(self, caja)
+        caja.configure(state="normal")
+        caja.delete("1.0", "end")
+        caja.configure(state="disabled")
+
+    def confirmar_ficheros_f(self, clave, nombre, leer_lineas, ruta, carpeta):
+        """Vista previa antes de generar: cuántos ficheros, con qué número y si ese Excel ya se convirtió.
+        Si el Excel no se puede leer se deja seguir: la tarea explica el error en el registro."""
+        try:
+            lineas = leer_lineas(ruta, [])
+        except Exception:
+            return True
+        if not lineas:
+            return True
+        texto, repetido = ficheros_mopar.texto_confirmacion(clave, lineas, carpeta, ficheros_mopar.siguiente_numero(carpeta, clave), nombre)
+        return messagebox.askyesno(f"Generar {nombre}", texto, **({"icon": "warning", "default": "no"} if repetido else {}))
 
     def abrir_log_detallado(self):
         if not os.path.exists(LOG_DETALLADO):
@@ -4197,13 +4078,9 @@ class AppIntegrada(ctk.CTk):
             return
         if not self.validar_carpeta(folder, "Por favor selecciona una carpeta de destino."):
             return
+        if not self.confirmar_ficheros_f("mopar", "Mopar", ficheros_mopar.lineas_mopar, ruta, folder):
+            return
         self.actualizar_estado("generando fichero Mopar", folder)
-        if not os.path.exists(ruta):
-            messagebox.showwarning("Aviso", "Por favor selecciona un archivo Excel válido.")
-            return
-        if not os.path.exists(folder):
-            messagebox.showwarning("Aviso", "Por favor selecciona una carpeta de destino.")
-            return
         self.btn_mopar.configure(fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         efectos.marcar_ocupado(self.btn_mopar, "Detener")
         self.limpiar_mopar_generados()
@@ -4229,17 +4106,15 @@ class AppIntegrada(ctk.CTk):
             return
         if not self.validar_carpeta(folder, "Por favor selecciona una carpeta de destino para Stock FIAT."):
             return
+        if not self.confirmar_ficheros_f("stock_fiat", "Stock FIAT", ficheros_mopar.lineas_stock_fiat, ruta, folder):
+            return
         self.actualizar_estado("generando Stock FIAT", folder)
-        if not os.path.exists(ruta):
-            messagebox.showwarning("Aviso", "Por favor selecciona un archivo Excel válido para Stock FIAT.")
-            return
-        if not os.path.exists(folder):
-            messagebox.showwarning("Aviso", "Por favor selecciona una carpeta de destino para Stock FIAT.")
-            return
         self.btn_stock_fiat.configure(fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         efectos.marcar_ocupado(self.btn_stock_fiat, "Detener")
+        self.limpiar_mopar_generados("stock_fiat_generados_box")
         stop_event_stock_fiat.clear()
-        threading.Thread(target=generar_fichero_stock_fiat_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_stock_fiat), stop_event_stock_fiat), daemon=True).start()
+        threading.Thread(target=generar_fichero_stock_fiat_task, args=(ruta, folder, lambda t, tag=None: self.after(0, self.agregar_log, t, tag), lambda v: self.after(0, self.actualizar_progreso, v), lambda: self.after(0, self.finalizar_stock_fiat), stop_event_stock_fiat,
+                                                                    lambda n: self.after(0, self.agregar_mopar_generado, n, "stock_fiat_generados_box")), daemon=True).start()
 
     def log_callback_madd(self, texto, tag=None):
         self.agregar_log(texto, tag)
