@@ -12,6 +12,12 @@ RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
+# Ni leer ni tocar la tarea programada real de Windows: sin tarea, salvo que una prueba diga otra cosa
+import tarea_windows  # noqa: E402
+tarea_windows.LEER_ESTADO_REAL, tarea_windows.APUNTAR_REAL = tarea_windows.leer_estado, tarea_windows.apuntar_al_lanzador
+tarea_windows.leer_estado = lambda *a, **k: None
+tarea_windows.apuntar_al_lanzador = lambda *a, **k: False
+
 CONFIG_BASE = {
     "usuario_madd": "DF1", "ruta_excel_mopar": "C:/mopar.xls", "email_companeros_avisos": "a@x.es; b@x.es",
     "precio_min": "150", "umbral_rotacion": "0.12", "num_hilos": 4, "avisos_envio_automatico": False,

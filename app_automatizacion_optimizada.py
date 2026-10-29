@@ -31,6 +31,8 @@ import piezas_caras
 import actualizaciones
 import cambio_version
 import instancia_unica
+import historial_madd
+import tarea_windows
 from version import VERSION
 import tareas
 from rutas_app import ruta_datos
@@ -1464,13 +1466,15 @@ def _madd_procesar_facturas_del_dia(page, fechas_objetivo, carpeta_destino, log)
             if fecha_factura not in fechas_objetivo:
                 continue
             coincidencias_pagina += 1
-            nombre_archivo = f"Factura_{numero}_{fecha_factura.isoformat()}.pdf"
-            ruta_destino = Path(carpeta_destino) / nombre_archivo
-            if ruta_destino.exists():
-                facturas_descargadas.append(str(ruta_destino))
+            ruta_destino = historial_madd.ruta_nueva_factura(carpeta_destino, numero, fecha_factura)
+            nombre_archivo = ruta_destino.name
+            existente = historial_madd.factura_existente(carpeta_destino, nombre_archivo, fecha_factura)
+            if existente is not None:
+                facturas_descargadas.append(str(existente))
                 log(f"Ya existía {nombre_archivo}, no se ha vuelto a descargar.", "success")
                 continue
             try:
+                ruta_destino.parent.mkdir(parents=True, exist_ok=True)
                 fila = enlace.locator("xpath=ancestor::tr[1]")
                 boton_descarga = fila.locator("td.text-center button").first
                 with page.expect_download(timeout=30000) as info_descarga:
@@ -1672,24 +1676,47 @@ def _madd_enviar_aviso_fallo(email_aviso, fecha_objetivo, resultado, log):
         log(f"⚠️ El aviso de fallo para {email_aviso} sigue en la bandeja de salida de Outlook.", "error")
     registrar_estado_correo_madd(fecha_objetivo, f"aviso de fallo: {estado}", f"Destinatarios: {email_aviso}")
 
-def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email_aviso_fallo, filtro_dia="Ayer", log_callback=None, finalizado_callback=None, resultado_callback=None, fecha_objetivo=None):
+def fecha_objetivo_madd(filtro_dia="Ayer", hoy=None):
+    """Día cuyas facturas envía la tarea diaria: el laborable anterior o, con «Hoy», el propio día."""
+    hoy = hoy or datetime.now().date()
+    return hoy if filtro_dia == "Hoy" else _dia_laborable_anterior(hoy)
+
+def dias_pendientes_madd(fecha_objetivo, incluir_objetivo=True):
+    """Días laborables sin enviar desde el último envío correcto del registro (la tarea no se ejecutó o falló).
+    Con incluir_objetivo, 'fecha_objetivo' va siempre (como hasta ahora en la ejecución diaria)."""
+    pendientes = set(historial_madd.dias_pendientes(fecha_objetivo, historial_madd.dias_enviados(historial_madd.leer_registro(LOG_FACTURAS_MADD))))
+    if incluir_objetivo:
+        pendientes.add(fecha_objetivo)
+    else:
+        pendientes.discard(fecha_objetivo)
+    return sorted(pendientes)
+
+def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email_aviso_fallo, filtro_dia="Ayer", log_callback=None, finalizado_callback=None, resultado_callback=None, fecha_objetivo=None, fechas=None):
+    """Descarga y envía las facturas de 'fecha_objetivo' (por defecto la del filtro) o de varios días ('fechas'):
+    una sola sesión en MADD y un correo por día."""
     global madd_running
     madd_running = True
     def log(texto, tag=None):
         if log_callback: log_callback(f"[FACTURAS MADD] {texto}", tag)
     log("Iniciando descarga de facturas Stellantis MADD...")
-    hoy = datetime.now().date()
-    fecha_objetivo = fecha_objetivo or (hoy if filtro_dia == "Hoy" else _dia_laborable_anterior(hoy))
+    fecha_objetivo = fecha_objetivo or fecha_objetivo_madd(filtro_dia)
+    fechas = sorted(set(fechas or [fecha_objetivo]))
+    fecha_objetivo = fechas[-1]
+    if len(fechas) > 1:
+        log(f"Se recuperan también días sin enviar: {historial_madd.texto_dias(fechas[:-1])}.")
     resultado = {"facturas": [], "error": None, "paso_fallido": None}
     try:
-        resultado = ejecutar_descarga_facturas_madd(usuario, password, carpeta_destino, {fecha_objetivo}, log)
-        registrar_log_facturas_madd(fecha_objetivo, resultado)
+        resultado = ejecutar_descarga_facturas_madd(usuario, password, carpeta_destino, set(fechas), log)
+        por_dia = {fecha: [r for r in resultado.get("facturas", []) if historial_madd.fecha_de_factura(r) == fecha] for fecha in fechas}
+        for fecha in fechas:
+            registrar_log_facturas_madd(fecha, {**resultado, "facturas": por_dia[fecha]})
         if resultado.get("error"):
             log(f"❌ Fallo tras 3 intentos en el paso '{resultado.get('paso_fallido')}': {resultado['error']}", "error")
             _madd_enviar_aviso_fallo(email_aviso_fallo, fecha_objetivo, resultado, log)
             return
-        _madd_enviar_correo_resultado(email_destino, fecha_objetivo, resultado["facturas"], log)
-        log(f"✨ Proceso completado: {len(resultado['facturas'])} factura(s) del {fecha_objetivo.isoformat()}.", "success")
+        for fecha in fechas:
+            _madd_enviar_correo_resultado(email_destino, fecha, por_dia[fecha], log)
+        log(f"✨ Proceso completado: {len(resultado['facturas'])} factura(s) de {historial_madd.texto_dias(fechas)}.", "success")
     except Exception as e:
         resultado["error"] = str(e)
         resultado["paso_fallido"] = resultado.get("paso_fallido") or "envío de correo"
@@ -1702,7 +1729,8 @@ def tarea_facturas_madd(usuario, password, carpeta_destino, email_destino, email
             log(f"❌ No se pudo enviar el aviso de fallo: {e2}", "error")
     finally:
         madd_running = False
-        detalle = "falló" if resultado.get("error") else f"{len(resultado.get('facturas') or [])} facturas del {fecha_objetivo:%d/%m}"
+        dias = historial_madd.texto_dias(fechas) if len(fechas) > 1 else f"{fecha_objetivo:%d/%m}"
+        detalle = "falló" if resultado.get("error") else f"{len(resultado.get('facturas') or [])} facturas del {dias}"
         registrar_ultima_ejecucion("madd", detalle)
         if resultado_callback: resultado_callback(resultado)
         if finalizado_callback: finalizado_callback()
@@ -1721,7 +1749,9 @@ def ejecutar_tarea_madd_standalone():
         registrar_error_detallado("Configuración incompleta para la tarea MADD (usuario/password/carpeta/email).", "", ref="madd_standalone")
         return 1
     resultados = []
-    tarea_facturas_madd(usuario, password, carpeta, email_destino, email_aviso, filtro_dia=filtro_dia, log_callback=None, resultado_callback=resultados.append)
+    # Además del día de hoy, los que se quedaron sin enviar (PC apagado o suspendido, sin red, Outlook caído...)
+    fechas = dias_pendientes_madd(fecha_objetivo_madd(filtro_dia))
+    tarea_facturas_madd(usuario, password, carpeta, email_destino, email_aviso, filtro_dia=filtro_dia, log_callback=None, resultado_callback=resultados.append, fechas=fechas)
     return 1 if not resultados or resultados[-1].get("error") else 0
 
 # ---------- «Última vez» de cada tarea (se guarda en la configuración, clave ultimas_ejecuciones) ----------
@@ -1789,11 +1819,8 @@ def interpretar_fecha_pasada(texto, hoy=None):
 
 
 def facturas_locales_del_dia(carpeta, fecha):
-    """PDF ya descargados de ese día en la carpeta de facturas (Factura_<número>_AAAA-MM-DD.pdf)."""
-    try:
-        return sorted(Path(carpeta).glob(f"Factura_*_{fecha.isoformat()}.pdf"))
-    except OSError:
-        return []
+    """PDF ya descargados de ese día (Factura_<número>_AAAA-MM-DD.pdf), en su subcarpeta del mes o en la principal."""
+    return historial_madd.facturas_del_dia(carpeta, fecha)
 
 
 # ---------------------------------------------------
@@ -2649,8 +2676,14 @@ class AppIntegrada(ctk.CTk):
         self.crear_registro(card, "Registro de la ejecución", "madd_log_box", 140, pady_final=14)
 
         card_prog = self.crear_tarjeta_tab(contenedor, "Programación diaria", "Cuando compruebes que la ejecución manual funciona bien, activa la tarea de Windows para que corra sola todos los días laborables a las 07:00 (despierta el PC si está en suspensión).", en_rejilla=True, icono="reloj")
+        self.estado_tarea_madd_label = self.crear_etiqueta(card_prog, "Tarea de Windows: comprobando...", estilo.TAM_PEQUENO, secundario=True, justify="left")
+        self.estado_tarea_madd_label.pack(anchor="w", padx=estilo.PAD_X, pady=(0, 2))
+        self.resumen_semana_madd_label = self.crear_etiqueta(card_prog, historial_madd.texto_resumen_semana(historial_madd.leer_registro(LOG_FACTURAS_MADD)),
+                                                             estilo.TAM_PEQUENO, secundario=True, justify="left")
+        self.resumen_semana_madd_label.pack(anchor="w", padx=estilo.PAD_X, pady=(0, 10))
         fila_prog = ctk.CTkFrame(card_prog, fg_color="transparent")
         fila_prog.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        self.after(300, self.refrescar_estado_tarea_madd)
         self.btn_activar_tarea_madd = self.crear_boton_principal(fila_prog, "Activar tarea programada (07:00 L-V)", self.activar_tarea_programada_madd)
         self.btn_activar_tarea_madd.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.btn_desactivar_tarea_madd = self.crear_boton_secundario(fila_prog, "Desactivar", self.desactivar_tarea_programada_madd, alto=estilo.ALTO_BOTON)
@@ -4076,6 +4109,93 @@ class AppIntegrada(ctk.CTk):
         self.avisar("Descarga de facturas MADD terminada: revisa el registro.", accion=("Carpeta", lambda: self.abrir_directorio(carpeta_facturas)))
         self.refrescar_ultima_vez("madd")
         self.actualizar_resumen()
+        self.refrescar_estado_tarea_madd()
+
+    # ---------- tarea programada de facturas: estado, ruta del lanzador y días sin enviar ----------
+
+    def ruta_lanzador(self):
+        carpeta = actualizaciones.carpeta_instalacion()
+        return carpeta / cambio_version.NOMBRE_EJECUTABLE if carpeta is not None else None
+
+    def refrescar_estado_tarea_madd(self, al_terminar=None):
+        """Lee la tarea de Windows en segundo plano y actualiza la tarjeta de programación diaria. Si la tarea
+        apunta al programa directamente (versiones anteriores), la cambia al lanzador."""
+        def leer():
+            estado = tarea_windows.leer_estado()
+            lanzador = self.ruta_lanzador()
+            corregida = False
+            if estado and lanzador is not None and lanzador.exists() and tarea_windows.apunta_al_programa(estado, lanzador):
+                corregida = tarea_windows.apuntar_al_lanzador(lanzador)
+                if corregida:
+                    estado = tarea_windows.leer_estado() or estado
+            try:
+                self.after(0, self.mostrar_estado_tarea_madd, estado, corregida, al_terminar)
+            except RuntimeError:
+                pass  # la ventana se cerró mientras se leía la tarea
+
+        threading.Thread(target=leer, daemon=True).start()
+
+    def mostrar_estado_tarea_madd(self, estado, corregida=False, al_terminar=None):
+        self.estado_tarea_madd = estado
+        if corregida:
+            self.log_callback_madd("[FACTURAS MADD] La tarea programada ahora abre el lanzador: así usa siempre la versión instalada.", "success")
+        texto, problema = tarea_windows.resumen(estado)
+        for nombre, valor in (("estado_tarea_madd_label", texto),
+                              ("resumen_semana_madd_label", historial_madd.texto_resumen_semana(historial_madd.leer_registro(LOG_FACTURAS_MADD)))):
+            etiqueta = getattr(self, nombre, None)
+            if etiqueta is not None and etiqueta.winfo_exists():
+                etiqueta.configure(text=valor)
+        etiqueta = getattr(self, "estado_tarea_madd_label", None)
+        if etiqueta is not None and etiqueta.winfo_exists():
+            etiqueta.configure(text_color=self.color_peligro if problema and estado is not None else self.color_texto_sec)
+        if al_terminar:
+            al_terminar(estado)
+
+    def comprobar_facturas_pendientes(self):
+        """Al abrir: si con la tarea activada se ha quedado algún día sin enviar, avisa con «Enviar ahora»."""
+        if not (self.config.get("usuario_madd") and self.config.get("password_madd") and self.config.get("email_facturas_madd")
+                and self.config.get("ruta_carpeta_facturas_madd")):
+            self.refrescar_estado_tarea_madd()  # aunque no haya nada que recuperar, corrige la ruta de la tarea si hace falta
+            return
+
+        def con_estado(estado):
+            if estado is None:
+                return  # sin tarea programada las facturas se envían a mano: no hay nada que recuperar
+            objetivo = fecha_objetivo_madd(self.config.get("filtro_dia_facturas_madd", "Ayer"))
+            try:
+                pendientes = dias_pendientes_madd(objetivo, incluir_objetivo=False)
+                if tarea_windows.no_se_ejecuto_hoy(estado) and objetivo not in historial_madd.dias_enviados(historial_madd.leer_registro(LOG_FACTURAS_MADD)):
+                    pendientes = sorted(set(pendientes) | {objetivo})
+            except Exception as e:
+                registrar_error_detallado(f"Facturas pendientes: {e}", traceback.format_exc())
+                return
+            if pendientes:
+                self.facturas_pendientes = pendientes
+                dias = historial_madd.texto_dias(pendientes)
+                self.avisar(f"Facturas MADD sin enviar: {dias}.", "aviso", duracion=20000, accion=("Enviar ahora", self.enviar_facturas_pendientes))
+
+        self.refrescar_estado_tarea_madd(al_terminar=con_estado)
+
+    def enviar_facturas_pendientes(self):
+        global madd_running
+        pendientes = getattr(self, "facturas_pendientes", None)
+        if not pendientes or self.hay_tarea_activa():
+            return False
+        config = self.config
+        email_destino = config.get("email_facturas_madd", "")
+        if not messagebox.askyesno("Facturas sin enviar", f"Se descargarán de MADD las facturas de {historial_madd.texto_dias(pendientes)} y se enviará "
+                                   f"un correo por día a {email_destino} (o el aviso de «no hay facturas» si un día no tuvo).\n\n¿Enviar?"):
+            return False
+        self.facturas_pendientes = None
+        self.actualizar_estado(f"enviando las facturas de {historial_madd.texto_dias(pendientes)}")
+        madd_running = True
+        threading.Thread(target=tarea_facturas_madd,
+                         args=(config.get("usuario_madd"), config.get("password_madd"), config.get("ruta_carpeta_facturas_madd"), email_destino,
+                               config.get("email_aviso_fallo_madd", "")),
+                         kwargs={"fechas": pendientes, "log_callback": lambda t, tag=None: self.after(0, self.log_callback_madd, t, tag),
+                                 "finalizado_callback": lambda: self.after(0, self.finalizar_facturas_madd)},
+                         daemon=True).start()
+        return True
 
     def activar_tarea_programada_madd(self):
         if not getattr(sys, "frozen", False):
@@ -4083,7 +4203,8 @@ class AppIntegrada(ctk.CTk):
             return
         if not messagebox.askyesno("Activar tarea programada", "Esto crea una tarea en el Programador de tareas de Windows que ejecutará la descarga de facturas MADD todos los días laborables a las 07:00, despertando el PC de la suspensión si hace falta (no de un apagado completo). ¿Confirmas que ya has probado la ejecución manual y ha funcionado bien?"):
             return
-        ruta_exe = sys.executable
+        lanzador = self.ruta_lanzador()
+        ruta_exe = str(lanzador) if lanzador is not None and lanzador.exists() else sys.executable  # el lanzador aplica las actualizaciones
         carpeta_exe = os.path.dirname(ruta_exe)
         ps_script = (
             f"$accion = New-ScheduledTaskAction -Execute '{ruta_exe}' -Argument '--tarea-madd' -WorkingDirectory '{carpeta_exe}'; "
@@ -4105,6 +4226,7 @@ class AppIntegrada(ctk.CTk):
                 messagebox.showerror("Error", f"No se pudo crear la tarea programada:\n{resultado.stderr or resultado.stdout}")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo crear la tarea programada: {e}")
+        self.refrescar_estado_tarea_madd()
 
     def desactivar_tarea_programada_madd(self):
         try:
@@ -4115,6 +4237,7 @@ class AppIntegrada(ctk.CTk):
                 self.avisar("No había ninguna tarea programada activa (o ya se había desactivado).")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo desactivar la tarea: {e}")
+        self.refrescar_estado_tarea_madd()
 
     def valor_widget_o_config(self, atributo, clave, defecto):
         """Valor actual del widget; si su pestaña aún no se ha construido (o se destruyó) se usa el valor guardado."""
@@ -4202,4 +4325,5 @@ if __name__ == "__main__":
     app.mostrar_animacion_inicio()
     app.comprobar_actualizaciones_al_inicio()
     app.after(2500, app.recordar_tareas)
+    app.after(4000, app.comprobar_facturas_pendientes)
     app.mainloop()
