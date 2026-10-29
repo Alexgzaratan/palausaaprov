@@ -18,6 +18,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 import efectos
 import estilo
+import power_line_ticket
 from configuracion import registrar_error_detallado
 from rutas_app import ruta_datos
 
@@ -102,6 +103,9 @@ class HistorialReclamaciones:
                         ruta_pdf TEXT
                     )
                 """)
+                columnas = {fila[1] for fila in conexion.execute("PRAGMA table_info(reclamaciones_power_line)")}
+                if "ticket" not in columnas:  # nº de ticket de Power-Line (TKT...), añadido después
+                    conexion.execute("ALTER TABLE reclamaciones_power_line ADD COLUMN ticket TEXT")
         finally:
             conexion.close()
 
@@ -112,11 +116,20 @@ class HistorialReclamaciones:
         conexion = self._conexion()
         try:
             with conexion:
-                conexion.execute(
+                cursor = conexion.execute(
                     "INSERT INTO reclamaciones_power_line "
                     "(litigio, fecha, pedido_sap, referencia, ruta_word, ruta_pdf) VALUES (?, ?, ?, ?, ?, ?)",
                     (litigio, datetime.now().strftime("%d/%m/%Y %H:%M"), pedido_sap, referencia, ruta_word, ruta_pdf),
                 )
+                return cursor.lastrowid
+        finally:
+            conexion.close()
+
+    def guardar_ticket(self, registro_id, ticket):
+        conexion = self._conexion()
+        try:
+            with conexion:
+                conexion.execute("UPDATE reclamaciones_power_line SET ticket = ? WHERE id = ?", (ticket, registro_id))
         finally:
             conexion.close()
 
@@ -125,10 +138,10 @@ class HistorialReclamaciones:
         conexion = self._conexion()
         try:
             return conexion.execute(
-                "SELECT id, litigio, fecha, pedido_sap, referencia, ruta_word, ruta_pdf "
-                "FROM reclamaciones_power_line WHERE litigio LIKE ? OR referencia LIKE ? OR pedido_sap LIKE ? "
+                "SELECT id, litigio, fecha, pedido_sap, referencia, ruta_word, ruta_pdf, ticket "
+                "FROM reclamaciones_power_line WHERE litigio LIKE ? OR referencia LIKE ? OR pedido_sap LIKE ? OR ticket LIKE ? "
                 "ORDER BY id DESC",
-                (filtro, filtro, filtro),
+                (filtro, filtro, filtro, filtro),
             ).fetchall()
         finally:
             conexion.close()
@@ -452,7 +465,7 @@ class ModuloReclamacionesPowerLine:
         card = app.crear_tarjeta_tab(self.tab_historial, "Historial de reclamaciones", "Busca, abre o elimina registros; eliminar no borra los documentos.", icono="reloj")
         fila = ctk.CTkFrame(card, fg_color="transparent")
         fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
-        self.busqueda_entry = app.crear_entrada(fila, placeholder_text="Nº litigio, referencia o pedido SAP...")
+        self.busqueda_entry = app.crear_entrada(fila, placeholder_text="Nº litigio, referencia, pedido SAP o ticket...")
         self.busqueda_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.busqueda_entry.bind("<KeyRelease>", lambda _event: self.actualizar_historial())
         app.crear_boton_secundario(fila, "Buscar", self.actualizar_historial, width=76).pack(side="right")
@@ -465,9 +478,10 @@ class ModuloReclamacionesPowerLine:
         estilo_tabla.configure("PowerLine.Treeview.Heading", background=app.color_panel_medio, foreground=app.color_texto,
                                font=estilo.fuente(estilo.TAM_PEQUENO, True), relief="flat", borderwidth=0)
         estilo_tabla.map("PowerLine.Treeview", background=[("selected", app.color_principal)], foreground=[("selected", "#ffffff")])
-        columnas = ("litigio", "fecha", "pedido", "referencia")
+        columnas = ("litigio", "fecha", "pedido", "referencia", "ticket")
         self.tabla = ttk.Treeview(tabla_frame, columns=columnas, show="headings", height=7, style="PowerLine.Treeview")
-        for clave, texto, ancho in (("litigio", "Nº Litigio", 115), ("fecha", "Fecha", 120), ("pedido", "Pedido SAP", 120), ("referencia", "Referencia", 150)):
+        for clave, texto, ancho in (("litigio", "Nº Litigio", 115), ("fecha", "Fecha", 120), ("pedido", "Pedido SAP", 120), ("referencia", "Referencia", 150),
+                                    ("ticket", "Ticket Power-Line", 130)):
             self.tabla.heading(clave, text=texto)
             self.tabla.column(clave, width=ancho, anchor="w")
         self.tabla.pack(side="left", fill="both", expand=True, padx=4, pady=4)
@@ -478,6 +492,9 @@ class ModuloReclamacionesPowerLine:
         acciones.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
         app.crear_boton_secundario(acciones, "Abrir documento", self.abrir_documento).pack(side="left")
         app.crear_boton_secundario(acciones, "Abrir carpeta", self.abrir_carpeta).pack(side="left", padx=8)
+        self.btn_enviar_power_line = app.crear_boton_principal(acciones, "Enviar a Power-Line", self.enviar_seleccionado_a_power_line, alto=estilo.ALTO_CONTROL)
+        self.btn_enviar_power_line.pack(side="left")
+        efectos.poner_pista(self.app, self.btn_enviar_power_line, "Crea el ticket de seguimiento con el Nº de litigio y le adjunta el Word")
         ctk.CTkButton(acciones, text="Eliminar registro", height=estilo.ALTO_CONTROL, corner_radius=estilo.RADIO, fg_color=app.color_peligro, hover_color=app.color_peligro_hover, command=self.eliminar_registro).pack(side="right")
         self.actualizar_historial()
 
@@ -487,7 +504,7 @@ class ModuloReclamacionesPowerLine:
         for fila in self.tabla.get_children():
             self.tabla.delete(fila)
         for registro in self.historial.buscar(self.busqueda_entry.get()):
-            self.tabla.insert("", "end", iid=str(registro[0]), values=(registro[1], registro[2], registro[3], registro[4]))
+            self.tabla.insert("", "end", iid=str(registro[0]), values=(registro[1], registro[2], registro[3], registro[4], registro[7] or ""))
 
     def _registro_seleccionado(self):
         seleccion = self.tabla.selection()
@@ -566,8 +583,8 @@ class ModuloReclamacionesPowerLine:
         try:
             datos_documento = {clave: datos[clave] for clave in ("pedido", "referencia", "descripcion")}
             word, pdf = DocumentoPowerLine(self.configuracion["power_line_ruta_plantilla"], salida, datos_documento, self.fotos.copy(), generar_pdf).generar()
-            self.historial.guardar(datos["litigio"], datos["pedido"], datos["referencia"], word, pdf)
-            self.app.after(0, lambda: self._finalizar_generacion(word, pdf))
+            registro_id = self.historial.guardar(datos["litigio"], datos["pedido"], datos["referencia"], word, pdf)
+            self.app.after(0, lambda: self._finalizar_generacion(word, pdf, registro_id, datos["litigio"]))
         except Exception as error:
             detalle = self._detalle_error(error)
             try:
@@ -586,7 +603,7 @@ class ModuloReclamacionesPowerLine:
             return detalle
         return f"Error interno de Word ({type(error).__name__}). Consulta el registro detallado para más información."
 
-    def _finalizar_generacion(self, word, pdf):
+    def _finalizar_generacion(self, word, pdf, registro_id=None, litigio=None):
         self.btn_generar.configure(state="normal", text="Generar documento")
         self.actualizar_historial()
         self.app.actualizar_estado("reclamación Power Line generada", word)
@@ -597,7 +614,95 @@ class ModuloReclamacionesPowerLine:
         mensaje = "Documento Word generado correctamente."
         if pdf:
             mensaje += " También se ha generado el PDF."
-        messagebox.showinfo("Éxito", mensaje)
+        if registro_id is not None and litigio and messagebox.askyesno("Éxito", mensaje + f"\n\n¿Crear ahora el ticket del litigio {litigio} en Power-Line y adjuntarle el Word?"):
+            self.enviar_a_power_line(registro_id, litigio, word)
+        elif registro_id is None or not litigio:
+            messagebox.showinfo("Éxito", mensaje)
+
+    # ---------- ticket en Power-Line (power_line_ticket.py) ----------
+
+    def credenciales_power_line(self):
+        """Usuario y contraseña de Stellantis para Power-Line; si no se han puesto, los de MADD."""
+        config = self.obtener_configuracion()
+        usuario = config["power_line_usuario"].strip() or self.configuracion.get("usuario_madd", "")
+        password = config["power_line_password"] or (self.configuracion.get("password_madd", "") if not config["power_line_usuario"].strip() else "")
+        return usuario, password
+
+    def valores_ticket(self):
+        config = self.obtener_configuracion()
+        return {"cuenta": config["power_line_cuenta"].strip(), "cliente": config["power_line_cliente"].strip(),
+                "tema": config["power_line_tema"].strip() or power_line_ticket.TEMA_POR_DEFECTO,
+                "tipo": config["power_line_tipo"].strip() or power_line_ticket.TIPO_POR_DEFECTO}
+
+    def enviar_seleccionado_a_power_line(self):
+        registro = self._registro_seleccionado()
+        if not registro:
+            return False
+        if registro[7] and not messagebox.askyesno("Power-Line", f"El litigio {registro[1]} ya tiene el ticket {registro[7]}. ¿Crear otro?"):
+            return False
+        return self.enviar_a_power_line(registro[0], registro[1], registro[5])
+
+    def enviar_a_power_line(self, registro_id, litigio, ruta_word):
+        if getattr(self, "_enviando_power_line", False):
+            self.app.avisar("Ya se está creando un ticket en Power-Line.")
+            return False
+        valores = self.valores_ticket()
+        if not valores["cuenta"] or not valores["cliente"]:
+            messagebox.showwarning("Power-Line", "Falta la Cuenta Solicitante o el Cliente destinatario de Power-Line. Rellénalos en Configuración > Reclamaciones Power Line.")
+            return False
+        usuario, password = self.credenciales_power_line()
+        if not usuario or not password:
+            messagebox.showwarning("Power-Line", "Falta el usuario o la contraseña de Stellantis: ponlos en Configuración > Reclamaciones Power Line (o los de MADD en la pestaña Facturas).")
+            return False
+        if not ruta_word or not Path(ruta_word).is_file():
+            messagebox.showwarning("Power-Line", f"No se encuentra el Word del litigio {litigio}:\n{ruta_word}\n\nSin él no se puede adjuntar al ticket.")
+            return False
+        enviar_solo = bool(self.obtener_configuracion()["power_line_envio_automatico"])
+        self._enviando_power_line = True
+        boton = getattr(self, "btn_enviar_power_line", None)
+        if boton is not None and boton.winfo_exists():
+            boton.configure(state="disabled")
+            efectos.marcar_ocupado(boton, "Enviando")
+        aviso = "se enviará solo" if enviar_solo else "revísalo y pulsa «Enviar» en la ventana de Power-Line"
+        self.app.avisar(f"Creando el ticket del litigio {litigio} en Power-Line: {aviso}.")
+        datos = dict(valores, litigio=litigio, ruta_word=ruta_word)
+        log = lambda texto, tag=None: self.app.after(0, self.app.agregar_log, f"[POWER-LINE] {texto}", tag)
+        threading.Thread(target=self._ticket_en_segundo_plano, args=(registro_id, datos, enviar_solo, log), daemon=True).start()
+        return True
+
+    def _ticket_en_segundo_plano(self, registro_id, datos, enviar_solo, log):
+        error, numero, error_adjunto = None, None, None
+        try:
+            usuario, password = self.credenciales_power_line()
+            ticket = power_line_ticket.TicketPowerLine(usuario, password, datos, enviar_solo=enviar_solo, log=log)
+            numero = ticket.ejecutar()
+            error_adjunto = ticket.error_adjunto
+            self.historial.guardar_ticket(registro_id, numero)
+        except power_line_ticket.TicketCancelado:
+            error = "cancelado"
+        except Exception as e:
+            error = str(e).splitlines()[0] if str(e) else type(e).__name__
+            registrar_error_reclamacion(traceback.format_exc(), f"Ticket Power-Line: {error}", datos.get("litigio"))
+        self.app.after(0, lambda: self._ticket_terminado(datos["litigio"], numero, error, error_adjunto))
+
+    def _ticket_terminado(self, litigio, numero, error, error_adjunto):
+        self._enviando_power_line = False
+        boton = getattr(self, "btn_enviar_power_line", None)
+        if boton is not None and boton.winfo_exists():
+            boton.configure(state="normal", text="Enviar a Power-Line")
+        self.actualizar_historial()
+        if numero and not error_adjunto:
+            self.app.agregar_log(f"[POWER-LINE] ✅ Ticket {numero} enviado con el Word del litigio {litigio}.", "success")
+            self.app.avisar(f"Ticket {numero} enviado a Power-Line con el Word del litigio {litigio}.", "ok")
+        elif numero:
+            self.app.agregar_log(f"[POWER-LINE] ⚠️ Ticket {numero} enviado, pero no se pudo adjuntar el Word: {error_adjunto}", "error")
+            messagebox.showwarning("Power-Line", f"El ticket {numero} se ha enviado, pero no se pudo adjuntar el Word ({error_adjunto}).\n\nAdjúntalo a mano con el clip del ticket.")
+        elif error == "cancelado":
+            self.app.agregar_log(f"[POWER-LINE] Ticket del litigio {litigio} no enviado (ventana cerrada o sin pulsar «Enviar»).", "error")
+            self.app.avisar(f"No se ha enviado el ticket del litigio {litigio}.", "aviso")
+        else:
+            self.app.agregar_log(f"[POWER-LINE] ❌ No se pudo crear el ticket del litigio {litigio}: {error}", "error")
+            messagebox.showwarning("Power-Line", f"No se pudo crear el ticket del litigio {litigio}:\n{error}")
 
     def _error_generacion(self, detalle):
         self.btn_generar.configure(state="normal", text="Generar documento")
@@ -613,7 +718,31 @@ class ModuloReclamacionesPowerLine:
         self.abrir_documento_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_abrir_documento", False)))
         self.abrir_carpeta_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_abrir_carpeta", False)))
         ctk.CTkCheckBox(marco, text="Abrir documento al finalizar", variable=self.abrir_documento_var, fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=4)
-        ctk.CTkCheckBox(marco, text="Abrir carpeta al finalizar", variable=self.abrir_carpeta_var, fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=(4, estilo.PAD_FILA))
+        ctk.CTkCheckBox(marco, text="Abrir carpeta al finalizar", variable=self.abrir_carpeta_var, fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=4)
+        app.crear_etiqueta(marco, "Ticket en Power-Line (se entra con el usuario de Stellantis de MADD)", negrita=True).pack(anchor="w", padx=estilo.PAD_FILA, pady=(10, 2))
+        self.usuario_power_line_entry = self._fila_texto(marco, "Usuario Stellantis", "power_line_usuario", "", "Vacío = el mismo de MADD")
+        self.password_power_line_entry = self._fila_texto(marco, "Contraseña", "power_line_password", "", "Vacío = la misma de MADD", ocultar=True)
+        self.cuenta_power_line_entry = self._fila_texto(marco, "Cuenta Solicitante", "power_line_cuenta", "", "Código - nombre, tal como sale en Power-Line")
+        self.cliente_power_line_entry = self._fila_texto(marco, "Cliente destinatario", "power_line_cliente", "", "Código - nombre, tal como sale en Power-Line")
+        self.tema_power_line_entry = self._fila_texto(marco, "Tema del ticket", "power_line_tema", power_line_ticket.TEMA_POR_DEFECTO)
+        self.tipo_power_line_entry = self._fila_texto(marco, "Tipo de ticket", "power_line_tipo", power_line_ticket.TIPO_POR_DEFECTO)
+        self.envio_automatico_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_envio_automatico", False)))
+        ctk.CTkCheckBox(marco, text="Enviar el ticket sin pedir confirmación (la app pulsa «Enviar» y adjunta el Word sola)", variable=self.envio_automatico_var,
+                        fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=(4, estilo.PAD_FILA))
+
+    def _fila_texto(self, parent, texto, clave, defecto, ejemplo="", ocultar=False):
+        fila = ctk.CTkFrame(parent, fg_color="transparent")
+        fila.pack(padx=estilo.PAD_FILA, pady=3, fill="x")
+        self.app.crear_etiqueta(fila, texto, width=180, anchor="w").pack(side="left")
+        opciones = {"placeholder_text": ejemplo} if ejemplo else {}
+        if ocultar:
+            opciones["show"] = "•"
+        entrada = self.app.crear_entrada(fila, **opciones)
+        valor = self.configuracion.get(clave) or defecto
+        if valor:
+            entrada.insert(0, valor)
+        entrada.pack(side="left", fill="x", expand=True, padx=6)
+        return entrada
 
     def _fila_ajuste(self, parent, texto, clave, comando):
         fila = ctk.CTkFrame(parent, fg_color="transparent")
@@ -637,4 +766,20 @@ class ModuloReclamacionesPowerLine:
             "power_line_ruta_guardado": self.guardado_entry.get() if hasattr(self, "guardado_entry") else self.configuracion.get("power_line_ruta_guardado", ""),
             "power_line_abrir_documento": self.abrir_documento_var.get() if hasattr(self, "abrir_documento_var") else bool(self.configuracion.get("power_line_abrir_documento", False)),
             "power_line_abrir_carpeta": self.abrir_carpeta_var.get() if hasattr(self, "abrir_carpeta_var") else bool(self.configuracion.get("power_line_abrir_carpeta", False)),
+            "power_line_usuario": self._valor("usuario_power_line_entry", "power_line_usuario", ""),
+            "power_line_password": self._valor("password_power_line_entry", "power_line_password", ""),
+            "power_line_cuenta": self._valor("cuenta_power_line_entry", "power_line_cuenta", ""),
+            "power_line_cliente": self._valor("cliente_power_line_entry", "power_line_cliente", ""),
+            "power_line_tema": self._valor("tema_power_line_entry", "power_line_tema", power_line_ticket.TEMA_POR_DEFECTO),
+            "power_line_tipo": self._valor("tipo_power_line_entry", "power_line_tipo", power_line_ticket.TIPO_POR_DEFECTO),
+            "power_line_envio_automatico": self.envio_automatico_var.get() if hasattr(self, "envio_automatico_var") else bool(self.configuracion.get("power_line_envio_automatico", False)),
         }
+
+    def _valor(self, atributo, clave, defecto):
+        entrada = getattr(self, atributo, None)
+        if entrada is not None:
+            try:
+                return entrada.get()
+            except Exception:
+                pass
+        return self.configuracion.get(clave) or defecto
