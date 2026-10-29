@@ -33,6 +33,9 @@ import cambio_version
 import instancia_unica
 import historial_madd
 import tarea_windows
+import avisos_clientes
+import hashlib
+import json
 from version import VERSION
 import tareas
 from rutas_app import ruta_datos
@@ -867,72 +870,117 @@ def ejecutar_automatizacion_task(ruta_excel, usuario, password, precio_minimo, n
 # 4. LÓGICA DE GENERACIÓN DE PEDIDOS (CON CARPETAS POR RANGO) - v13
 # ---------------------------------------------------
 
+REGISTRO_PEDIDOS = ruta_datos("pedidos_generados.json", migrar=False)
+LINEAS_POR_PEDIDO = 100
+
+def leer_lineas_pedido(ruta_excel):
+    """Líneas del Excel urgente desde la fila 2: [referencia sin «2/», cantidad (C), cliente (F)]."""
+    wb = load_workbook(ruta_excel, data_only=True)
+    try:
+        datos = []
+        for row in wb.active.iter_rows(min_row=2, values_only=True):
+            if any(cell is not None and str(cell).strip() != "" for cell in row):
+                ref = row[0] if len(row) > 0 else ""
+                if ref and "2/" in str(ref):
+                    ref = str(ref).replace("2/", "")
+                datos.append([ref, row[2] if len(row) > 2 else "", row[5] if len(row) > 5 else ""])
+        return datos
+    finally:
+        wb.close()
+
+def firma_lineas_pedido(datos):
+    return hashlib.sha256(json.dumps(datos, default=str, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+def leer_registro_pedidos():
+    try:
+        with open(REGISTRO_PEDIDOS, encoding="utf-8") as f:
+            datos = json.load(f)
+        return datos if isinstance(datos, list) else []
+    except (OSError, ValueError):
+        return []
+
+def pedido_ya_generado(ruta_excel):
+    """Si ese Excel (con las mismas líneas) ya se convirtió en pedidos, el registro de esa vez; si no, None."""
+    try:
+        firma = firma_lineas_pedido(leer_lineas_pedido(ruta_excel))
+    except Exception:
+        return None
+    return next((r for r in reversed(leer_registro_pedidos()) if r.get("firma") == firma), None)
+
+def _anotar_pedido(datos, numeros):
+    registro = leer_registro_pedidos()[-49:] + [{"firma": firma_lineas_pedido(datos), "cuando": datetime.now().isoformat(timespec="seconds"),
+                                                 "numeros": numeros, "lineas": len(datos)}]
+    temporal = REGISTRO_PEDIDOS + ".tmp"
+    with open(temporal, "w", encoding="utf-8") as f:
+        json.dump(registro, f, ensure_ascii=False, indent=1)
+    os.replace(temporal, REGISTRO_PEDIDOS)
+
+def texto_numeros_pedido(numeros):
+    return numeros[0] if len(numeros) == 1 else f"{numeros[0]}-{numeros[-1]}"
+
 def generar_pedidos_task(ruta_excel, carpeta_pedidos, log_callback=None, progreso_callback=None, finalizado_callback=None, stop_event=None, numero_callback=None):
+    """Convierte el Excel urgente en CSV de 100 líneas y lo limpia. Todo o nada: los CSV se escriben con un nombre
+    temporal y solo al final se renombran y se limpia el Excel; si se detiene o falla, no queda ningún pedido a medias."""
     global pedidos_running
     pedidos_running = True
     def log(texto, tag=None):
         if log_callback: log_callback(f"[PEDIDOS] {texto}", tag) # AJUSTE v13: Prefijo [PEDIDOS]
+    temporales = []  # (ruta temporal, ruta final, número)
     try:
         ruta_backup = crear_copia_seguridad(ruta_excel)
         log(f"Backup creado: {ruta_backup}", "success")
-        # 1. LIMPIEZA DE REFERENCIAS (2/) Y GUARDADO INTERMEDIO
-        wb = load_workbook(ruta_excel)
-        ws = wb.active
-        for fila in range(2, ws.max_row + 1):
-            valor = ws[f"A{fila}"].value
-            if valor:
-                valor_str = str(valor)
-                if "2/" in valor_str:
-                    ws[f"A{fila}"] = valor_str.replace("2/", "")
-        wb.save(ruta_excel)
-        
-        # 2. LECTURA DE DATOS FILTRADOS (SOLO COLUMNAS A, C, F)
-        wb_data = load_workbook(ruta_excel, data_only=True)
-        ws_data = wb_data.active
-        
-        datos = []
-        for row in ws_data.iter_rows(min_row=2, values_only=True):
-            if any(cell is not None and str(cell).strip() != "" for cell in row):
-                ref = row[0] if len(row) > 0 else ""
-                cant = row[2] if len(row) > 2 else ""
-                cli = row[5] if len(row) > 5 else ""
-                datos.append([ref, cant, cli])
-        
+        datos = leer_lineas_pedido(ruta_excel)
         if not datos:
             log("⚠️ El Excel está vacío o no tiene datos válidos.", "error")
             return
 
-        # 3. GESTIÓN DE CARPETAS Y GENERACIÓN DE CSV
         contador = obtener_ultimo_contador_y_ruta(carpeta_pedidos, ".csv")
-        
-        for i in range(0, len(datos), 100):
-            if stop_event and stop_event.is_set(): break
-            bloque = datos[i:i+100]
-            
+        for i in range(0, len(datos), LINEAS_POR_PEDIDO):
+            if stop_event and stop_event.is_set():
+                break
+            bloque = datos[i:i + LINEAS_POR_PEDIDO]
             contador += 1
             ruta_rango = obtener_ruta_para_contador(carpeta_pedidos, contador)
             ruta_csv = os.path.join(ruta_rango, f"{contador}.csv")
-            
-            with open(ruta_csv, "w", newline="", encoding="utf-8") as f:
+            temporal = os.path.join(ruta_rango, f"~{contador}.csv.parcial")  # no cuenta como pedido hasta renombrarlo
+            with open(temporal, "w", newline="", encoding="utf-8") as f:
                 csv.writer(f, delimiter=";").writerows(bloque)
-            
-            log(f"✅ Pedido generado: {contador}.csv (en {os.path.basename(ruta_rango)})", "success")
-            if numero_callback: numero_callback(str(contador))
-            if progreso_callback: progreso_callback((i + len(bloque)) / len(datos))
-        
-        # 4. BORRADO FÍSICO FINAL DEL EXCEL
-        if not (stop_event and stop_event.is_set()):
-            wb_clean = load_workbook(ruta_excel)
+            temporales.append((temporal, ruta_csv, str(contador)))
+            if progreso_callback: progreso_callback((i + len(bloque)) / len(datos) * 0.9)
+
+        if stop_event and stop_event.is_set():
+            log("Detenido: no se ha generado ningún pedido y el Excel sigue como estaba.", "error")
+            return
+        numeros = []
+        for temporal, ruta_csv, numero in temporales:
+            os.replace(temporal, ruta_csv)
+            numeros.append(numero)
+            log(f"✅ Pedido generado: {numero}.csv (en {os.path.basename(os.path.dirname(ruta_csv))})", "success")
+            if numero_callback: numero_callback(numero)
+        temporales = []
+
+        wb_clean = load_workbook(ruta_excel)
+        try:
             ws_clean = wb_clean.active
             if ws_clean.max_row > 0:
                 ws_clean.delete_rows(1, ws_clean.max_row)
             wb_clean.save(ruta_excel)
-            log("✅ Pedidos generados (Ref, Cant, Cliente) y Excel limpiado.", "success")
-            
+        finally:
+            wb_clean.close()
+        _anotar_pedido(datos, numeros)
+        if progreso_callback: progreso_callback(1)
+        log("✅ Pedidos generados (Ref, Cant, Cliente) y Excel limpiado.", "success")
     except Exception as e:
         log(f"❌ Error: {e}", "error")
+        if temporales:
+            log("No se ha generado ningún pedido: se descartan los ficheros a medias y el Excel sigue como estaba.", "error")
         registrar_error_detallado(str(e), traceback.format_exc())
     finally:
+        for temporal, _, _ in temporales:
+            try:
+                os.remove(temporal)
+            except OSError:
+                pass
         pedidos_running = False
         if finalizado_callback: finalizado_callback()
 
@@ -1026,17 +1074,8 @@ def _normalizar_cliente_dms(valor):
         return str(int(valor))
     return str(valor).strip()
 
-def _columnas_clientes(cabecera, columnas):
-    """Índices (nombre, email) de clientes.xlsx. Se buscan por la cabecera (CORREO/EMAIL, NOMBRE/TALLER); si no se
-    reconoce: A=num_cliente, B=email con dos columnas, o A=num_cliente, B=nombre, C=email con tres."""
-    titulos = [str(valor or "").strip().upper() for valor in cabecera]
-    email = next((i for i, t in enumerate(titulos) if i > 0 and ("CORREO" in t or "MAIL" in t)), None)
-    nombre = next((i for i, t in enumerate(titulos) if i > 0 and ("NOMBRE" in t or "TALLER" in t)), None)
-    if email is None:
-        email = 1 if columnas <= 2 else 2
-        if nombre is None and columnas > 2:
-            nombre = 1
-    return nombre, email
+_columnas_clientes = avisos_clientes.columnas_clientes
+REGISTRO_AVISOS = avisos_clientes.RegistroAvisos(ruta_datos("avisos_enviados.json", migrar=False))
 
 def cargar_clientes_excel(ruta_clientes):
     """Lee clientes.xlsx -> {num_cliente: {"nombre", "email"}}. Vale con A=num_cliente, B=email (sin nombre del taller)
@@ -1116,36 +1155,12 @@ def extraer_avisos(ruta_hoja, log=lambda *a, **k: None):
         wb.close()
     return no_suministra, sustituciones
 
-def construir_cuerpo_aviso(referencias, fecha_str):
-    if len(referencias) == 1:
-        return (
-            "Buenas tardes.\n\n"
-            f"La referencia {referencias[0]} correspondiente al pedido del día {fecha_str} no suministra.\n\n"
-            "Gracias por su atención,"
-        )
-    lineas = "\n".join(f"- {ref}" for ref in referencias)
-    return (
-        "Buenas tardes.\n\n"
-        f"Las siguientes referencias correspondientes al pedido del día {fecha_str} no suministran:\n\n"
-        f"{lineas}\n\n"
-        "Gracias por su atención,"
-    )
+def construir_cuerpo_aviso(referencias, fecha_str, textos=None):
+    """Texto del aviso de no suministro (textos editables desde la app; ver avisos_clientes.py)."""
+    return avisos_clientes.cuerpo_no_suministra(referencias, fecha_str, textos)
 
-def construir_cuerpo_sustitucion(sustituciones, fecha_str):
-    if len(sustituciones) == 1:
-        original, final = sustituciones[0]
-        return (
-            "Buenas tardes.\n\n"
-            f"La referencia {original} correspondiente al pedido del día {fecha_str} ha sido sustituida por la referencia {final}.\n\n"
-            "Gracias por su atención,"
-        )
-    lineas = "\n".join(f"- {original} → {final}" for original, final in sustituciones)
-    return (
-        "Buenas tardes.\n\n"
-        f"Las siguientes referencias correspondientes al pedido del día {fecha_str} han sido sustituidas:\n\n"
-        f"{lineas}\n\n"
-        "Gracias por su atención,"
-    )
+def construir_cuerpo_sustitucion(sustituciones, fecha_str, textos=None):
+    return avisos_clientes.cuerpo_sustitucion(sustituciones, fecha_str, textos)
 
 def crear_borrador_outlook(outlook, destinatarios, asunto, cuerpo_texto):
     """Crea un borrador en Outlook de escritorio (no lo envía) respetando la firma por defecto del usuario.
@@ -1159,6 +1174,31 @@ def crear_borrador_outlook(outlook, destinatarios, asunto, cuerpo_texto):
     cuerpo_html = cuerpo_texto.replace("\n", "<br>")
     mail.HTMLBody = f"<div style=\"font-family:Calibri,Arial,sans-serif;font-size:11pt\">{cuerpo_html}</div><br>{firma_html}"
     mail.Save()
+    try:
+        return mail.EntryID  # para poder completarlo (destinatario) y enviarlo después
+    except Exception:
+        return None
+
+def completar_borrador_outlook(outlook, borrador_id, destinatarios, asunto, cuerpo_texto, enviar=True):
+    """Pone el destinatario al borrador creado antes y lo envía (o lo deja guardado). Si el borrador ya no está
+    (se borró o se envió a mano), se crea el correo de nuevo."""
+    mail = None
+    if borrador_id:
+        try:
+            mail = outlook.GetNamespace("MAPI").GetItemFromID(borrador_id)
+        except Exception:
+            mail = None
+    if mail is None:
+        if enviar:
+            enviar_correo_outlook_aviso(outlook, destinatarios, asunto, cuerpo_texto)
+        else:
+            crear_borrador_outlook(outlook, destinatarios, asunto, cuerpo_texto)
+        return
+    mail.To = destinatarios
+    if enviar:
+        mail.Send()
+    else:
+        mail.Save()
 
 def enviar_correo_outlook_aviso(outlook, destinatarios, asunto, cuerpo_texto):
     """Igual que crear_borrador_outlook pero envía el correo directamente (olMailItem.Send)."""
@@ -1172,7 +1212,9 @@ def enviar_correo_outlook_aviso(outlook, destinatarios, asunto, cuerpo_texto):
     mail.HTMLBody = f"<div style=\"font-family:Calibri,Arial,sans-serif;font-size:11pt\">{cuerpo_html}</div><br>{firma_html}"
     mail.Send()
 
-def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automaticamente=False, emails_companeros="", log_callback=None, progreso_callback=None, finalizado_callback=None, resultado_callback=None):
+def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automaticamente=False, emails_companeros="", log_callback=None, progreso_callback=None, finalizado_callback=None, resultado_callback=None, registro=None, textos=None):
+    """Un aviso por cliente y tipo. Con 'registro' (avisos_clientes.RegistroAvisos) no se repiten las referencias
+    de esta hoja ya avisadas a ese cliente: solo se envían las nuevas."""
     global avisos_running
     avisos_running = True
     def log(texto, tag=None):
@@ -1183,7 +1225,10 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
         "sustitucion": {"enviados": [], "borradores": [], "sin_correo": []},
         "hoja_companeros_enviada": False,
         "error": None,
+        "ya_avisados": [],
+        "hoja": Path(ruta_hoja).stem,
     }
+    hoja = Path(ruta_hoja).stem
     try:
         match = re.search(r"\d{2}-\d{2}-\d{4}", Path(ruta_hoja).stem)
         fecha_str = match.group(0) if match else Path(ruta_hoja).stem
@@ -1227,14 +1272,15 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
             total = len(agrupado_no_suministra) + len(agrupado_sustituciones)
             hecho = 0
 
-            def procesar_cliente(cliente_num, email, nombre, asunto, cuerpo, detalle, bucket, tipo_label, ref_sufijo):
+            def procesar_cliente(cliente_num, email, nombre, asunto, cuerpo, detalle, bucket, tipo_label, ref_sufijo, tipo=None, motivo=None):
                 nonlocal hecho
                 enviar_directo = enviar_automaticamente and bool(email)
+                borrador_id = None
                 try:
                     if enviar_directo:
                         enviar_correo_outlook_aviso(outlook, email, asunto, cuerpo)
                     else:
-                        crear_borrador_outlook(outlook, email, asunto, cuerpo)
+                        borrador_id = crear_borrador_outlook(outlook, email, asunto, cuerpo)
                 except Exception as e:
                     accion = "enviando el correo" if enviar_directo else "creando el borrador"
                     log(f"❌ Error {accion} ({tipo_label}) para el cliente {cliente_num}: {e}", "error")
@@ -1242,7 +1288,14 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
                     hecho += 1
                     if progreso_callback: progreso_callback(hecho / total)
                     return
-                entrada = {"cliente": cliente_num, "nombre": nombre, "email": email, "detalle": detalle}
+                entrada = {"cliente": cliente_num, "nombre": nombre, "email": email, "detalle": detalle, "tipo": tipo, "motivo": motivo,
+                           "asunto": asunto, "cuerpo": cuerpo, "borrador_id": borrador_id, "hoja": hoja}
+                if registro is not None and tipo:
+                    try:
+                        registro.anotar([{"hoja": hoja, "cliente": cliente_num, "nombre": nombre, "tipo": tipo, "referencias": [str(d) for d in detalle],
+                                          "cuando": datetime.now().isoformat(timespec="seconds"), "estado": "enviado" if enviar_directo else "borrador", "email": email}])
+                    except Exception as e:
+                        registrar_error_detallado(f"Registro de avisos: {e}", traceback.format_exc())
                 if enviar_directo:
                     bucket["enviados"].append(entrada)
                     log(f"✅ Correo enviado ({tipo_label}) a {nombre or f'cliente {cliente_num}'} ({len(detalle)} ref.)", "success")
@@ -1251,26 +1304,50 @@ def generar_avisos_no_suministro_task(ruta_hoja, ruta_clientes, enviar_automatic
                     log(f"✅ Borrador creado ({tipo_label}) para {nombre or f'cliente {cliente_num}'} ({len(detalle)} ref.)", "success")
                 else:
                     bucket["sin_correo"].append(entrada)
-                    log(f"⚠️ Cliente {cliente_num} sin email en el Excel de clientes ({tipo_label}); borrador creado sin destinatario.", "error")
+                    falta = "no está en el Excel de clientes" if motivo == "no_en_excel" else "no tiene email en el Excel de clientes"
+                    log(f"⚠️ El cliente {cliente_num} {falta} ({tipo_label}); borrador creado sin destinatario.", "error")
                 hecho += 1
                 if progreso_callback: progreso_callback(hecho / total)
+
+            def pendientes(cliente_num, tipo, elementos, clave):
+                """Quita lo que ya se avisó a ese cliente desde esta hoja (si se repiten los avisos solo van los nuevos)."""
+                if registro is None:
+                    return elementos
+                ya = registro.ya_avisadas(hoja, cliente_num, tipo)
+                nuevos = [e for e in elementos if clave(e) not in ya]
+                if len(nuevos) < len(elementos):
+                    omitidas = len(elementos) - len(nuevos)
+                    resultado["ya_avisados"].append({"cliente": cliente_num, "tipo": tipo, "omitidas": omitidas})
+                    log(f"El cliente {cliente_num} ya recibió el aviso de {omitidas} referencia(s) de esta hoja ({avisos_clientes.NOMBRE_TIPO[tipo]}): no se repite"
+                        + ("." if not nuevos else f"; se avisan solo las {len(nuevos)} nuevas."))
+                return nuevos
 
             for cliente_num, referencias in agrupado_no_suministra.items():
                 info = clientes.get(cliente_num)
                 nombre = info["nombre"] if info else ""
                 email = info["email"] if info else ""
-                asunto = f"Aviso referencia no suministrada {fecha_str}"
-                cuerpo = construir_cuerpo_aviso(referencias, fecha_str)
-                procesar_cliente(cliente_num, email, nombre, asunto, cuerpo, referencias, resultado["no_suministra"], "no suministra", "nosum")
+                referencias = pendientes(cliente_num, avisos_clientes.NO_SUMINISTRA, referencias, str)
+                if not referencias:
+                    hecho += 1
+                    continue
+                asunto = avisos_clientes.asunto(avisos_clientes.NO_SUMINISTRA, fecha_str, textos)
+                cuerpo = construir_cuerpo_aviso(referencias, fecha_str, textos)
+                procesar_cliente(cliente_num, email, nombre, asunto, cuerpo, referencias, resultado["no_suministra"], "no suministra", "nosum",
+                                 tipo=avisos_clientes.NO_SUMINISTRA, motivo=None if info else "no_en_excel")
 
             for cliente_num, sustituciones in agrupado_sustituciones.items():
                 info = clientes.get(cliente_num)
                 nombre = info["nombre"] if info else ""
                 email = info["email"] if info else ""
-                asunto = f"Aviso referencia sustituida {fecha_str}"
-                cuerpo = construir_cuerpo_sustitucion(sustituciones, fecha_str)
+                sustituciones = pendientes(cliente_num, avisos_clientes.SUSTITUCION, sustituciones, lambda par: f"{par[0]} → {par[1]}")
+                if not sustituciones:
+                    hecho += 1
+                    continue
+                asunto = avisos_clientes.asunto(avisos_clientes.SUSTITUCION, fecha_str, textos)
+                cuerpo = construir_cuerpo_sustitucion(sustituciones, fecha_str, textos)
                 detalle = [f"{original} → {final}" for original, final in sustituciones]
-                procesar_cliente(cliente_num, email, nombre, asunto, cuerpo, detalle, resultado["sustitucion"], "sustitución", "sust")
+                procesar_cliente(cliente_num, email, nombre, asunto, cuerpo, detalle, resultado["sustitucion"], "sustitución", "sust",
+                                 tipo=avisos_clientes.SUSTITUCION, motivo=None if info else "no_en_excel")
 
             for etiqueta, bucket in (("no suministra", resultado["no_suministra"]), ("sustitución", resultado["sustitucion"])):
                 partes = []
@@ -2604,7 +2681,15 @@ class AppIntegrada(ctk.CTk):
         self.crear_fila_archivo(card_avisos, "Excel de clientes", "clientes_avisos_entry", "ruta_excel_clientes", "clientes.xlsx...", "Examinar", lambda: self.seleccionar_archivo(self.clientes_avisos_entry, [("Excel files", "*.xlsx")]))
         self.crear_campo_en_fila(card_avisos, "Correo(s) de compañeros (se les envía la hoja de pedido completa)", "email_companeros_avisos_entry", "email_companeros_avisos", "", placeholder_text="correo1@palausa.es; correo2@palausa.es")
         self.avisos_auto_var = ctk.BooleanVar(value=self.config.get("avisos_envio_automatico", True))
-        ctk.CTkCheckBox(card_avisos, text="Enviar automáticamente si el cliente tiene email (si no, se guarda como borrador)", variable=self.avisos_auto_var, fg_color=self.color_principal, hover_color=self.color_hover, text_color=self.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_X, pady=(0, estilo.PAD_Y))
+        fila_opciones = ctk.CTkFrame(card_avisos, fg_color="transparent")
+        fila_opciones.pack(fill="x", padx=estilo.PAD_X, pady=(0, estilo.PAD_Y))
+        ctk.CTkCheckBox(fila_opciones, text="Enviar automáticamente si el cliente tiene email (si no, se guarda como borrador)", variable=self.avisos_auto_var, fg_color=self.color_principal, hover_color=self.color_hover, text_color=self.color_texto, font=estilo.fuente()).pack(side="left")
+        self.btn_historial_avisos = self.crear_boton_secundario(fila_opciones, "Historial", self.ver_historial_avisos, alto=estilo.ALTO_BOTON_COMPACTO, width=84)
+        self.btn_historial_avisos.pack(side="right")
+        efectos.poner_pista(self, self.btn_historial_avisos, "Avisos enviados a cada taller por mes")
+        self.btn_textos_avisos = self.crear_boton_secundario(fila_opciones, "Textos", self.editar_textos_avisos, alto=estilo.ALTO_BOTON_COMPACTO, width=72)
+        self.btn_textos_avisos.pack(side="right", padx=(0, 6))
+        efectos.poner_pista(self, self.btn_textos_avisos, "Editar el texto de los correos a los clientes")
         self.btn_avisos = self.crear_boton_principal(card_avisos, "Generar avisos de no suministro", self.iniciar_avisos_no_suministro)
         self.btn_avisos.pack(padx=estilo.PAD_X, pady=(2, estilo.PAD_Y), fill="x")
         self.crear_registro(card_avisos, "Registro de avisos", "avisos_log_box", 110, pady_final=14)
@@ -3516,6 +3601,14 @@ class AppIntegrada(ctk.CTk):
             return
         if self.excel_abierto(ruta, "El Excel de pedidos"):
             return
+        anterior = pedido_ya_generado(ruta)
+        if anterior:
+            cuando = datetime.fromisoformat(anterior["cuando"])
+            dia = "hoy" if cuando.date() == datetime.now().date() else f"el {cuando:%d/%m}"
+            if not messagebox.askyesno("Pedidos ya generados", f"Este Excel ya se convirtió en los pedidos {texto_numeros_pedido(anterior['numeros'])} {dia} a las "
+                                       f"{cuando:%H:%M} ({anterior['lineas']} líneas).\n\nSi lo generas otra vez, esas líneas se pedirán dos veces. ¿Generarlos de nuevo?",
+                                       icon="warning", default="no"):
+                return
         self.actualizar_estado("generando pedidos", folder)
         self.btn_pedidos.configure(fg_color=self.color_peligro, hover_color=self.color_peligro_hover)
         efectos.marcar_ocupado(self.btn_pedidos, "Detener")
@@ -3620,6 +3713,11 @@ class AppIntegrada(ctk.CTk):
             mensaje = "Se creará un borrador en Outlook por cada cliente con referencias en NO SUMINISTRA y otro por cada cliente con referencias SUSTITUIDAS. Se guardan en Borradores sin enviarse."
         if emails_companeros:
             mensaje += f"\n\nAdemás se enviará la hoja de pedido completa a: {emails_companeros}."
+        enviados, ultimo = REGISTRO_AVISOS.resumen_hoja(Path(ruta_hoja).stem)
+        if enviados:
+            mensaje += (f"\n\nLos avisos de esta hoja ya se enviaron a las {ultimo:%H:%M}"
+                        + (f" del {ultimo:%d/%m}" if ultimo.date() != datetime.now().date() else "")
+                        + f" ({enviados} correo{'s' if enviados != 1 else ''}). Solo se enviarán las referencias nuevas.")
         mensaje += "\n\n¿Continuar?"
         if not messagebox.askyesno("Generar avisos", mensaje):
             return
@@ -3638,6 +3736,8 @@ class AppIntegrada(ctk.CTk):
                 "progreso_callback": lambda v: self.after(0, self.actualizar_progreso, v),
                 "finalizado_callback": lambda: self.after(0, self.finalizar_avisos_no_suministro),
                 "resultado_callback": lambda r: self.after(0, self.mostrar_resultado_avisos, r),
+                "registro": REGISTRO_AVISOS,
+                "textos": avisos_clientes.textos(self.config),
             },
             daemon=True,
         ).start()
@@ -3654,10 +3754,18 @@ class AppIntegrada(ctk.CTk):
             return
         no_suministra = resultado.get("no_suministra", {})
         sustitucion = resultado.get("sustitucion", {})
+        ya_avisados = resultado.get("ya_avisados", [])
         if not any(no_suministra.get(k) for k in ("enviados", "borradores", "sin_correo")) and \
            not any(sustitucion.get(k) for k in ("enviados", "borradores", "sin_correo")):
+            if ya_avisados:
+                self.avisar("Todos los avisos de esta hoja ya se habían enviado: no se ha repetido ninguno.", "ok")
             return
         lineas = []
+        hoy = datetime.now()
+
+        def este_mes(entrada):
+            total = REGISTRO_AVISOS.referencias_mes(entrada["cliente"], hoy.year, hoy.month)
+            return f" — este mes: {total} ref." if total > len(entrada["detalle"]) else ""
 
         def volcar_bloque(titulo, bucket):
             enviados = bucket.get("enviados", [])
@@ -3671,19 +3779,96 @@ class AppIntegrada(ctk.CTk):
             if enviados:
                 lineas.append(f"Correos enviados: {len(enviados)}")
                 for entrada in enviados:
-                    lineas.append(f"  • {nombre_cliente_aviso(entrada)}: {', '.join(entrada['detalle'])}")
+                    lineas.append(f"  • {nombre_cliente_aviso(entrada)}: {', '.join(entrada['detalle'])}{este_mes(entrada)}")
             if borradores:
                 lineas.append(f"Borradores generados: {len(borradores)}")
                 for entrada in borradores:
                     lineas.append(f"  • {nombre_cliente_aviso(entrada)}: {', '.join(entrada['detalle'])}")
             if sin_correo:
-                lineas.append(f"Sin email en el Excel de clientes ({len(sin_correo)}), borrador creado sin destinatario:")
+                lineas.append(f"Sin correo ({len(sin_correo)}), borrador creado sin destinatario:")
                 for entrada in sin_correo:
-                    lineas.append(f"  • Cliente {entrada['cliente']}: {', '.join(entrada['detalle'])}")
+                    falta = "no está en el Excel de clientes" if entrada.get("motivo") == "no_en_excel" else "sin email en el Excel"
+                    lineas.append(f"  • Cliente {entrada['cliente']} ({falta}): {', '.join(entrada['detalle'])}")
 
         volcar_bloque("No suministra", no_suministra)
         volcar_bloque("Sustituidas", sustitucion)
+        if ya_avisados:
+            omitidas = sum(a["omitidas"] for a in ya_avisados)
+            lineas += ["", f"Ya avisadas antes desde esta hoja (no se repiten): {omitidas} referencia{'s' if omitidas != 1 else ''}."]
         messagebox.showinfo("Avisos de no suministro", "\n".join(lineas))
+        faltan = no_suministra.get("sin_correo", []) + sustitucion.get("sin_correo", [])
+        if faltan:
+            self.pedir_correos_clientes(faltan, bool(self.avisos_auto_var.get()))
+
+    def pedir_correos_clientes(self, entradas, envio_automatico):
+        """Ventana para escribir el correo de los clientes que no lo tienen; lo guarda en el Excel de clientes y
+        envía (o completa) sus borradores."""
+        ruta_clientes = self.widget_get("clientes_avisos_entry")
+
+        def al_guardar(correos):
+            try:
+                actualizados, anadidos = avisos_clientes.guardar_correos_clientes(ruta_clientes, correos, _normalizar_cliente_dms)
+            except PermissionError:
+                messagebox.showwarning("Excel de clientes", f"No se puede guardar {Path(ruta_clientes).name}: está abierto en Excel. Ciérralo y pulsa otra vez.")
+                return False
+            except Exception as e:
+                registrar_error_detallado(f"Guardar correos de clientes: {e}", traceback.format_exc())
+                messagebox.showwarning("Excel de clientes", f"No se pudieron guardar los correos en {Path(ruta_clientes).name}: {e}")
+                return False
+            self.log_callback_avisos(f"[AVISOS] Excel de clientes actualizado: {anadidos} cliente(s) añadido(s) y {actualizados} correo(s) completado(s).", "success")
+            pendientes = [(e, correos[e["cliente"]]) for e in entradas if e["cliente"] in correos]
+            threading.Thread(target=self.completar_avisos_sin_correo, args=(pendientes, envio_automatico), daemon=True).start()
+            return True
+
+        self.dialogo_correos_clientes = avisos_clientes.DialogoCorreosClientes(self, entradas, al_guardar, envio_automatico, validar=correos_invalidos)
+        return self.dialogo_correos_clientes
+
+    def completar_avisos_sin_correo(self, pendientes, enviar):
+        import pythoncom
+        import win32com.client
+        log = lambda t, tag=None: self.after(0, self.log_callback_avisos, f"[AVISOS] {t}", tag)
+        hechos = 0
+        pythoncom.CoInitialize()
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            for entrada, email in pendientes:
+                try:
+                    completar_borrador_outlook(outlook, entrada.get("borrador_id"), email, entrada["asunto"], entrada["cuerpo"], enviar=enviar)
+                except Exception as e:
+                    log(f"❌ No se pudo {'enviar' if enviar else 'completar'} el aviso del cliente {entrada['cliente']}: {e}", "error")
+                    registrar_error_detallado(str(e), traceback.format_exc(), ref=f"completar_aviso_{entrada['cliente']}")
+                    continue
+                hechos += 1
+                if entrada.get("tipo"):
+                    REGISTRO_AVISOS.anotar([{"hoja": entrada.get("hoja"), "cliente": entrada["cliente"], "nombre": entrada.get("nombre", ""), "tipo": entrada["tipo"],
+                                             "referencias": [str(d) for d in entrada["detalle"]], "cuando": datetime.now().isoformat(timespec="seconds"),
+                                             "estado": "enviado" if enviar else "borrador", "email": email}])
+                log(f"✅ Aviso {'enviado' if enviar else 'completado en Borradores'} para el cliente {entrada['cliente']} ({email}).", "success")
+        except Exception as e:
+            log(f"❌ No se pudo conectar con Outlook: {e}", "error")
+        finally:
+            pythoncom.CoUninitialize()
+        accion = "enviado" if enviar else "completado"
+        self.after(0, self.avisar, f"{hechos} aviso{'s' if hechos != 1 else ''} {accion}{'s' if hechos != 1 else ''} a clientes que no tenían correo.", "ok" if hechos else "aviso")
+
+    def editar_textos_avisos(self):
+        def al_guardar(nuevos):
+            completa = cargar_configuracion()
+            if nuevos:
+                completa["textos_avisos"] = nuevos
+            else:
+                completa.pop("textos_avisos", None)
+            guardar_configuracion(completa)
+            self.config.pop("textos_avisos", None)
+            self.config.update(completa)
+            self.avisar("Textos de los avisos guardados." if nuevos else "Se usan otra vez los textos de siempre.", "ok")
+
+        self.dialogo_textos_avisos = avisos_clientes.DialogoTextosAvisos(self, avisos_clientes.textos(self.config), al_guardar)
+        return self.dialogo_textos_avisos
+
+    def ver_historial_avisos(self):
+        self.dialogo_historial_avisos = avisos_clientes.DialogoHistorialAvisos(self, REGISTRO_AVISOS)
+        return self.dialogo_historial_avisos
 
     def toggle_comparador(self):
         global comparador_running
