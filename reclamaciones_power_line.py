@@ -18,9 +18,11 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 import efectos
 import estilo
+import litigio_psa
 import power_line_ticket
 from configuracion import registrar_error_detallado
 from rutas_app import ruta_datos
+import json as _json
 
 try:  # fotos HEIC/HEIF (iPhone): si la librería no está, simplemente no se admiten
     from pillow_heif import register_heif_opener
@@ -31,6 +33,7 @@ except Exception:
 
 
 DATABASE_FILE = ruta_datos("reclamaciones_power_line.db")
+LITIGIOS_PSA = ruta_datos("litigios_psa.json", migrar=False)  # litigios creados desde la app (para no reclamar dos veces la misma línea)
 PREFIJO_ADJUNTOS = "power_line_adjuntos_"
 EXTENSIONES_FOTO = "*.jpg *.jpeg *.png *.bmp *.tif *.tiff" + (" *.heic *.heif" if ADMITE_HEIC else "")
 PHOTO_FIELDS = (
@@ -48,6 +51,30 @@ PHOTO_BOOKMARKS = {
     "deterioro": ("FotoDetalleDeterioro", "FOTO_DETALLE_DETERIORO", "FotoDeterioro"),
     "etiqueta": ("FotoDetalleEtiqueta", "FOTO_DETALLE_ETIQUETA", "FotoEtiqueta"),
 }
+
+
+def leer_litigios_psa(ruta=None):
+    try:
+        with open(ruta or LITIGIOS_PSA, encoding="utf-8") as f:
+            datos = _json.load(f)
+        return datos if isinstance(datos, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def anotar_litigio_psa(resultado, referencia, ruta=None):
+    ruta = ruta or LITIGIOS_PSA
+    datos = leer_litigios_psa(ruta)[-499:] + [{"litigio": resultado["litigio"], "referencia": referencia, "factura": resultado["factura"],
+                                               "pos": resultado["pos"], "doc_ventas": resultado["doc_ventas"], "cuando": datetime.now().isoformat(timespec="seconds")}]
+    temporal = ruta + ".tmp"
+    with open(temporal, "w", encoding="utf-8") as f:
+        _json.dump(datos, f, ensure_ascii=False, indent=1)
+    os.replace(temporal, ruta)
+
+
+def litigio_anterior(factura, pos, ruta=None):
+    """El litigio ya creado desde la app para esa factura y línea, o None."""
+    return next((r for r in reversed(leer_litigios_psa(ruta)) if r.get("factura") == factura and r.get("pos") == pos), None)
 
 
 def registrar_error_reclamacion(error, detalle, referencia):
@@ -337,10 +364,23 @@ class ModuloReclamacionesPowerLine:
         app = self.app
         contenedor = ctk.CTkScrollableFrame(self.tab_formulario, fg_color="transparent")
         contenedor.pack(padx=2, pady=2, fill="both", expand=True)
-        card = app.crear_tarjeta_tab(contenedor, "Nueva reclamación", "Los campos marcados con * son obligatorios.", icono="aviso")
+        card = app.crear_tarjeta_tab(contenedor, "Nueva reclamación", "Tres pasos: crear el litigio en PARTS, generar el Word con las fotos y enviarlo a Power-Line.", icono="aviso")
+        self.referencia_entry = self._campo(card, "Referencia")
+        paso1 = ctk.CTkFrame(card, fg_color="transparent")
+        paso1.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        self.motivo_option = app.crear_menu(paso1, [litigio_psa.texto_motivo(c) for c, _ in litigio_psa.MOTIVOS], width=330)
+        self.motivo_option.set(litigio_psa.texto_motivo(self.configuracion.get("psa_motivo") or litigio_psa.MOTIVO_POR_DEFECTO))
+        self.motivo_option.pack(side="left")
+        efectos.poner_pista(app, self.motivo_option, "Motivo del litigio de Calidad en PARTS")
+        app.crear_etiqueta(paso1, "Cant.", secundario=True).pack(side="left", padx=(10, 4))
+        self.cantidad_entry = app.crear_entrada(paso1, width=46, justify="center")
+        self.cantidad_entry.insert(0, "1")
+        self.cantidad_entry.pack(side="left")
+        self.btn_litigio = app.crear_boton_principal(paso1, "1 · Crear litigio en PARTS", self.crear_litigio_psa, alto=estilo.ALTO_CONTROL)
+        self.btn_litigio.pack(side="right")
+        efectos.poner_pista(app, self.btn_litigio, "Busca la factura más reciente de la referencia (máx. 10 días) y crea el litigio de Calidad")
         self.litigio_entry = self._campo(card, "Nº Litigio *")
         self.pedido_entry = self._campo(card, "Nº Pedido SAP")
-        self.referencia_entry = self._campo(card, "Referencia")
         self._crear_selector_destino(card)
         app.crear_etiqueta(card, "Descripción del problema", negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(2, 4))
         self.descripcion_text = ctk.CTkTextbox(card, height=56, corner_radius=estilo.RADIO, border_width=1, border_color=app.color_borde,
@@ -356,8 +396,12 @@ class ModuloReclamacionesPowerLine:
                         hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_X, pady=(0, estilo.PAD_Y))
         acciones = ctk.CTkFrame(card, fg_color="transparent")
         acciones.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
-        self.btn_generar = app.crear_boton_principal(acciones, "Generar documento", self.generar_documento)
+        self.btn_generar = app.crear_boton_principal(acciones, "2 · Generar documento", self.generar_documento)
         self.btn_generar.pack(fill="x")
+        self.btn_paso3 = app.crear_boton_principal(acciones, "3 · Enviar a Power-Line", self.enviar_ultimo_a_power_line)
+        self.btn_paso3.configure(state="disabled")
+        self.btn_paso3.pack(fill="x", pady=(8, 0))
+        efectos.poner_pista(app, self.btn_paso3, "Crea el ticket de seguimiento con el Nº de litigio y le adjunta el Word recién generado")
         app.crear_boton_secundario(acciones, "Limpiar formulario", self.limpiar_formulario).pack(fill="x", pady=(8, 0))
 
     def _crear_selector_destino(self, card):
@@ -446,6 +490,10 @@ class ModuloReclamacionesPowerLine:
         for clave, _ in PHOTO_FIELDS:
             self.eliminar_foto(clave)
         self.pdf_var.set(False)
+        self.cantidad_entry.delete(0, "end")
+        self.cantidad_entry.insert(0, "1")
+        self._ultimo_generado = None
+        self.btn_paso3.configure(state="disabled")
 
     def cambiar_carpeta(self):
         ruta = filedialog.askdirectory(title="Selecciona la carpeta de guardado")
@@ -604,7 +652,10 @@ class ModuloReclamacionesPowerLine:
         return f"Error interno de Word ({type(error).__name__}). Consulta el registro detallado para más información."
 
     def _finalizar_generacion(self, word, pdf, registro_id=None, litigio=None):
-        self.btn_generar.configure(state="normal", text="Generar documento")
+        self.btn_generar.configure(state="normal", text="2 · Generar documento")
+        if registro_id is not None and litigio:
+            self._ultimo_generado = (registro_id, litigio, word)
+            self.btn_paso3.configure(state="normal")
         self.actualizar_historial()
         self.app.actualizar_estado("reclamación Power Line generada", word)
         if self.configuracion.get("power_line_abrir_documento", False):
@@ -614,10 +665,105 @@ class ModuloReclamacionesPowerLine:
         mensaje = "Documento Word generado correctamente."
         if pdf:
             mensaje += " También se ha generado el PDF."
-        if registro_id is not None and litigio and messagebox.askyesno("Éxito", mensaje + f"\n\n¿Crear ahora el ticket del litigio {litigio} en Power-Line y adjuntarle el Word?"):
-            self.enviar_a_power_line(registro_id, litigio, word)
-        elif registro_id is None or not litigio:
-            messagebox.showinfo("Éxito", mensaje)
+        if registro_id is not None and litigio:
+            mensaje += "\n\nPaso 3: «Enviar a Power-Line» crea el ticket y le adjunta este Word."
+        messagebox.showinfo("Éxito", mensaje)
+
+    def enviar_ultimo_a_power_line(self):
+        if not getattr(self, "_ultimo_generado", None):
+            messagebox.showwarning("Power-Line", "Primero genera el documento (paso 2).")
+            return False
+        return self.enviar_a_power_line(*self._ultimo_generado)
+
+    # ---------- paso 1: litigio en PSA Parts (litigio_psa.py) ----------
+
+    def crear_litigio_psa(self):
+        if getattr(self, "_creando_litigio", False):
+            return False
+        referencia = litigio_psa.normalizar_ref(self.referencia_entry.get())
+        if not referencia:
+            messagebox.showwarning("Litigio", "Escribe la referencia que quieres reclamar.")
+            return False
+        try:
+            cantidad = int(self.cantidad_entry.get().strip() or "1")
+            assert cantidad > 0
+        except (ValueError, AssertionError):
+            messagebox.showwarning("Litigio", "La cantidad debe ser un número entero mayor que 0.")
+            return False
+        usuario, password = self.configuracion.get("usuario", ""), self.configuracion.get("password", "")
+        if not usuario or not password:
+            messagebox.showwarning("Litigio", "Faltan el usuario y la contraseña del portal Citroën (pestaña Configuración).")
+            return False
+        if self.litigio_entry.get().strip() and not messagebox.askyesno("Litigio", f"El formulario ya tiene el litigio {self.litigio_entry.get().strip()}. ¿Crear otro para {referencia}?"):
+            return False
+        motivo = litigio_psa.codigo_motivo(self.motivo_option.get())
+        self.configuracion["psa_motivo"] = motivo
+        sin_confirmar = bool(self.obtener_configuracion()["psa_litigio_sin_confirmacion"])
+        self._creando_litigio = True
+        self.btn_litigio.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_litigio, "Creando")
+        log = lambda texto, tag=None: self.app.after(0, self.app.agregar_log, f"[LITIGIO PSA] {texto}", tag)
+        threading.Thread(target=self._litigio_en_segundo_plano, args=(usuario, password, referencia, motivo, cantidad, sin_confirmar, log), daemon=True).start()
+        return True
+
+    def _confirmar_en_pantalla(self, datos):
+        """Desde el hilo de trabajo: muestra la confirmación en la ventana y espera la respuesta."""
+        respuesta, hecho = [], threading.Event()
+
+        def preguntar():
+            anterior = datos.get("anterior")
+            aviso = (f"⚠️ Esta línea ya se reclamó desde la app el {datetime.fromisoformat(anterior['cuando']):%d/%m} (litigio {anterior['litigio']}).\n\n"
+                     if anterior else "")
+            respuesta.append(messagebox.askyesno(
+                "Guardar litigio en PARTS",
+                aviso + f"Referencia {datos['referencia']}\nFactura {datos['factura']} del {datos['fecha']:%d/%m/%Y} · línea {datos['pos_factura']}\n"
+                f"Doc.ventas {datos['doc_ventas']}\nMotivo {datos['motivo']} · cantidad {datos['cantidad']}\n\n"
+                "«Guardar» crea el litigio y no se puede deshacer. ¿Guardar?", icon="warning", default="no" if anterior else "yes"))
+            hecho.set()
+
+        self.app.after(0, preguntar)
+        hecho.wait()
+        return respuesta[0]
+
+    def _litigio_en_segundo_plano(self, usuario, password, referencia, motivo, cantidad, sin_confirmar, log):
+        resultado, error = None, None
+        try:
+            def confirmar(datos):
+                datos["anterior"] = litigio_anterior(datos["factura"], datos["pos_factura"])
+                if sin_confirmar:
+                    if datos["anterior"]:
+                        log(f"Esa línea ya se reclamó (litigio {datos['anterior']['litigio']}): no se guarda sin confirmación.", "error")
+                        return False
+                    return True
+                return self._confirmar_en_pantalla(datos)
+
+            resultado = litigio_psa.LitigioPSA(usuario, password, referencia, motivo, cantidad, confirmar=confirmar, log=log).ejecutar()
+            anotar_litigio_psa(resultado, referencia)
+        except litigio_psa.LitigioNoCreado as e:
+            error = ("aviso", str(e))
+        except Exception as e:
+            error = ("error", str(e).splitlines()[0] if str(e) else type(e).__name__)
+            registrar_error_reclamacion(traceback.format_exc(), f"Litigio PSA: {error[1]}", referencia)
+        self.app.after(0, lambda: self._litigio_terminado(referencia, resultado, error))
+
+    def _litigio_terminado(self, referencia, resultado, error):
+        self._creando_litigio = False
+        self.btn_litigio.configure(state="normal", text="1 · Crear litigio en PARTS")
+        if resultado:
+            for campo, valor in ((self.litigio_entry, resultado["litigio"]), (self.pedido_entry, resultado["doc_ventas"])):
+                campo.delete(0, "end")
+                campo.insert(0, valor)
+            self.referencia_entry.delete(0, "end")
+            self.referencia_entry.insert(0, referencia)
+            avisos = f" Avisos: {' · '.join(resultado['avisos'])}" if resultado.get("avisos") else ""
+            self.app.agregar_log(f"[LITIGIO PSA] ✅ Litigio {resultado['litigio']} creado (factura {resultado['factura']}, Doc.ventas {resultado['doc_ventas']}).{avisos}", "success")
+            self.app.avisar(f"Litigio {resultado['litigio']} creado en PARTS. Añade las fotos y la descripción y genera el documento.", "ok")
+        elif error and error[0] == "aviso":
+            self.app.agregar_log(f"[LITIGIO PSA] {error[1]}", "error")
+            messagebox.showwarning("Litigio no creado", f"No se ha creado ningún litigio:\n{error[1]}")
+        elif error:
+            self.app.agregar_log(f"[LITIGIO PSA] ❌ {error[1]}", "error")
+            messagebox.showwarning("Litigio", f"No se pudo crear el litigio de {referencia}:\n{error[1]}\n\nComprueba en PARTS (Lista de litigios) que no se haya grabado.")
 
     # ---------- ticket en Power-Line (power_line_ticket.py) ----------
 
@@ -659,10 +805,11 @@ class ModuloReclamacionesPowerLine:
             return False
         enviar_solo = bool(self.obtener_configuracion()["power_line_envio_automatico"])
         self._enviando_power_line = True
-        boton = getattr(self, "btn_enviar_power_line", None)
-        if boton is not None and boton.winfo_exists():
-            boton.configure(state="disabled")
-            efectos.marcar_ocupado(boton, "Enviando")
+        for nombre in ("btn_enviar_power_line", "btn_paso3"):
+            boton = getattr(self, nombre, None)
+            if boton is not None and boton.winfo_exists():
+                boton.configure(state="disabled")
+                efectos.marcar_ocupado(boton, "Enviando")
         aviso = "se enviará solo" if enviar_solo else "revísalo y pulsa «Enviar» en la ventana de Power-Line"
         self.app.avisar(f"Creando el ticket del litigio {litigio} en Power-Line: {aviso}.")
         datos = dict(valores, litigio=litigio, ruta_word=ruta_word)
@@ -690,6 +837,9 @@ class ModuloReclamacionesPowerLine:
         boton = getattr(self, "btn_enviar_power_line", None)
         if boton is not None and boton.winfo_exists():
             boton.configure(state="normal", text="Enviar a Power-Line")
+        paso3 = getattr(self, "btn_paso3", None)
+        if paso3 is not None and paso3.winfo_exists():
+            paso3.configure(state="normal", text="3 · Enviar a Power-Line")
         self.actualizar_historial()
         if numero and not error_adjunto:
             self.app.agregar_log(f"[POWER-LINE] ✅ Ticket {numero} enviado con el Word del litigio {litigio}.", "success")
@@ -705,7 +855,7 @@ class ModuloReclamacionesPowerLine:
             messagebox.showwarning("Power-Line", f"No se pudo crear el ticket del litigio {litigio}:\n{error}")
 
     def _error_generacion(self, detalle):
-        self.btn_generar.configure(state="normal", text="Generar documento")
+        self.btn_generar.configure(state="normal", text="2 · Generar documento")
         messagebox.showerror("Error", f"No se pudo generar la reclamación.\n{detalle}")
 
     def construir_ajustes(self, parent):
@@ -719,6 +869,9 @@ class ModuloReclamacionesPowerLine:
         self.abrir_carpeta_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_abrir_carpeta", False)))
         ctk.CTkCheckBox(marco, text="Abrir documento al finalizar", variable=self.abrir_documento_var, fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=4)
         ctk.CTkCheckBox(marco, text="Abrir carpeta al finalizar", variable=self.abrir_carpeta_var, fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=4)
+        self.litigio_sin_confirmacion_var = ctk.BooleanVar(value=bool(self.configuracion.get("psa_litigio_sin_confirmacion", False)))
+        ctk.CTkCheckBox(marco, text="Guardar el litigio en PARTS sin pedir confirmación (nunca si esa línea ya se reclamó)", variable=self.litigio_sin_confirmacion_var,
+                        fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=4)
         app.crear_etiqueta(marco, "Ticket en Power-Line (se entra con el usuario de Stellantis de MADD)", negrita=True).pack(anchor="w", padx=estilo.PAD_FILA, pady=(10, 2))
         self.usuario_power_line_entry = self._fila_texto(marco, "Usuario Stellantis", "power_line_usuario", "", "Vacío = el mismo de MADD")
         self.password_power_line_entry = self._fila_texto(marco, "Contraseña", "power_line_password", "", "Vacío = la misma de MADD", ocultar=True)
@@ -773,6 +926,8 @@ class ModuloReclamacionesPowerLine:
             "power_line_tema": self._valor("tema_power_line_entry", "power_line_tema", power_line_ticket.TEMA_POR_DEFECTO),
             "power_line_tipo": self._valor("tipo_power_line_entry", "power_line_tipo", power_line_ticket.TIPO_POR_DEFECTO),
             "power_line_envio_automatico": self.envio_automatico_var.get() if hasattr(self, "envio_automatico_var") else bool(self.configuracion.get("power_line_envio_automatico", False)),
+            "psa_litigio_sin_confirmacion": self.litigio_sin_confirmacion_var.get() if hasattr(self, "litigio_sin_confirmacion_var") else bool(self.configuracion.get("psa_litigio_sin_confirmacion", False)),
+            "psa_motivo": litigio_psa.codigo_motivo(self.motivo_option.get()) if hasattr(self, "motivo_option") else self.configuracion.get("psa_motivo", litigio_psa.MOTIVO_POR_DEFECTO),
         }
 
     def _valor(self, atributo, clave, defecto):
