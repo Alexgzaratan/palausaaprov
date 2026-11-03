@@ -460,15 +460,14 @@ class DialogoHistorialAvisos:
 
 
 class DialogoNoSuministra:
-    """Antes de generar los pedidos urgentes: referencias que ya salieron como NO SUMINISTRA. Cada una tiene «Ticket de
-    plazo» (al_ticket(coincidencia) prepara el ticket de Power-Line). al_decidir(True) genera igualmente; False cancela."""
+    """Antes de generar los pedidos urgentes: referencias que ya salieron como NO SUMINISTRA (no se van a fabricar más).
+    al_decidir(True) genera igualmente; False cancela para quitarlas antes del Excel."""
 
-    def __init__(self, app, coincidencias, al_ticket, al_decidir):
+    def __init__(self, app, coincidencias, al_decidir):
         self.app = app
-        self.al_ticket = al_ticket
         self.al_decidir = al_decidir
         self.cerrado = False
-        self.botones = {}
+        self.filas = {}
         ventana, tarjeta = _ventana(app, "Referencias que no suministran")
         self.ventana = ventana
         ventana.protocol("WM_DELETE_WINDOW", lambda: self.decidir(False))
@@ -476,34 +475,26 @@ class DialogoNoSuministra:
         cuantas = len(coincidencias)
         ctk.CTkLabel(tarjeta, text=f"{cuantas} referencia{'s' if cuantas != 1 else ''} ya salió como NO SUMINISTRA" if cuantas == 1 else
                      f"{cuantas} referencias ya salieron como NO SUMINISTRA", font=estilo.fuente_titulo(), text_color=app.color_texto).pack(anchor="w", padx=estilo.PAD_X, pady=(14, 2))
-        app.crear_etiqueta(tarjeta, "Según los avisos enviados a los talleres. Puedes pedir plazo a Power-Line antes de volver a pedirlas.",
+        app.crear_etiqueta(tarjeta, "Según los avisos enviados a los talleres: ya no se fabrican. Si no quieres pedirlas, cancela y quítalas del Excel urgente.",
                            secundario=True, wraplength=560, justify="left").pack(anchor="w", padx=estilo.PAD_X, pady=(0, 10))
         lista = ctk.CTkScrollableFrame(tarjeta, fg_color="transparent", height=min(300, 70 * cuantas)) if cuantas > 4 else ctk.CTkFrame(tarjeta, fg_color="transparent")
         lista.pack(padx=estilo.PAD_X - 4, fill="both", expand=True)
         for c in coincidencias:
             fila = ctk.CTkFrame(lista, fg_color=app.color_superficie_alt, corner_radius=10)
             fila.pack(fill="x", pady=(0, 6))
-            boton = app.crear_boton_secundario(fila, "Ticket de plazo", lambda c=c: self.ticket(c), alto=estilo.ALTO_BOTON_COMPACTO, width=130)
-            boton.pack(side="right", padx=10, pady=8)
-            self.botones[c["referencia"]] = boton
+            self.filas[c["referencia"]] = fila
             texto = ctk.CTkFrame(fila, fg_color="transparent")
             texto.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=8)
             cantidad = f" · {c['cantidad']} ud" if str(c.get("cantidad") or "").strip() else ""
             app.crear_etiqueta(texto, f"{c['referencia']}{cantidad}", negrita=True).pack(anchor="w")
             clientes = f" (cliente{'s' if len(c['clientes']) != 1 else ''} {', '.join(c['clientes'])})" if c["clientes"] else ""
             app.crear_etiqueta(texto, f"NO SUMINISTRA el {texto_fechas(c['fechas'])}{clientes}", estilo.TAM_PEQUENO, secundario=True,
-                               wraplength=360, justify="left").pack(anchor="w")
+                               wraplength=520, justify="left").pack(anchor="w")
         pie = ctk.CTkFrame(tarjeta, fg_color="transparent")
         pie.pack(padx=estilo.PAD_X, pady=(8, 14), fill="x")
         app.crear_boton_principal(pie, "Generar igualmente", lambda: self.decidir(True), alto=estilo.ALTO_BOTON_COMPACTO).pack(side="right")
         app.crear_boton_secundario(pie, "Cancelar", lambda: self.decidir(False), alto=estilo.ALTO_BOTON_COMPACTO).pack(side="right", padx=(0, 6))
         _centrar(app, ventana)
-
-    def ticket(self, coincidencia):
-        self.al_ticket(coincidencia)
-        boton = self.botones.get(coincidencia["referencia"])
-        if boton is not None and boton.winfo_exists():
-            boton.configure(text="Ticket preparado ✓")
 
     def decidir(self, generar):
         if self.cerrado:

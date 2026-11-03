@@ -3596,17 +3596,9 @@ class AppIntegrada(ctk.CTk):
             coincidencias = []  # si no se puede leer, la generación lo explicará en el registro
         if coincidencias:
             self.dialogo_no_suministra = avisos_clientes.DialogoNoSuministra(
-                self, coincidencias, self.preparar_ticket_plazo, lambda generar: generar and self.continuar_pedidos(ruta, folder))
+                self, coincidencias, lambda generar: generar and self.continuar_pedidos(ruta, folder))
             return
         self.continuar_pedidos(ruta, folder)
-
-    def preparar_ticket_plazo(self, coincidencia):
-        """Abre Reclamaciones > Tickets Power-Line con la plantilla «plazo para un faltante» y la referencia y cantidad puestas."""
-        self.tabview.set("Reclamaciones")
-        self.construir_pestana("Reclamaciones")
-        self.actualizar_paneles_por_pestana()
-        self.reclamaciones_power_line.preparar_ticket("plazo_faltante", {"Referencia": coincidencia["referencia"],
-                                                                         "Cantidad": str(coincidencia.get("cantidad") or "").replace(".0", "")})
 
     def continuar_pedidos(self, ruta, folder):
         anterior = pedido_ya_generado(ruta)

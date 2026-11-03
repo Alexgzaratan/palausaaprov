@@ -1,4 +1,4 @@
-"""Referencias del Excel urgente que ya salieron como NO SUMINISTRA, ticket de plazo y orden de las tarjetas del Comparador."""
+"""Referencias del Excel urgente que ya salieron como NO SUMINISTRA y orden de las tarjetas del Comparador."""
 from datetime import date
 
 import openpyxl
@@ -29,19 +29,18 @@ def test_coincidencias_con_el_excel_urgente(registro):
     assert ac.texto_fechas([date(2026, 10, d) for d in (1, 2, 3)]) == "01/10, 02/10 y 03/10"
 
 
-def test_dialogo_pide_ticket_y_decide(app, registro):
+def test_dialogo_solo_avisa_y_decide(app, registro):
     res = ac.no_suministra_previas(registro, [["1434C8", 2, 1]], hoy=date(2026, 11, 3))
-    tickets, decisiones = [], []
-    d = ac.DialogoNoSuministra(app, res, tickets.append, decisiones.append)
-    d.ticket(res[0])
-    assert tickets == [res[0]] and d.botones["1434C8"].cget("text") == "Ticket preparado ✓" and not d.cerrado
+    decisiones = []
+    d = ac.DialogoNoSuministra(app, res, decisiones.append)
+    assert list(d.filas) == ["1434C8"] and not hasattr(d, "botones")  # sin ticket: esas piezas ya no se fabrican
     d.decidir(True)
     assert decisiones == [True] and d.cerrado
     d.decidir(False)
     assert decisiones == [True]  # solo se decide una vez
 
 
-def test_generar_pedidos_avisa_antes_y_prepara_el_ticket(app, registro, monkeypatch, tmp_path):
+def test_generar_pedidos_avisa_antes_de_generar(app, registro, monkeypatch, tmp_path):
     monkeypatch.setattr(app_mod, "REGISTRO_AVISOS", registro)
     monkeypatch.setattr(ac, "date", type("D", (date,), {"today": staticmethod(lambda: date(2026, 11, 3))}))
     ruta = tmp_path / "URGENTE.xlsx"
@@ -59,12 +58,7 @@ def test_generar_pedidos_avisa_antes_y_prepara_el_ticket(app, registro, monkeypa
     monkeypatch.setattr(app, "continuar_pedidos", lambda ruta, carpeta: seguidos.append(ruta))
     app.iniciar_pedidos()
     dialogo = app.dialogo_no_suministra
-    assert seguidos == [] and list(dialogo.botones) == ["1434C8"]  # no se genera nada hasta decidir
-    dialogo.ticket(ac.no_suministra_previas(registro, [["1434C8", 3, 1]], hoy=date(2026, 11, 3))[0])
-    m = app.reclamaciones_power_line
-    assert app.tabview.get() == "Reclamaciones" and m.panel.get() == "Tickets Power-Line"
-    assert m.plantilla_ticket_option.get() == "Plazo para un faltante sin aviso"
-    assert m.criterios_entries["Referencia"].get() == "1434C8" and m.criterios_entries["Cantidad"].get() == "3"
+    assert seguidos == [] and list(dialogo.filas) == ["1434C8"]  # no se genera nada hasta decidir
     dialogo.decidir(True)
     assert seguidos == [str(ruta)]
 
