@@ -2595,6 +2595,11 @@ class AppIntegrada(ctk.CTk):
     def build_tab_comparador(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_comparador, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
+        self.construir_tarjeta_tareas(contenedor)
+        self.construir_tarjeta_cascos(contenedor)
+        self.construir_tarjeta_comparador(contenedor)
+
+    def construir_tarjeta_comparador(self, contenedor):
         card = self.crear_tarjeta_tab(contenedor, "Comparador de Excel", "Resalta las líneas repetidas y genera un archivo comparado en la carpeta elegida.", en_rejilla=True, ultima_vez="comparador", icono="comparar")
         self.crear_fila_archivo(card, "Excel antiguo", "excel_old_entry", "ruta_excel_antiguo", "Excel antiguo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_old_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Excel nuevo", "excel_new_entry", "ruta_excel_nuevo", "Excel nuevo...", "Examinar", lambda: self.seleccionar_archivo(self.excel_new_entry, [("Excel files", "*.xlsx")]))
@@ -2613,8 +2618,6 @@ class AppIntegrada(ctk.CTk):
         self.btn_informe_anterior = self.crear_boton_secundario(fila_comparar, "Abrir informe anterior", self.abrir_informe_anterior, alto=estilo.ALTO_BOTON, width=170)
         self.btn_informe_anterior.pack(side="right")
         efectos.poner_pista(self, self.btn_informe_anterior, self.pista_informe_anterior)
-        self.construir_tarjeta_cascos(contenedor)
-        self.construir_tarjeta_tareas(contenedor)
 
     # ---------- cruce de cascos con ventas (cascos_cruce.py, como la skill cruce-cascos-ventas) ----------
 
@@ -3587,6 +3590,25 @@ class AppIntegrada(ctk.CTk):
             return
         if self.excel_abierto(ruta, "El Excel de pedidos"):
             return
+        try:
+            coincidencias = avisos_clientes.no_suministra_previas(REGISTRO_AVISOS, leer_lineas_pedido(ruta))
+        except Exception:
+            coincidencias = []  # si no se puede leer, la generación lo explicará en el registro
+        if coincidencias:
+            self.dialogo_no_suministra = avisos_clientes.DialogoNoSuministra(
+                self, coincidencias, self.preparar_ticket_plazo, lambda generar: generar and self.continuar_pedidos(ruta, folder))
+            return
+        self.continuar_pedidos(ruta, folder)
+
+    def preparar_ticket_plazo(self, coincidencia):
+        """Abre Reclamaciones > Tickets Power-Line con la plantilla «plazo para un faltante» y la referencia y cantidad puestas."""
+        self.tabview.set("Reclamaciones")
+        self.construir_pestana("Reclamaciones")
+        self.actualizar_paneles_por_pestana()
+        self.reclamaciones_power_line.preparar_ticket("plazo_faltante", {"Referencia": coincidencia["referencia"],
+                                                                         "Cantidad": str(coincidencia.get("cantidad") or "").replace(".0", "")})
+
+    def continuar_pedidos(self, ruta, folder):
         anterior = pedido_ya_generado(ruta)
         if anterior:
             cuando = datetime.fromisoformat(anterior["cuando"])

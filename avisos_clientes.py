@@ -3,9 +3,10 @@ taller, textos de los correos editables y alta de correos en el Excel de cliente
 (correos que faltan, textos e historial) también están aquí."""
 import json
 import os
+import re
 import threading
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import customtkinter as ctk
@@ -149,6 +150,51 @@ class RegistroAvisos:
 
     def meses(self):
         return sorted({_mes(r) for r in self.cargar() if r.get("estado") == "enviado"}, reverse=True)
+
+
+def normalizar_ref(referencia):
+    """«2/1434 C8» -> «1434C8» (las referencias de la hoja de pedido pueden llevar espacios)."""
+    return re.sub(r"\s+", "", str(referencia or "")).replace("2/", "").upper()
+
+
+def fecha_del_aviso(registro):
+    """Día del pedido (por el nombre de la hoja dd-mm-aaaa) o, si no se puede, el día en que se avisó."""
+    encontrado = re.search(r"(\d{2})-(\d{2})-(\d{4})", str(registro.get("hoja") or ""))
+    if encontrado:
+        try:
+            return date(int(encontrado.group(3)), int(encontrado.group(2)), int(encontrado.group(1)))
+        except ValueError:
+            pass
+    return datetime.fromisoformat(registro["cuando"]).date()
+
+
+def no_suministra_previas(registro, lineas, dias=60, hoy=None):
+    """Referencias de 'lineas' ([referencia, cantidad, cliente], como el Excel urgente) que ya salieron como NO SUMINISTRA en
+    los avisos de los últimos 'dias': [{referencia, cantidad, fechas, clientes}] en el orden del Excel."""
+    hoy = hoy or date.today()
+    vistas = defaultdict(lambda: {"fechas": set(), "clientes": set()})
+    for r in registro.cargar():
+        if r.get("tipo") != NO_SUMINISTRA:
+            continue
+        fecha = fecha_del_aviso(r)
+        if (hoy - fecha).days > dias:
+            continue
+        for ref in r.get("referencias", []):
+            vistas[normalizar_ref(ref)]["fechas"].add(fecha)
+            vistas[normalizar_ref(ref)]["clientes"].add(str(r.get("cliente", "")))
+    resultado, ya = [], set()
+    for referencia, cantidad, *_ in lineas:
+        clave = normalizar_ref(referencia)
+        if clave in vistas and clave not in ya:
+            ya.add(clave)
+            resultado.append({"referencia": clave, "cantidad": cantidad, "fechas": sorted(vistas[clave]["fechas"]),
+                              "clientes": sorted(c for c in vistas[clave]["clientes"] if c)})
+    return resultado
+
+
+def texto_fechas(fechas):
+    textos = [f"{f:%d/%m}" for f in fechas]
+    return textos[0] if len(textos) == 1 else ", ".join(textos[:-1]) + " y " + textos[-1]
 
 
 def _mes(registro):
@@ -411,3 +457,60 @@ class DialogoHistorialAvisos:
                 partes.append(f"{f['sustituciones']} sustituida{'s' if f['sustituciones'] != 1 else ''}")
             partes.append(f"último {f['ultimo']:%d/%m}")
             app.crear_etiqueta(texto, " · ".join(partes), estilo.TAM_PEQUENO, secundario=True).pack(anchor="w")
+
+
+class DialogoNoSuministra:
+    """Antes de generar los pedidos urgentes: referencias que ya salieron como NO SUMINISTRA. Cada una tiene «Ticket de
+    plazo» (al_ticket(coincidencia) prepara el ticket de Power-Line). al_decidir(True) genera igualmente; False cancela."""
+
+    def __init__(self, app, coincidencias, al_ticket, al_decidir):
+        self.app = app
+        self.al_ticket = al_ticket
+        self.al_decidir = al_decidir
+        self.cerrado = False
+        self.botones = {}
+        ventana, tarjeta = _ventana(app, "Referencias que no suministran")
+        self.ventana = ventana
+        ventana.protocol("WM_DELETE_WINDOW", lambda: self.decidir(False))
+        ventana.bind("<Escape>", lambda evento: (self.decidir(False), "break")[1])
+        cuantas = len(coincidencias)
+        ctk.CTkLabel(tarjeta, text=f"{cuantas} referencia{'s' if cuantas != 1 else ''} ya salió como NO SUMINISTRA" if cuantas == 1 else
+                     f"{cuantas} referencias ya salieron como NO SUMINISTRA", font=estilo.fuente_titulo(), text_color=app.color_texto).pack(anchor="w", padx=estilo.PAD_X, pady=(14, 2))
+        app.crear_etiqueta(tarjeta, "Según los avisos enviados a los talleres. Puedes pedir plazo a Power-Line antes de volver a pedirlas.",
+                           secundario=True, wraplength=560, justify="left").pack(anchor="w", padx=estilo.PAD_X, pady=(0, 10))
+        lista = ctk.CTkScrollableFrame(tarjeta, fg_color="transparent", height=min(300, 70 * cuantas)) if cuantas > 4 else ctk.CTkFrame(tarjeta, fg_color="transparent")
+        lista.pack(padx=estilo.PAD_X - 4, fill="both", expand=True)
+        for c in coincidencias:
+            fila = ctk.CTkFrame(lista, fg_color=app.color_superficie_alt, corner_radius=10)
+            fila.pack(fill="x", pady=(0, 6))
+            boton = app.crear_boton_secundario(fila, "Ticket de plazo", lambda c=c: self.ticket(c), alto=estilo.ALTO_BOTON_COMPACTO, width=130)
+            boton.pack(side="right", padx=10, pady=8)
+            self.botones[c["referencia"]] = boton
+            texto = ctk.CTkFrame(fila, fg_color="transparent")
+            texto.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=8)
+            cantidad = f" · {c['cantidad']} ud" if str(c.get("cantidad") or "").strip() else ""
+            app.crear_etiqueta(texto, f"{c['referencia']}{cantidad}", negrita=True).pack(anchor="w")
+            clientes = f" (cliente{'s' if len(c['clientes']) != 1 else ''} {', '.join(c['clientes'])})" if c["clientes"] else ""
+            app.crear_etiqueta(texto, f"NO SUMINISTRA el {texto_fechas(c['fechas'])}{clientes}", estilo.TAM_PEQUENO, secundario=True,
+                               wraplength=360, justify="left").pack(anchor="w")
+        pie = ctk.CTkFrame(tarjeta, fg_color="transparent")
+        pie.pack(padx=estilo.PAD_X, pady=(8, 14), fill="x")
+        app.crear_boton_principal(pie, "Generar igualmente", lambda: self.decidir(True), alto=estilo.ALTO_BOTON_COMPACTO).pack(side="right")
+        app.crear_boton_secundario(pie, "Cancelar", lambda: self.decidir(False), alto=estilo.ALTO_BOTON_COMPACTO).pack(side="right", padx=(0, 6))
+        _centrar(app, ventana)
+
+    def ticket(self, coincidencia):
+        self.al_ticket(coincidencia)
+        boton = self.botones.get(coincidencia["referencia"])
+        if boton is not None and boton.winfo_exists():
+            boton.configure(text="Ticket preparado ✓")
+
+    def decidir(self, generar):
+        if self.cerrado:
+            return
+        self.cerrado = True
+        try:
+            self.ventana.destroy()
+        except Exception:
+            pass
+        self.al_decidir(generar)

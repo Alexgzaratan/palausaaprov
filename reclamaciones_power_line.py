@@ -373,6 +373,7 @@ class ModuloReclamacionesPowerLine:
                                text_color=self.app.color_texto)
         panel.configure(command=lambda: self.app.resaltar_pestana_activa(panel))
         panel.pack(padx=8, pady=8, fill="both", expand=True)
+        self.panel = panel
         self.tab_formulario = panel.add("Formulario")
         self.tab_historial = panel.add("Historial")
         self.tab_tickets = panel.add("Tickets Power-Line")
@@ -914,6 +915,21 @@ class ModuloReclamacionesPowerLine:
         self.tickets_recientes_box.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
         self._pintar_criterios()
         self.refrescar_tickets_recientes()
+
+    def preparar_ticket(self, clave, valores):
+        """Deja la pestaña «Tickets Power-Line» con esa plantilla y esos valores (p. ej. desde el aviso de NO SUMINISTRA)."""
+        self.panel.set("Tickets Power-Line")
+        self.app.resaltar_pestana_activa(self.panel)
+        self.plantilla_ticket_option.set(power_line_ticket.PLANTILLAS[clave][0])
+        self._pintar_criterios()
+        for nombre, valor in valores.items():
+            entrada = self.criterios_entries.get(nombre)
+            if entrada is not None and valor:
+                entrada.delete(0, "end")
+                entrada.insert(0, valor)
+        vacio = next((e for e in self.criterios_entries.values() if not e.get().strip()), None)
+        if vacio is not None:
+            vacio.focus_set()  # normalmente el Nº de pedido de SAP, que hay que poner a mano
 
     def plantilla_elegida(self):
         nombre = self.plantilla_ticket_option.get()
