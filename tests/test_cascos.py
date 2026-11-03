@@ -68,7 +68,16 @@ def test_nunca_sobrescribe_el_original(archivos):
     ventas, cascos, _ = archivos
     with pytest.raises(ValueError, match="no puede sobrescribir"):
         cc.cruzar(ventas, cascos, cascos)
-    assert cc.ruta_salida(cascos, datetime.date(2026, 11, 3)).name == "CASCOS_PROVISIONES (cruzado 03-11-2026).xlsx"
+
+
+def test_carpetas_por_anio_y_mes_sin_pisar(tmp_path):
+    hoy = datetime.date(2026, 11, 3)
+    primera = cc.ruta_salida(tmp_path, "8049", hoy)
+    assert primera == tmp_path / "2026" / "NOVIEMBRE" / "CASCOS 8049 03-11-2026.xlsx"
+    primera.parent.mkdir(parents=True)
+    primera.write_bytes(b"x")
+    assert cc.ruta_salida(tmp_path, "8049", hoy).name == "CASCOS 8049 03-11-2026 (2).xlsx"  # segundo cruce del día
+    assert cc.ruta_salida(tmp_path, "7000", datetime.date(2026, 1, 9)) == tmp_path / "2026" / "ENERO" / "CASCOS 7000 09-01-2026.xlsx"
 
 
 def test_tarjeta_en_el_comparador(app, archivos, monkeypatch):
@@ -76,7 +85,8 @@ def test_tarjeta_en_el_comparador(app, archivos, monkeypatch):
     app.tabview.set("Comparador")
     app.construir_pestana("Comparador")
     assert app.cliente_cascos_entry.get() == "8049"
-    for campo, valor in ((app.cascos_entry, cascos), (app.ventas_cascos_entry, ventas)):
+    destino = archivos[2] / "CRUCES 8049"
+    for campo, valor in ((app.cascos_entry, cascos), (app.ventas_cascos_entry, ventas), (app.destino_cascos_entry, str(destino))):
         campo.delete(0, "end")
         campo.insert(0, valor)
     resumenes = []
@@ -85,4 +95,6 @@ def test_tarjeta_en_el_comparador(app, archivos, monkeypatch):
     monkeypatch.setattr(app, "after", lambda ms, funcion, *a: funcion(*a))
     monkeypatch.setattr(app, "excel_abierto", lambda *a: False)
     assert app.cruzar_cascos()
-    assert resumenes and "2 albaranes cambiados" in resumenes[0] and cc.ruta_salida(cascos).exists()
+    hechos = list(destino.rglob("CASCOS 8049 *.xlsx"))
+    assert resumenes and "2 albaranes cambiados" in resumenes[0] and len(hechos) == 1
+    assert hechos[0].parent.parent.name == str(datetime.date.today().year)  # destino\AÑO\MES\

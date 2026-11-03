@@ -127,6 +127,7 @@ CAMPOS_CONFIG = (
     ("ruta_cascos_provisiones", "cascos_entry", ""),
     ("ruta_ventas_cascos", "ventas_cascos_entry", ""),
     ("cliente_cascos", "cliente_cascos_entry", cascos_cruce.CLIENTE_POR_DEFECTO),
+    ("ruta_destino_cascos", "destino_cascos_entry", ""),
 )
 
 DIAS_ES = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
@@ -2622,12 +2623,17 @@ class AppIntegrada(ctk.CTk):
     # ---------- cruce de cascos con ventas (cascos_cruce.py, como la skill cruce-cascos-ventas) ----------
 
     def construir_tarjeta_cascos(self, contenedor):
-        card = self.crear_tarjeta_tab(contenedor, "Cruce de cascos con ventas", "Cambia el Nº ALBARÁN de CASCOS_PROVISIONES por la Refer. del informe de ventas del cliente. El original no se toca: se guarda una copia «(cruzado …)».",
+        card = self.crear_tarjeta_tab(contenedor, "Cruce de cascos con ventas", "Cambia el Nº ALBARÁN de CASCOS_PROVISIONES por la Refer. del informe de ventas del cliente. El original no se toca: el resultado se guarda en la carpeta de cruces, por año y mes.",
                                       en_rejilla=True, icono="comparar")
         self.crear_fila_archivo(card, "CASCOS_PROVISIONES", "cascos_entry", "ruta_cascos_provisiones", "CASCOS_PROVISIONES.xlsx...", "Examinar",
                                 lambda: self.seleccionar_archivo(self.cascos_entry, [("Excel files", "*.xlsx")]))
         self.crear_fila_archivo(card, "Informe de ventas del cliente", "ventas_cascos_entry", "ruta_ventas_cascos", "VENTAS 8049.xls...", "Examinar",
                                 lambda: self.seleccionar_archivo(self.ventas_cascos_entry, [("Excel", "*.xls *.xlsx")]), extensiones=(".xls", ".xlsx"))
+        self.crear_fila_archivo(card, "Carpeta destino de los cruces", "destino_cascos_entry", "ruta_destino_cascos", "ABONO CASCOS\\CRUCES 8049...", "Carpeta",
+                                lambda: self.seleccionar_carpeta(self.destino_cascos_entry))
+        if not self.destino_cascos_entry.get().strip() and cascos_cruce.carpeta_por_defecto():
+            self.destino_cascos_entry.insert(0, cascos_cruce.carpeta_por_defecto())
+        efectos.poner_pista(self, self.destino_cascos_entry, "Dentro se crean las carpetas AÑO\\MES con un CASCOS <cliente> <fecha>.xlsx por cruce")
         fila = ctk.CTkFrame(card, fg_color="transparent")
         fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
         self.crear_etiqueta(fila, "Cliente", negrita=True).pack(side="left")
@@ -2658,9 +2664,11 @@ class AppIntegrada(ctk.CTk):
             except ValueError:
                 messagebox.showwarning("Cruce de cascos", "La fecha «Desde» debe ser dd/mm/aaaa, o déjala vacía.")
                 return False
-        salida = cascos_cruce.ruta_salida(cascos)
-        if self.excel_abierto(str(salida), "El resultado del cruce"):
+        destino = self.destino_cascos_entry.get().strip()
+        if not destino:
+            messagebox.showwarning("Cruce de cascos", "Elige la carpeta destino de los cruces (por ejemplo ABONO CASCOS\\CRUCES 8049).")
             return False
+        salida = cascos_cruce.ruta_salida(destino, cliente)
         self.btn_cascos.configure(state="disabled")
         efectos.marcar_ocupado(self.btn_cascos, "Cruzando")
         self.actualizar_estado("cruzando cascos con ventas", str(salida))

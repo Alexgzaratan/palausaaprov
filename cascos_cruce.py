@@ -6,7 +6,7 @@ y no con la Refer. Se corrige cruzándolo con el informe de ventas de Quiter (ho
   - Si cruzan, el Nº ALBARÁN pasa a ser la Refer. (número entero). Si ya es una Refer. del informe, se deja.
   - Si no cruza, se deja igual y la celda se pinta en amarillo.
   - Solo filas del cliente con fecha (columna A) igual o posterior a «desde», y solo la columna Nº ALBARÁN.
-El original no se toca: el resultado se guarda en otro archivo."""
+El original no se toca: el resultado se guarda en la carpeta de cruces, por año y mes (ver ruta_salida)."""
 import datetime
 import re
 from pathlib import Path
@@ -48,10 +48,26 @@ def motivo_sin_cruce(valor, claves):
     return "revisar a mano"
 
 
-def ruta_salida(ruta_cascos, hoy=None):
+MESES = ("ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE")
+SUBCARPETA_POR_DEFECTO = ("ABONO CASCOS", "CRUCES 8049")
+
+
+def carpeta_por_defecto():
+    """Escritorio\\ABONO CASCOS\\CRUCES 8049 si existe la carpeta ABONO CASCOS en el escritorio; si no, ''."""
+    escritorio = Path.home() / "Desktop"
+    base = escritorio / SUBCARPETA_POR_DEFECTO[0]
+    return str(base / SUBCARPETA_POR_DEFECTO[1]) if base.is_dir() else ""
+
+
+def ruta_salida(carpeta_destino, cliente=CLIENTE_POR_DEFECTO, hoy=None):
+    """carpeta\\AAAA\\MES\\CASCOS <cliente> dd-mm-aaaa.xlsx (como las hojas de pedido). Si ya hay uno de ese día, «(2)», «(3)»..."""
     hoy = hoy or datetime.date.today()
-    origen = Path(ruta_cascos)
-    return origen.with_name(f"{origen.stem} (cruzado {hoy:%d-%m-%Y}){origen.suffix}")
+    carpeta = Path(carpeta_destino) / str(hoy.year) / MESES[hoy.month - 1]
+    base = f"CASCOS {str(cliente).strip()} {hoy:%d-%m-%Y}"
+    ruta, n = carpeta / f"{base}.xlsx", 2
+    while ruta.exists():
+        ruta, n = carpeta / f"{base} ({n}).xlsx", n + 1
+    return ruta
 
 
 def cruzar(ruta_ventas, ruta_cascos, salida, cliente=CLIENTE_POR_DEFECTO, desde=None):
