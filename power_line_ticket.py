@@ -8,7 +8,10 @@ Pasos (comprobados en el portal el 29/10/2026):
      criterio «Número de reclamacion»: su Valor es el Nº de litigio. La descripción se deja vacía.
   4. «Enviar»: lo pulsa la persona (por defecto) o la app si el envío automático está activado.
   5. Ya enviado (aparece el Nº TKT...), se adjunta el Word del litigio con el clip.
-Los valores de la cuenta y del cliente viven en la configuración de cada usuario, no en el código."""
+Los valores de la cuenta y del cliente viven en la configuración de cada usuario, no en el código.
+
+Plantillas (comprobadas el 03/11/2026): cada tipo de ticket añade sus filas de criterio («Tipo de criterio» +
+«Valor»); se rellenan por el nombre del criterio. El tema y el tipo se eligen abriendo el desplegable."""
 import re
 import time
 
@@ -20,6 +23,17 @@ TIPO_POR_DEFECTO = "Progreso / Seguimiento de una reclamacion"
 BUSQUEDAS_CONOCIDAS = {
     TEMA_POR_DEFECTO.lower(): ("Litiges",),
     TIPO_POR_DEFECTO.lower(): ("Avancement",),
+}
+CRITERIO_RECLAMACION = "Número de reclamacion"
+# clave: (nombre en la app, tema, tipo, criterios). Los textos son los de Power-Line, erratas incluidas.
+PLANTILLAS = {
+    "seguimiento": ("Seguimiento de una reclamación", TEMA_POR_DEFECTO, TIPO_POR_DEFECTO, (CRITERIO_RECLAMACION,)),
+    "plazo_faltante": ("Plazo para un faltante sin aviso", "Fecha estimada de entrega",
+                       "Solicitud de plazo para un faltante sin aviso de reclamamción", ("Número de pedido de SAP", "Referencia", "Cantidad")),
+    "motivo_cancelacion": ("Motivo de cancelación de pieza codificada", "Pedidos",
+                           "Motivo de cancelacion de un pedido de pieza codificada", ("Número de pedido de SAP", "Referencia")),
+    "cancelacion_linea": ("Cancelación de línea o pedido completo", "Pedidos", "Cancelacion linea de pedido o pedido completo",
+                          ("Número de pedido de SAP", "Referencia", "Cantidad", "Número de linea de pedido de SAP")),
 }
 ESPERA_CONFIRMACION = 20 * 60  # segundos que se espera a que la persona pulse «Enviar»
 ESPERA_INICIO_SESION = 90      # por si hay que completar a mano algún paso del acceso
@@ -35,8 +49,7 @@ class TicketCancelado(Exception):
 class CredencialesRechazadas(RuntimeError):
     def __str__(self):
         detalle = super().__str__()
-        return "Stellantis ha rechazado el usuario o la contraseña de Power-Line" + (f" ({detalle})" if detalle else "") + \
-            f" en los {INTENTOS_ACCESO} intentos: revísalos en Configuración."
+        return "Stellantis ha rechazado el usuario o la contraseña de Power-Line" + (f" ({detalle})" if detalle else "")
 
 
 def busquedas_para(valor):
@@ -92,6 +105,8 @@ class TicketPowerLine:
                 if intento < INTENTOS_ACCESO:
                     self.log(f"No se pudo entrar en Power-Line (intento {intento} de {INTENTOS_ACCESO}): {str(e).splitlines()[0]}. Se reintenta...", "error")
                     time.sleep(PAUSA_REINTENTO_ACCESO)
+        if isinstance(ultimo, CredencialesRechazadas):
+            raise CredencialesRechazadas(f"{ultimo.args[0] if ultimo.args else ''} en los {INTENTOS_ACCESO} intentos; revísalos en Configuración".strip())
         raise ultimo
 
     def _en_power_line(self, page):
@@ -202,25 +217,21 @@ class TicketPowerLine:
         Si ese texto no aparece se elige la opción de esa posición y se avisa en el registro."""
         entrada = page.locator(f'[x-field="{campo}"] input').first
         lista = page.locator("ul.ui-autocomplete:visible li.ui-menu-item:not(.tag-select-action)")
-        for abrir in ("ArrowDown", "boton", "escribir"):
-            entrada.click()
-            if abrir == "ArrowDown":
-                entrada.press("ArrowDown")
-            elif abrir == "boton":
-                boton = page.locator(f'[x-field="{campo}"] .picker-icons i, [x-field="{campo}"] .fa-search').first
-                if boton.count():
-                    boton.click()
-            else:
-                entrada.fill("")
-                entrada.type(busquedas_para(valor)[0], delay=30)
+        for abrir in ("ArrowDown", "ArrowDown", "escribir"):
             try:
-                lista.first.wait_for(state="visible", timeout=5000)
+                entrada.click()
+                if abrir == "ArrowDown":
+                    entrada.press("ArrowDown")
+                else:
+                    entrada.fill("")
+                    entrada.type(busquedas_para(valor)[0], delay=30)
+                lista.first.wait_for(state="visible", timeout=8000)
             except Exception:
                 continue
             exacta = lista.filter(has_text=re.compile(r"^\s*" + re.escape(valor) + r"\s*$", re.I)).first
             if exacta.count():
                 exacta.click()
-            elif lista.count() >= posicion:
+            elif posicion and lista.count() >= posicion:
                 elegida = lista.nth(posicion - 1)
                 texto = elegida.inner_text().strip()
                 self.log(f"En «Tipo de ticket» no aparece «{valor}»: se elige la opción {posicion}, «{texto}».", "error")
@@ -232,15 +243,49 @@ class TicketPowerLine:
                 return
         raise ValueError(f"no se pudo elegir «{valor}» en el desplegable {campo} de Power-Line")
 
+    def criterios(self):
+        """{nombre del criterio: valor}. Con 'litigio' (seguimiento de reclamación) es el «Número de reclamacion»."""
+        if self.datos.get("criterios"):
+            return dict(self.datos["criterios"])
+        return {CRITERIO_RECLAMACION: str(self.datos["litigio"])}
+
+    def rellenar_criterio(self, page, nombre, valor):
+        # El nombre va en un enlace dentro del bloque «Tipo de criterio»
+        etiqueta = page.locator('[x-field="ticketReferenceType"] a').filter(has_text=re.compile(r"^\s*" + re.escape(nombre) + r"\s*$", re.I))
+        fila = page.locator("div.row-fluid.has-labels").filter(has=etiqueta).first
+        try:
+            fila.wait_for(state="visible", timeout=20000)  # las filas aparecen al elegir el tipo
+        except Exception:
+            raise ValueError(f"el ticket no tiene el criterio «{nombre}»")
+        entrada = fila.locator('[x-field="value"] input').first
+        entrada.click()
+        entrada.fill(str(valor))
+        entrada.press("Tab")
+
     def rellenar(self, page):
-        for campo, clave in (("principal", "cuenta"), ("shipToParty", "cliente"), ("ticketTheme", "tema")):
+        for campo, clave in (("principal", "cuenta"), ("shipToParty", "cliente")):
             self.elegir(page, campo, self.datos[clave])
-        self.elegir_del_desplegable(page, "ticketType", self.datos["tipo"])
-        valor = page.locator('[x-field="value"] input').first
-        valor.wait_for(state="visible", timeout=20000)  # la fila «Número de reclamacion» aparece al elegir el tipo
-        valor.click()
-        valor.fill(str(self.datos["litigio"]))
-        valor.press("Tab")
+        try:
+            self.elegir_del_desplegable(page, "ticketTheme", self.datos["tema"], posicion=None)
+        except ValueError:
+            self.elegir(page, "ticketTheme", self.datos["tema"])  # por si el desplegable no se abre: buscando
+        # El tipo del seguimiento es hoy la 2.ª opción: si su texto cambiara se elige esa posición (los demás, solo por texto)
+        posicion = None if self.datos.get("criterios") else 2
+        self.elegir_del_desplegable(page, "ticketType", self.datos["tipo"], posicion=posicion)
+        for nombre, valor in self.criterios().items():
+            self.rellenar_criterio(page, nombre, valor)
+        descripcion = str(self.datos.get("descripcion") or "").strip()
+        if descripcion:
+            editor = page.locator('[x-field="description"] [contenteditable="true"], [x-field="description"].wysiwyg-editor, [x-field="description"] .wysiwyg-editor').first
+            # De una vez (letra a letra se perdía texto: el portal refresca el formulario mientras se escribe) y comprobándolo
+            for _ in range(3):
+                editor.click()
+                editor.fill(descripcion)
+                time.sleep(1)
+                if " ".join(editor.inner_text().split()) == " ".join(descripcion.split()):
+                    break
+            else:
+                raise ValueError("no se pudo escribir la descripción completa en Power-Line")
 
     def leer_numero(self, page):
         try:
@@ -303,6 +348,9 @@ class TicketPowerLine:
                     numero = self.esperar_numero(page, self.espera_confirmacion)
                 if not numero:
                     raise TicketCancelado("no se pulsó «Enviar»")
+                if not self.datos.get("ruta_word"):
+                    self.log(f"Ticket {numero} enviado.", "success")
+                    return numero
                 self.log(f"Ticket {numero} enviado. Adjuntando el Word...")
                 try:
                     self.adjuntar_word(page, self.datos["ruta_word"])

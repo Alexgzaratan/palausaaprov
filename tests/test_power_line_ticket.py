@@ -27,8 +27,20 @@ APP = """<html><body><div>Pagina principal · Servicio de asistencia técnica</d
 var OPCIONES = {
   principal: [['123456X', '123456X - EMPRESA PRUEBA, SL']],
   shipToParty: [['123456X01', '123456X01 - EMPRESA PRUEBA, SL'], ['123456X03', '123456X03 - EMPRESA PRUEBA, SL']],
-  ticketTheme: [['Litiges', 'Reclamaciones / Devoluciones'], ['Litiges', 'Litiges/retours (OPEL)']],
-  ticketType: [['Avancement', 'Anulacion de una reclamacion por entrega posterior'], ['Avancement', 'Progreso / Seguimiento de una reclamacion']]
+  ticketTheme: [['Litiges', 'Reclamaciones / Devoluciones'], ['Litiges', 'Litiges/retours (OPEL)'], ['Commandes', 'Pedidos'], ['Delais', 'Fecha estimada de entrega']],
+  ticketType: []
+};
+// tipos de cada tema y criterios de cada tipo, como en el portal real
+var TIPOS = {
+  'Reclamaciones / Devoluciones': ['Anulacion de una reclamacion por entrega posterior', 'Progreso / Seguimiento de una reclamacion'],
+  'Pedidos': ['Cancelacion pedido pieza codificada', 'Cancelacion linea de pedido o pedido completo', 'Motivo de cancelacion de un pedido de pieza codificada'],
+  'Fecha estimada de entrega': ['Solicitud de plazo de entrega para un aviso con prioridad 1,2,3', 'Solicitud de plazo para un faltante sin aviso de reclamamción']
+};
+var CRITERIOS = {
+  'Progreso / Seguimiento de una reclamacion': ['Número de reclamacion'],
+  'Motivo de cancelacion de un pedido de pieza codificada': ['Número de pedido de SAP', 'Referencia'],
+  'Cancelacion linea de pedido o pedido completo': ['Número de pedido de SAP', 'Referencia', 'Cantidad', 'Número de linea de pedido de SAP'],
+  'Solicitud de plazo para un faltante sin aviso de reclamamción': ['Número de pedido de SAP', 'Referencia', 'Cantidad']
 };
 function campo(nombre){ return '<div x-field="'+nombre+'"><input oninput="buscar(this, \\''+nombre+'\\')" onkeydown="if (event.key === \\'ArrowDown\\') buscar(this, \\''+nombre+'\\', true)"></div>'; }
 function vista(){
@@ -37,7 +49,8 @@ function vista(){
 }
 function formulario(){
   document.getElementById('vista').innerHTML = '<div x-field="ticketSeq">Nº Ticket</div>' + campo('principal') + campo('shipToParty') + campo('ticketTheme') + campo('ticketType')
-    + '<div id="criterios"></div><a x-field="sendTicket" class="btn" href="#" onclick="enviar();return false">Enviar</a>'
+    + '<div id="criterios"></div><div x-field="description"><div class="wysiwyg-editor" contenteditable="true"></div></div>'
+    + '<a x-field="sendTicket" class="btn" href="#" onclick="enviar();return false">Enviar</a>'
     + '<button onclick="document.getElementById(\\'adjuntos\\').style.display=\\'block\\'"><i class="fa fa-paperclip"></i></button>';
 }
 function buscar(entrada, nombre, todas){
@@ -45,18 +58,24 @@ function buscar(entrada, nombre, todas){
   var hay = OPCIONES[nombre].filter(o => todas || (o[0].toLowerCase().startsWith(texto) && texto.length > 2));
   ul.innerHTML = hay.length ? '' : '<li>No results found</li>';
   hay.forEach(o => { var li = document.createElement('li'); li.className = 'ui-menu-item'; li.textContent = o[1];
-    li.onclick = () => { entrada.value = o[1]; ul.style.display = 'none'; if (nombre === 'ticketType') criterio(); }; ul.appendChild(li); });
+    li.onclick = () => { entrada.value = o[1]; ul.style.display = 'none';
+      if (nombre === 'ticketTheme') OPCIONES.ticketType = (TIPOS[o[1]] || []).map(t => ['', t]);
+      if (nombre === 'ticketType') criterio(o[1]); }; ul.appendChild(li); });
   ul.style.display = 'block';
 }
-function criterio(){ document.getElementById('criterios').innerHTML = 'Número de reclamacion <div x-field="value"><input></div>'; }
-function valores(){ var r = {}; document.querySelectorAll('[x-field] input').forEach(i => r[i.parentNode.getAttribute('x-field')] = i.value); return r; }
+function criterio(tipo){ document.getElementById('criterios').innerHTML = (CRITERIOS[tipo] || []).map(c =>
+  '<div class="row-fluid has-labels"><span x-field="ticketReferenceType"><label>Tipo de criterio</label> <a>' + c + '</a></span> Valor <div x-field="value"><input></div></div>').join(''); }
+function valores(){ var r = {criterios: {}};
+  document.querySelectorAll('[x-field] input').forEach(i => { if (i.parentNode.getAttribute('x-field') !== 'value') r[i.parentNode.getAttribute('x-field')] = i.value; });
+  document.querySelectorAll('.row-fluid.has-labels').forEach(f => r.criterios[f.querySelector('[x-field="ticketReferenceType"] a').textContent] = f.querySelector('input').value);
+  r.description = document.querySelector('[x-field="description"] [contenteditable]').innerText; return r; }
 function enviar(){ fetch('/enviado', {method:'POST', body: JSON.stringify(valores())}).then(r => r.text()).then(n => { document.querySelector('[x-field="ticketSeq"]').textContent = 'Nº Ticket' + n; }); }
 document.querySelector('input.upload-input').onchange = function(){
   var f = this.files[0]; document.getElementById('lista').innerHTML += '<span>' + f.name + '</span>';
   fetch('/adjunto', {method:'POST', body: f.name}); };
 // «la persona» pulsa Enviar cuando el portal se lo indica y el ticket ya está rellenado
 setInterval(() => fetch('/pulsar').then(r => r.text()).then(t => {
-  var v = document.querySelector('[x-field="value"] input');
+  var v = document.querySelector('.row-fluid.has-labels input');
   if (t === 'si' && v && v.value && !window.pulsado) { window.pulsado = true; enviar(); } }), 300);
 window.onhashchange = vista; vista();
 </script></body></html>"""
@@ -146,7 +165,7 @@ def ticket(portal, word, **kw):
 
 
 ESPERADO = {"principal": "123456X - EMPRESA PRUEBA, SL", "shipToParty": "123456X03 - EMPRESA PRUEBA, SL", "ticketTheme": "Reclamaciones / Devoluciones",
-            "ticketType": "Progreso / Seguimiento de una reclamacion", "value": "131172031"}
+            "ticketType": "Progreso / Seguimiento de una reclamacion", "criterios": {"Número de reclamacion": "131172031"}, "description": ""}
 
 
 def test_envio_automatico_rellena_envia_y_adjunta(portal, word):
@@ -208,6 +227,28 @@ def test_internal_error_tras_el_acceso_se_vuelve_a_abrir_el_enlace(portal, word)
     assert sum("internal error" in r for r in registro) == 2
 
 
+@pytest.mark.parametrize("clave", ["plazo_faltante", "motivo_cancelacion", "cancelacion_linea"])
+def test_plantillas_rellenan_sus_criterios_por_nombre_y_no_adjuntan_nada(portal, tmp_path, clave):
+    nombre, tema, tipo, criterios = plt.PLANTILLAS[clave]
+    valores = {c: f"V{i}" for i, c in enumerate(criterios)}
+    datos = {"cuenta": "123456X - EMPRESA PRUEBA, SL", "cliente": "123456X03 - EMPRESA PRUEBA, SL", "tema": tema, "tipo": tipo,
+             "criterios": valores, "descripcion": "Texto de prueba"}
+    t = plt.TicketPowerLine("usuario", "clave", datos, url=portal.url, visible=False, enviar_solo=True)
+    assert t.ejecutar() == "TKT999001" and t.error_adjunto is None
+    enviado = portal.enviados[0]
+    assert (enviado["ticketTheme"], enviado["ticketType"]) == (tema, tipo)
+    assert enviado["criterios"] == valores and enviado["description"] == "Texto de prueba"
+    assert portal.adjuntos == []  # sin Word no se adjunta nada
+
+
+def test_criterio_que_no_existe_se_explica(portal, word):
+    t, _ = ticket(portal, word, enviar_solo=True)
+    t.datos["criterios"] = {"Número de bastidor": "X"}
+    with pytest.raises(ValueError, match="no tiene el criterio «Número de bastidor»"):
+        t.ejecutar()
+    assert portal.enviados == []
+
+
 def test_busquedas_para():
     assert plt.busquedas_para("123456X - EMPRESA, SL") == ["123456X", "123456X - EMPRESA, SL"]
     assert plt.busquedas_para(plt.TEMA_POR_DEFECTO)[:2] == ["Litiges", plt.TEMA_POR_DEFECTO]
@@ -244,3 +285,51 @@ def test_configuracion_del_ticket(app):
     config = modulo.obtener_configuracion()
     assert config["power_line_cuenta"] == "123456X - EMPRESA PRUEBA, SL" and config["power_line_envio_automatico"] is True
     assert modulo.valores_ticket()["tema"] == plt.TEMA_POR_DEFECTO
+
+
+# ---------- pestaña «Tickets Power-Line» ----------
+
+@pytest.fixture
+def pestana_tickets(app, monkeypatch, tmp_path):
+    monkeypatch.setattr(pl, "TICKETS_POWER_LINE", str(tmp_path / "tickets.json"))
+    app.tabview.set("Reclamaciones")
+    app.construir_pestana("Reclamaciones")
+    modulo = app.reclamaciones_power_line
+    modulo.configuracion.update({"power_line_cuenta": "123456X - EMPRESA PRUEBA, SL", "power_line_cliente": "123456X03 - EMPRESA PRUEBA, SL",
+                                 "usuario_madd": "u", "password_madd": "p"})
+    return modulo
+
+
+def test_los_campos_cambian_con_la_plantilla(pestana_tickets):
+    m = pestana_tickets
+    assert list(m.criterios_entries) == ["Número de pedido de SAP", "Referencia", "Cantidad"]  # plazo de un faltante
+    m.criterios_entries["Referencia"].insert(0, "9812")
+    m.plantilla_ticket_option.set("Cancelación de línea o pedido completo")
+    m._pintar_criterios()
+    assert list(m.criterios_entries) == ["Número de pedido de SAP", "Referencia", "Cantidad", "Número de linea de pedido de SAP"]
+    assert m.criterios_entries["Referencia"].get() == "9812"  # lo común se conserva
+
+
+def test_crear_ticket_con_plantilla(pestana_tickets, monkeypatch):
+    m = pestana_tickets
+    avisos = []
+    monkeypatch.setattr(pl.messagebox, "showwarning", lambda *a, **k: avisos.append(a[1]))
+    assert m.crear_ticket_plantilla() is False and "Rellena" in avisos[-1]
+    lanzados = []
+    monkeypatch.setattr(m, "_lanzar_ticket", lambda datos, que, registro_id=None, plantilla=None: lanzados.append((datos, que, plantilla)) or True)
+    m.plantilla_ticket_option.set("Motivo de cancelación de pieza codificada")
+    m._pintar_criterios()
+    m.criterios_entries["Número de pedido de SAP"].insert(0, "2063765885")
+    m.criterios_entries["Referencia"].insert(0, "9812345680")
+    m.descripcion_ticket_text.insert("1.0", "Pieza ya no necesaria")
+    assert m.crear_ticket_plantilla()
+    datos, que, plantilla = lanzados[0]
+    assert (datos["tema"], datos["tipo"]) == ("Pedidos", "Motivo de cancelacion de un pedido de pieza codificada")
+    assert datos["criterios"] == {"Número de pedido de SAP": "2063765885", "Referencia": "9812345680"} and datos["descripcion"] == "Pieza ya no necesaria"
+    assert "ruta_word" not in datos and plantilla == "Motivo de cancelación de pieza codificada"
+
+
+def test_los_tickets_creados_se_listan(pestana_tickets):
+    pl.anotar_ticket("TKT999001", "Plazo para un faltante sin aviso", {"Número de pedido de SAP": "1", "Referencia": "R", "Cantidad": "2"})
+    pestana_tickets.refrescar_tickets_recientes()
+    assert "TKT999001  Plazo para un faltante sin aviso: 1 · R · 2" in pestana_tickets.tickets_recientes_box.get("1.0", "end")

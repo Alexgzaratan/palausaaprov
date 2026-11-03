@@ -35,6 +35,7 @@ import historial_madd
 import tarea_windows
 import avisos_clientes
 import ficheros_mopar
+import cascos_cruce
 import hashlib
 import json
 from version import VERSION
@@ -123,6 +124,9 @@ CAMPOS_CONFIG = (
     ("nombre_usuario", "nombre_entry", ""),
     ("ruta_carpeta_informes", "carpeta_informes_entry", ""),
     ("ruta_excel_pedidos_stock", "excel_pedidos_stock_entry", ""),
+    ("ruta_cascos_provisiones", "cascos_entry", ""),
+    ("ruta_ventas_cascos", "ventas_cascos_entry", ""),
+    ("cliente_cascos", "cliente_cascos_entry", cascos_cruce.CLIENTE_POR_DEFECTO),
 )
 
 DIAS_ES = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
@@ -2609,7 +2613,78 @@ class AppIntegrada(ctk.CTk):
         self.btn_informe_anterior = self.crear_boton_secundario(fila_comparar, "Abrir informe anterior", self.abrir_informe_anterior, alto=estilo.ALTO_BOTON, width=170)
         self.btn_informe_anterior.pack(side="right")
         efectos.poner_pista(self, self.btn_informe_anterior, self.pista_informe_anterior)
+        self.construir_tarjeta_cascos(contenedor)
         self.construir_tarjeta_tareas(contenedor)
+
+    # ---------- cruce de cascos con ventas (cascos_cruce.py, como la skill cruce-cascos-ventas) ----------
+
+    def construir_tarjeta_cascos(self, contenedor):
+        card = self.crear_tarjeta_tab(contenedor, "Cruce de cascos con ventas", "Cambia el Nº ALBARÁN de CASCOS_PROVISIONES por la Refer. del informe de ventas del cliente. El original no se toca: se guarda una copia «(cruzado …)».",
+                                      en_rejilla=True, icono="comparar")
+        self.crear_fila_archivo(card, "CASCOS_PROVISIONES", "cascos_entry", "ruta_cascos_provisiones", "CASCOS_PROVISIONES.xlsx...", "Examinar",
+                                lambda: self.seleccionar_archivo(self.cascos_entry, [("Excel files", "*.xlsx")]))
+        self.crear_fila_archivo(card, "Informe de ventas del cliente", "ventas_cascos_entry", "ruta_ventas_cascos", "VENTAS 8049.xls...", "Examinar",
+                                lambda: self.seleccionar_archivo(self.ventas_cascos_entry, [("Excel", "*.xls *.xlsx")]), extensiones=(".xls", ".xlsx"))
+        fila = ctk.CTkFrame(card, fg_color="transparent")
+        fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        self.crear_etiqueta(fila, "Cliente", negrita=True).pack(side="left")
+        self.cliente_cascos_entry = self.crear_entrada(fila, width=80, justify="center")
+        self.cliente_cascos_entry.insert(0, self.config.get("cliente_cascos") or cascos_cruce.CLIENTE_POR_DEFECTO)
+        self.cliente_cascos_entry.pack(side="left", padx=(8, 16))
+        self.crear_etiqueta(fila, "Desde", negrita=True).pack(side="left")
+        self.desde_cascos_entry = self.crear_entrada(fila, width=120, justify="center", placeholder_text="dd/mm/aaaa")
+        self.desde_cascos_entry.pack(side="left", padx=(8, 0))
+        efectos.poner_pista(self, self.desde_cascos_entry, "Vacío: el día 1 del mes de la fecha más antigua del informe de ventas")
+        self.btn_cascos = self.crear_boton_principal(fila, "Cruzar", self.cruzar_cascos, alto=estilo.ALTO_CONTROL)
+        self.btn_cascos.pack(side="right")
+
+    def cruzar_cascos(self):
+        if self.hay_tarea_activa():
+            return False
+        self.guardar_configuracion_ui_internal()
+        cascos, ventas = self.cascos_entry.get().strip(), self.ventas_cascos_entry.get().strip()
+        if not self.validar_archivo(cascos, "Selecciona el CASCOS_PROVISIONES.xlsx."):
+            return False
+        if not self.validar_archivo(ventas, "Selecciona el informe de ventas del cliente (VENTAS ....xls)."):
+            return False
+        cliente = self.cliente_cascos_entry.get().strip() or cascos_cruce.CLIENTE_POR_DEFECTO
+        desde = None
+        if self.desde_cascos_entry.get().strip():
+            try:
+                desde = datetime.strptime(self.desde_cascos_entry.get().strip(), "%d/%m/%Y")
+            except ValueError:
+                messagebox.showwarning("Cruce de cascos", "La fecha «Desde» debe ser dd/mm/aaaa, o déjala vacía.")
+                return False
+        salida = cascos_cruce.ruta_salida(cascos)
+        if self.excel_abierto(str(salida), "El resultado del cruce"):
+            return False
+        self.btn_cascos.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_cascos, "Cruzando")
+        self.actualizar_estado("cruzando cascos con ventas", str(salida))
+
+        def trabajo():
+            resultado, error = None, None
+            try:
+                resultado = cascos_cruce.cruzar(ventas, cascos, str(salida), cliente, desde)
+            except Exception as e:
+                error = str(e)
+                registrar_error_detallado(f"Cruce de cascos: {e}", traceback.format_exc())
+            self.after(0, self.cascos_cruzados, salida, resultado, error)
+
+        threading.Thread(target=trabajo, daemon=True).start()
+        return True
+
+    def cascos_cruzados(self, salida, resultado, error):
+        self.btn_cascos.configure(state="normal", text="Cruzar")
+        if error:
+            self.agregar_log(f"[CASCOS] ❌ {error}", "error")
+            messagebox.showwarning("Cruce de cascos", f"No se pudo hacer el cruce:\n{error}")
+            return
+        texto = cascos_cruce.resumen(resultado)
+        self.agregar_log("[CASCOS] " + texto.splitlines()[0], "success")
+        self.actualizar_estado("cruce de cascos hecho", str(salida))
+        self.avisar(f"Cruce hecho: {len(resultado['cambiados'])} albaranes cambiados. {Path(salida).name}", "ok", accion=("Abrir", lambda: self.abrir_archivo(salida)))
+        messagebox.showinfo("Cruce de cascos", texto + f"\n\nGuardado en: {Path(salida).name}")
 
     def build_tab_mopar(self, acc_color):
         contenedor = ctk.CTkScrollableFrame(self.tab_mopar, fg_color="transparent")

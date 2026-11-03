@@ -33,7 +33,8 @@ except Exception:
 
 
 DATABASE_FILE = ruta_datos("reclamaciones_power_line.db")
-LITIGIOS_PSA = ruta_datos("litigios_psa.json", migrar=False)  # litigios creados desde la app (para no reclamar dos veces la misma línea)
+LITIGIOS_PSA = ruta_datos("litigios_psa.json", migrar=False)
+TICKETS_POWER_LINE = ruta_datos("tickets_power_line.json", migrar=False)  # tickets creados con las plantillas  # litigios creados desde la app (para no reclamar dos veces la misma línea)
 PREFIJO_ADJUNTOS = "power_line_adjuntos_"
 EXTENSIONES_FOTO = "*.jpg *.jpeg *.png *.bmp *.tif *.tiff" + (" *.heic *.heif" if ADMITE_HEIC else "")
 PHOTO_FIELDS = (
@@ -66,6 +67,24 @@ def anotar_litigio_psa(resultado, referencia, ruta=None):
     ruta = ruta or LITIGIOS_PSA
     datos = leer_litigios_psa(ruta)[-499:] + [{"litigio": resultado["litigio"], "referencia": referencia, "factura": resultado["factura"],
                                                "pos": resultado["pos"], "doc_ventas": resultado["doc_ventas"], "cuando": datetime.now().isoformat(timespec="seconds")}]
+    temporal = ruta + ".tmp"
+    with open(temporal, "w", encoding="utf-8") as f:
+        _json.dump(datos, f, ensure_ascii=False, indent=1)
+    os.replace(temporal, ruta)
+
+
+def leer_tickets(ruta=None):
+    try:
+        with open(ruta or TICKETS_POWER_LINE, encoding="utf-8") as f:
+            datos = _json.load(f)
+        return datos if isinstance(datos, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def anotar_ticket(numero, plantilla, criterios, ruta=None):
+    ruta = ruta or TICKETS_POWER_LINE
+    datos = leer_tickets(ruta)[-199:] + [{"ticket": numero, "plantilla": plantilla, "criterios": criterios, "cuando": datetime.now().isoformat(timespec="seconds")}]
     temporal = ruta + ".tmp"
     with open(temporal, "w", encoding="utf-8") as f:
         _json.dump(datos, f, ensure_ascii=False, indent=1)
@@ -356,9 +375,11 @@ class ModuloReclamacionesPowerLine:
         panel.pack(padx=8, pady=8, fill="both", expand=True)
         self.tab_formulario = panel.add("Formulario")
         self.tab_historial = panel.add("Historial")
+        self.tab_tickets = panel.add("Tickets Power-Line")
         self.app.resaltar_pestana_activa(panel)
         self._construir_formulario()
         self._construir_historial()
+        self._construir_tickets()
 
     def _construir_formulario(self):
         app = self.app
@@ -789,70 +810,159 @@ class ModuloReclamacionesPowerLine:
         return self.enviar_a_power_line(registro[0], registro[1], registro[5])
 
     def enviar_a_power_line(self, registro_id, litigio, ruta_word):
+        """Ticket de seguimiento de la reclamación (con el Word adjunto)."""
+        if not ruta_word or not Path(ruta_word).is_file():
+            messagebox.showwarning("Power-Line", f"No se encuentra el Word del litigio {litigio}:\n{ruta_word}\n\nSin él no se puede adjuntar al ticket.")
+            return False
+        return self._lanzar_ticket(dict(self.valores_ticket(), litigio=litigio, ruta_word=ruta_word), f"del litigio {litigio}", registro_id=registro_id)
+
+    def _lanzar_ticket(self, datos, que, registro_id=None, plantilla=None):
+        """Comprobaciones comunes y envío en segundo plano. 'que' describe el ticket en los avisos («del litigio 131...»)."""
         if getattr(self, "_enviando_power_line", False):
             self.app.avisar("Ya se está creando un ticket en Power-Line.")
             return False
-        valores = self.valores_ticket()
-        if not valores["cuenta"] or not valores["cliente"]:
+        if not datos["cuenta"] or not datos["cliente"]:
             messagebox.showwarning("Power-Line", "Falta la Cuenta Solicitante o el Cliente destinatario de Power-Line. Rellénalos en Configuración > Reclamaciones Power Line.")
             return False
         usuario, password = self.credenciales_power_line()
         if not usuario or not password:
             messagebox.showwarning("Power-Line", "Falta el usuario o la contraseña de Stellantis: ponlos en Configuración > Reclamaciones Power Line (o los de MADD en la pestaña Facturas).")
             return False
-        if not ruta_word or not Path(ruta_word).is_file():
-            messagebox.showwarning("Power-Line", f"No se encuentra el Word del litigio {litigio}:\n{ruta_word}\n\nSin él no se puede adjuntar al ticket.")
-            return False
         enviar_solo = bool(self.obtener_configuracion()["power_line_envio_automatico"])
         self._enviando_power_line = True
-        for nombre in ("btn_enviar_power_line", "btn_paso3"):
+        for nombre in ("btn_enviar_power_line", "btn_paso3", "btn_crear_ticket"):
             boton = getattr(self, nombre, None)
             if boton is not None and boton.winfo_exists():
                 boton.configure(state="disabled")
                 efectos.marcar_ocupado(boton, "Enviando")
         aviso = "se enviará solo" if enviar_solo else "revísalo y pulsa «Enviar» en la ventana de Power-Line"
-        self.app.avisar(f"Creando el ticket del litigio {litigio} en Power-Line: {aviso}.")
-        datos = dict(valores, litigio=litigio, ruta_word=ruta_word)
+        self.app.avisar(f"Creando el ticket {que} en Power-Line: {aviso}.")
         log = lambda texto, tag=None: self.app.after(0, self.app.agregar_log, f"[POWER-LINE] {texto}", tag)
-        threading.Thread(target=self._ticket_en_segundo_plano, args=(registro_id, datos, enviar_solo, log), daemon=True).start()
+        threading.Thread(target=self._ticket_en_segundo_plano, args=(registro_id, datos, enviar_solo, log, que, plantilla), daemon=True).start()
         return True
 
-    def _ticket_en_segundo_plano(self, registro_id, datos, enviar_solo, log):
+    def _ticket_en_segundo_plano(self, registro_id, datos, enviar_solo, log, que=None, plantilla=None):
+        que = que or f"del litigio {datos.get('litigio')}"
         error, numero, error_adjunto = None, None, None
         try:
             usuario, password = self.credenciales_power_line()
             ticket = power_line_ticket.TicketPowerLine(usuario, password, datos, enviar_solo=enviar_solo, log=log)
             numero = ticket.ejecutar()
             error_adjunto = ticket.error_adjunto
-            self.historial.guardar_ticket(registro_id, numero)
+            if registro_id is not None:
+                self.historial.guardar_ticket(registro_id, numero)
+            if plantilla:
+                anotar_ticket(numero, plantilla, datos.get("criterios", {}))
         except power_line_ticket.TicketCancelado:
             error = "cancelado"
         except Exception as e:
             error = str(e).splitlines()[0] if str(e) else type(e).__name__
-            registrar_error_reclamacion(traceback.format_exc(), f"Ticket Power-Line: {error}", datos.get("litigio"))
-        self.app.after(0, lambda: self._ticket_terminado(datos["litigio"], numero, error, error_adjunto))
+            registrar_error_reclamacion(traceback.format_exc(), f"Ticket Power-Line: {error}", datos.get("litigio") or plantilla)
+        con_word = bool(datos.get("ruta_word"))
+        self.app.after(0, lambda: self._ticket_terminado(que, numero, error, error_adjunto, con_word))
 
-    def _ticket_terminado(self, litigio, numero, error, error_adjunto):
+    def _ticket_terminado(self, que, numero, error, error_adjunto, con_word=True):
         self._enviando_power_line = False
-        boton = getattr(self, "btn_enviar_power_line", None)
-        if boton is not None and boton.winfo_exists():
-            boton.configure(state="normal", text="Enviar a Power-Line")
-        paso3 = getattr(self, "btn_paso3", None)
-        if paso3 is not None and paso3.winfo_exists():
-            paso3.configure(state="normal", text="3 · Enviar a Power-Line")
+        for nombre, texto in (("btn_enviar_power_line", "Enviar a Power-Line"), ("btn_paso3", "3 · Enviar a Power-Line"), ("btn_crear_ticket", "Crear ticket")):
+            boton = getattr(self, nombre, None)
+            if boton is not None and boton.winfo_exists():
+                boton.configure(state="normal", text=texto)
         self.actualizar_historial()
+        self.refrescar_tickets_recientes()
         if numero and not error_adjunto:
-            self.app.agregar_log(f"[POWER-LINE] ✅ Ticket {numero} enviado con el Word del litigio {litigio}.", "success")
-            self.app.avisar(f"Ticket {numero} enviado a Power-Line con el Word del litigio {litigio}.", "ok")
+            con = " con el Word" if con_word else ""
+            self.app.agregar_log(f"[POWER-LINE] ✅ Ticket {numero} enviado{con} ({que}).", "success")
+            self.app.avisar(f"Ticket {numero} enviado a Power-Line{con} ({que}).", "ok")
         elif numero:
             self.app.agregar_log(f"[POWER-LINE] ⚠️ Ticket {numero} enviado, pero no se pudo adjuntar el Word: {error_adjunto}", "error")
             messagebox.showwarning("Power-Line", f"El ticket {numero} se ha enviado, pero no se pudo adjuntar el Word ({error_adjunto}).\n\nAdjúntalo a mano con el clip del ticket.")
         elif error == "cancelado":
-            self.app.agregar_log(f"[POWER-LINE] Ticket del litigio {litigio} no enviado (ventana cerrada o sin pulsar «Enviar»).", "error")
-            self.app.avisar(f"No se ha enviado el ticket del litigio {litigio}.", "aviso")
+            self.app.agregar_log(f"[POWER-LINE] Ticket {que} no enviado (ventana cerrada o sin pulsar «Enviar»).", "error")
+            self.app.avisar(f"No se ha enviado el ticket {que}.", "aviso")
         else:
-            self.app.agregar_log(f"[POWER-LINE] ❌ No se pudo crear el ticket del litigio {litigio}: {error}", "error")
-            messagebox.showwarning("Power-Line", f"No se pudo crear el ticket del litigio {litigio}:\n{error}")
+            self.app.agregar_log(f"[POWER-LINE] ❌ No se pudo crear el ticket {que}: {error}", "error")
+            messagebox.showwarning("Power-Line", f"No se pudo crear el ticket {que}:\n{error}")
+
+    # ---------- tickets con plantilla (pestaña «Tickets Power-Line») ----------
+
+    PLANTILLAS_PESTANA = ("plazo_faltante", "motivo_cancelacion", "cancelacion_linea")
+
+    def _construir_tickets(self):
+        app = self.app
+        contenedor = ctk.CTkScrollableFrame(self.tab_tickets, fg_color="transparent")
+        contenedor.pack(padx=2, pady=2, fill="both", expand=True)
+        card = app.crear_tarjeta_tab(contenedor, "Nuevo ticket en Power-Line", "Elige la plantilla y rellena sus datos: la cuenta, el cliente, el tema y el tipo se ponen solos.", icono="correo")
+        nombres = [power_line_ticket.PLANTILLAS[c][0] for c in self.PLANTILLAS_PESTANA]
+        fila = ctk.CTkFrame(card, fg_color="transparent")
+        fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        app.crear_etiqueta(fila, "Plantilla", negrita=True, width=180, anchor="w").pack(side="left")
+        self.plantilla_ticket_option = app.crear_menu(fila, nombres, comando=lambda valor: self._pintar_criterios())
+        self.plantilla_ticket_option.set(nombres[0])
+        self.plantilla_ticket_option.pack(side="left", fill="x", expand=True)
+        self.criterios_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self.criterios_frame.pack(padx=estilo.PAD_X, fill="x")
+        self.criterios_entries = {}
+        app.crear_etiqueta(card, "Descripción (opcional)", negrita=True).pack(anchor="w", padx=estilo.PAD_X, pady=(6, 4))
+        self.descripcion_ticket_text = ctk.CTkTextbox(card, height=60, corner_radius=estilo.RADIO, border_width=1, border_color=app.color_borde,
+                                                      fg_color=app.color_campo, text_color=app.color_texto, font=estilo.fuente())
+        self.descripcion_ticket_text.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        self.btn_crear_ticket = app.crear_boton_principal(card, "Crear ticket", self.crear_ticket_plantilla)
+        self.btn_crear_ticket.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        recientes = app.crear_tarjeta_tab(contenedor, "Últimos tickets creados", "Los tickets creados desde esta pestaña.", icono="reloj")
+        self.tickets_recientes_box = ctk.CTkTextbox(recientes, height=150, corner_radius=estilo.RADIO, border_width=1, border_color=app.color_borde,
+                                                    fg_color=app.color_campo, text_color=app.color_texto, font=estilo.fuente(estilo.TAM_PEQUENO))
+        self.tickets_recientes_box.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        self._pintar_criterios()
+        self.refrescar_tickets_recientes()
+
+    def plantilla_elegida(self):
+        nombre = self.plantilla_ticket_option.get()
+        return next(c for c in self.PLANTILLAS_PESTANA if power_line_ticket.PLANTILLAS[c][0] == nombre)
+
+    def _pintar_criterios(self):
+        anteriores = {}
+        for nombre, entrada in self.criterios_entries.items():
+            try:
+                anteriores[nombre] = entrada.get()
+            except Exception:
+                pass  # la pestaña se reconstruyó: esa caja ya no existe
+        for hijo in self.criterios_frame.winfo_children():
+            hijo.destroy()
+        self.criterios_entries = {}
+        for nombre in power_line_ticket.PLANTILLAS[self.plantilla_elegida()][3]:
+            fila = ctk.CTkFrame(self.criterios_frame, fg_color="transparent")
+            fila.pack(pady=3, fill="x")
+            self.app.crear_etiqueta(fila, nombre, width=180, anchor="w").pack(side="left")
+            entrada = self.app.crear_entrada(fila)
+            if anteriores.get(nombre):
+                entrada.insert(0, anteriores[nombre])  # al cambiar de plantilla se conservan los datos comunes
+            entrada.pack(side="left", fill="x", expand=True)
+            self.criterios_entries[nombre] = entrada
+
+    def crear_ticket_plantilla(self):
+        clave = self.plantilla_elegida()
+        nombre, tema, tipo, criterios = power_line_ticket.PLANTILLAS[clave]
+        valores = {c: self.criterios_entries[c].get().strip() for c in criterios}
+        vacios = [c for c, v in valores.items() if not v]
+        if vacios:
+            messagebox.showwarning("Power-Line", "Rellena: " + ", ".join(vacios) + ".")
+            return False
+        config = self.valores_ticket()
+        datos = {"cuenta": config["cuenta"], "cliente": config["cliente"], "tema": tema, "tipo": tipo, "criterios": valores,
+                 "descripcion": self.descripcion_ticket_text.get("1.0", "end-1c").strip()}
+        resumen = " · ".join(valores.values())
+        return self._lanzar_ticket(datos, f"«{nombre}» ({resumen})", plantilla=nombre)
+
+    def refrescar_tickets_recientes(self):
+        caja = getattr(self, "tickets_recientes_box", None)
+        if caja is None or not caja.winfo_exists():
+            return
+        lineas = [f"{datetime.fromisoformat(t['cuando']):%d/%m %H:%M}  {t['ticket']}  {t['plantilla']}: {' · '.join(t['criterios'].values())}"
+                  for t in reversed(leer_tickets()[-15:])]
+        caja.configure(state="normal")
+        caja.delete("1.0", "end")
+        caja.insert("1.0", "\n".join(lineas) or "Todavía no se ha creado ningún ticket desde aquí.")
+        caja.configure(state="disabled")
 
     def _error_generacion(self, detalle):
         self.btn_generar.configure(state="normal", text="2 · Generar documento")
