@@ -874,6 +874,10 @@ class ModuloReclamacionesPowerLine:
             con = " con el Word" if con_word else ""
             self.app.agregar_log(f"[POWER-LINE] ✅ Ticket {numero} enviado{con} ({que}).", "success")
             self.app.avisar(f"Ticket {numero} enviado a Power-Line{con} ({que}).", "ok")
+            try:
+                efectos.animar_envio(self.app, f"Ticket {numero} enviado", f"Power-Line{con}")
+            except Exception:
+                pass  # la animación es decorativa: nunca debe estorbar
         elif numero:
             self.app.agregar_log(f"[POWER-LINE] ⚠️ Ticket {numero} enviado, pero no se pudo adjuntar el Word: {error_adjunto}", "error")
             messagebox.showwarning("Power-Line", f"El ticket {numero} se ha enviado, pero no se pudo adjuntar el Word ({error_adjunto}).\n\nAdjúntalo a mano con el clip del ticket.")

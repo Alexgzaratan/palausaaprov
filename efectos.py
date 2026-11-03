@@ -1,5 +1,6 @@
 """Efectos de la interfaz: avisos que no interrumpen, botones con indicador de actividad, tarjetas que
 responden al ratón y arrastrar archivos a los campos. Todo con customtkinter y temporizadores after()."""
+import math
 import time
 import tkinter
 
@@ -161,6 +162,99 @@ def marcar_ocupado(boton, texto, intervalo_ms=150):
             pass
 
     paso()
+
+
+# ---------- animación de envío ----------
+
+ENVIO_DURACION = 1.1   # segundos de animación (avión + check)
+ENVIO_VISIBLE_MS = 2600  # tiempo total en pantalla antes de irse sola
+INTERVALO_ENVIO_MS = 16
+
+
+def _rebote(x):
+    c1 = 1.70158
+    return 1 + (c1 + 1) * (x - 1) ** 3 + c1 * (x - 1) ** 2
+
+
+def _fase(t, inicio, fin):
+    return 0.0 if t <= inicio else 1.0 if t >= fin else (t - inicio) / (fin - inicio)
+
+
+def _rectangulo_redondeado(lienzo, x1, y1, x2, y2, r, **opciones):
+    puntos = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+    return lienzo.create_polygon(puntos, smooth=True, **opciones)
+
+
+def animar_envio(app, titulo, subtitulo=""):
+    """Tarjeta en el centro de la ventana: un avión de papel cruza dejando estela y aparece un check que se dibuja.
+    Todo en un lienzo (sin bordes cortados). Se va sola o con un clic. Devuelve el lienzo, o None con el
+    interruptor de animaciones apagado."""
+    if not getattr(app, "config", {}).get("animacion_inicio", True):
+        return None
+    s = escala(app)
+    ancho, alto = round(280 * s), round(196 * s)
+    fondo, color, ok = app.color_superficie, app.color_principal, app.color_ok
+    debajo = getattr(app, "color_panel_claro", fondo)
+    lienzo = tkinter.Canvas(app, width=ancho, height=alto, bg=debajo, highlightthickness=0, bd=0, cursor="hand2")
+    lienzo.place(relx=0.5, rely=0.45, anchor="center")
+    tkinter.Misc.lift(lienzo)  # Canvas.lift sube elementos del lienzo, no el widget
+    familia = estilo.fuente()[0]
+    inicio = time.monotonic()
+    zona_alto = 120 * s  # parte de arriba: avión y check
+    cx, cy, radio = ancho / 2, 14 * s + zona_alto / 2, 34 * s
+
+    def cerrar(evento=None):
+        if lienzo.winfo_exists():
+            lienzo.destroy()
+
+    def avion(x, y, angulo, tam):
+        c, si = math.cos(angulo), math.sin(angulo)
+        puntos = [(1.0, 0.0), (-0.8, -0.65), (-0.45, 0.0), (-0.8, 0.65)]
+        return [v for px, py in puntos for v in (x + (px * c - py * si) * tam, y + (px * si + py * c) * tam)]
+
+    def punto(p):
+        izquierda, arriba = 30 * s, 14 * s
+        w = ancho - 60 * s
+        return izquierda + p * w, arriba + zona_alto * 0.8 - math.sin(p * math.pi * 0.9) * zona_alto * 0.55 - p * zona_alto * 0.15
+
+    def fotograma():
+        if not lienzo.winfo_exists():
+            return
+        t = time.monotonic() - inicio
+        lienzo.delete("all")
+        _rectangulo_redondeado(lienzo, 1, 1, ancho - 2, alto - 2, 18 * s, fill=fondo, outline=mezclar(app.color_borde, ok, 0.6), width=1)
+        lienzo.create_text(cx, alto - 52 * s, text=titulo, fill=app.color_texto, font=(familia, -round((estilo.TAM_PEQUENO + 4) * s), "bold"))
+        if subtitulo:
+            lienzo.create_text(cx, alto - 28 * s, text=subtitulo, fill=app.color_texto_sec, font=(familia, -round((estilo.TAM_TEXTO + 1) * s)))
+        # 1) el avión cruza en arco de abajo-izquierda a arriba-derecha, con estela punteada
+        vuelo = _suave(_fase(t, 0.0, 0.65))
+        if vuelo < 1:
+            estela = [v for i in range(13) for v in punto(vuelo * i / 12)]
+            lienzo.create_line(*estela, fill=mezclar(fondo, color, 0.45), width=max(1, round(2 * s)), dash=(3, 4), smooth=True)
+            x, y = punto(vuelo)
+            x2, y2 = punto(min(1.0, vuelo + 0.02))
+            lienzo.create_polygon(*avion(x, y, math.atan2(y2 - y, x2 - x), 13 * s), fill=color, outline="")
+        # 2) círculo que rebota y check que se dibuja
+        aparece = _fase(t, 0.5, 0.85)
+        if aparece > 0:
+            r = round(radio * max(0.0, _rebote(aparece)))
+            lienzo.create_oval(round(cx) - r, round(cy) - r, round(cx) + r, round(cy) + r, fill=mezclar(fondo, ok, 0.18), outline=ok, width=max(2, round(2.5 * s)))
+            trazo = _fase(t, 0.7, ENVIO_DURACION)
+            if trazo > 0:
+                a, b, c = (cx - 14 * s, cy + 1 * s), (cx - 4 * s, cy + 11 * s), (cx + 16 * s, cy - 11 * s)
+                p = _suave(trazo) * 2
+                fin1 = min(p, 1.0)
+                puntos = [a, (a[0] + (b[0] - a[0]) * fin1, a[1] + (b[1] - a[1]) * fin1)]
+                if p > 1:
+                    puntos.append((b[0] + (c[0] - b[0]) * (p - 1), b[1] + (c[1] - b[1]) * (p - 1)))
+                lienzo.create_line(*[v for xy in puntos for v in xy], fill=ok, width=round(4 * s), capstyle="round", joinstyle="round")
+        if t < ENVIO_DURACION + 0.05:
+            lienzo.after(INTERVALO_ENVIO_MS, fotograma)
+
+    lienzo.bind("<Button-1>", cerrar)
+    fotograma()
+    lienzo.after(ENVIO_VISIBLE_MS, cerrar)
+    return lienzo
 
 
 # ---------- tarjetas que responden al ratón ----------

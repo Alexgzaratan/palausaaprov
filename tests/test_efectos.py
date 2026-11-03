@@ -155,3 +155,29 @@ def test_captura_se_muestra_y_termina(app):
 def test_captura_desactivada_con_las_animaciones(app):
     app.config["animacion_inicio"] = False
     assert app.mostrar_captura(1, 2, "S1") is None
+
+
+def test_animacion_de_ticket_enviado(app):
+    tarjeta = efectos.animar_envio(app, "Ticket TKT0001 enviado", "Power-Line con el Word")
+    bombear(app, 0.6)
+    assert tarjeta.winfo_exists() and tarjeta.winfo_ismapped()
+    bombear(app, efectos.ENVIO_DURACION)
+    assert len(tarjeta.find_all()) >= 4  # tarjeta, textos, círculo y check dibujados
+    tarjeta.event_generate("<Button-1>")
+    bombear(app, 0.1)
+    assert not tarjeta.winfo_exists()
+    app.config["animacion_inicio"] = False
+    assert efectos.animar_envio(app, "x") is None
+
+
+def test_ticket_terminado_anima_solo_si_sale_bien(app, monkeypatch):
+    app.tabview.set("Reclamaciones")
+    app.construir_pestana("Reclamaciones")
+    m = app.reclamaciones_power_line
+    animados = []
+    monkeypatch.setattr(efectos, "animar_envio", lambda app, titulo, sub="": animados.append(titulo))
+    monkeypatch.setattr(app_mod.messagebox, "showwarning", lambda *a, **k: None)
+    m._ticket_terminado("del litigio 1", "TKT0001", None, None)
+    m._ticket_terminado("del litigio 2", None, "fallo", None)
+    m._ticket_terminado("del litigio 3", "TKT0003", None, "sin clip")
+    assert animados == ["Ticket TKT0001 enviado"]
