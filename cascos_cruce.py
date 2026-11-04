@@ -6,7 +6,10 @@ y no con la Refer. Se corrige cruzándolo con el informe de ventas de Quiter (ho
   - Si cruzan, el Nº ALBARÁN pasa a ser la Refer. (número entero). Si ya es una Refer. del informe, se deja.
   - Si no cruza, se deja igual y la celda se pinta en amarillo.
   - Solo filas del cliente con fecha (columna A) igual o posterior a «desde», y solo la columna Nº ALBARÁN.
-El original no se toca: el resultado se guarda en la carpeta de cruces, por año y mes (ver ruta_salida)."""
+El original no se toca: el resultado se guarda en la carpeta de cruces, por año y mes (ver ruta_salida).
+
+Lo mismo sirve para el Excel de PIEZA NUEVA (última hoja con columnas «Cliente» y «Nº Albarán», p. ej.
+«PIEZA_NUEVA _2025»). Ahí una celda puede llevar varios albaranes separados por «/»: se cruza cada uno."""
 import datetime
 import re
 from pathlib import Path
@@ -15,6 +18,35 @@ HOJA_CASCOS = "RECAMBIOS PALAUSA"
 HOJA_VENTAS = "Informe"
 CLIENTE_POR_DEFECTO = "8049"
 AMARILLO = "FFFF00"
+# tipo: (prefijo del archivo de salida, hoja fija o None = la última que tenga las columnas, columna cliente, columna albarán)
+TIPOS = {
+    "cascos": ("CASCOS", HOJA_CASCOS, "CLIENTE", "Nº ALBARÁN"),
+    "pieza_nueva": ("PIEZA NUEVA", None, "CLIENTE", "Nº ALBARÁN"),
+}
+
+
+def _columnas(ws, col_cliente, col_albaran):
+    """(columna cliente, columna albarán) en base 1 comparando la cabecera sin mayúsculas; None si no están."""
+    cabecera = [str(c.value).strip().upper() if c.value is not None else "" for c in ws[1]]
+    try:
+        return cabecera.index(col_cliente.upper()) + 1, cabecera.index(col_albaran.upper()) + 1
+    except ValueError:
+        return None
+
+
+def elegir_hoja(wb, tipo):
+    _, hoja, col_cliente, col_albaran = TIPOS[tipo]
+    if hoja is not None:
+        if hoja not in wb.sheetnames:
+            raise ValueError(f"el Excel de cascos no tiene la hoja «{hoja}»")
+        ws = wb[hoja]
+        if _columnas(ws, col_cliente, col_albaran) is None:
+            raise ValueError("el Excel de cascos no tiene las columnas «CLIENTE» y «Nº ALBARÁN»")
+        return ws
+    candidatas = [ws for ws in wb.worksheets if ws.max_row > 1 and _columnas(ws, col_cliente, col_albaran)]
+    if not candidatas:
+        raise ValueError("el Excel no tiene ninguna hoja con datos y columnas «Cliente» y «Nº Albarán»")
+    return candidatas[-1]  # la del año en curso es la última
 
 
 def digitos(valor):
@@ -59,20 +91,42 @@ def carpeta_por_defecto():
     return str(base / SUBCARPETA_POR_DEFECTO[1]) if base.is_dir() else ""
 
 
-def ruta_salida(carpeta_destino, cliente=CLIENTE_POR_DEFECTO, hoy=None):
-    """carpeta\\AAAA\\MES\\CASCOS <cliente> dd-mm-aaaa.xlsx (como las hojas de pedido). Si ya hay uno de ese día, «(2)», «(3)»..."""
+def ruta_salida(carpeta_destino, cliente=CLIENTE_POR_DEFECTO, hoy=None, tipo="cascos"):
+    """carpeta\\AAAA\\MES\\CASCOS <cliente> dd-mm-aaaa.xlsx (PIEZA NUEVA ... para ese tipo), como las hojas de pedido.
+    Si ya hay uno de ese día, «(2)», «(3)»..."""
     hoy = hoy or datetime.date.today()
     carpeta = Path(carpeta_destino) / str(hoy.year) / MESES[hoy.month - 1]
-    base = f"CASCOS {str(cliente).strip()} {hoy:%d-%m-%Y}"
+    base = f"{TIPOS[tipo][0]} {str(cliente).strip()} {hoy:%d-%m-%Y}"
     ruta, n = carpeta / f"{base}.xlsx", 2
     while ruta.exists():
         ruta, n = carpeta / f"{base} ({n}).xlsx", n + 1
     return ruta
 
 
-def cruzar(ruta_ventas, ruta_cascos, salida, cliente=CLIENTE_POR_DEFECTO, desde=None):
-    """Hace el cruce y guarda el resultado en 'salida'. Devuelve {desde, cambiados, ya_estaban, sin_cruce: [(fila, fecha, valor, motivo)]}.
-    'desde' (date/datetime): si no se da, el día 1 del mes de la fecha más antigua del informe."""
+def cruzar_celda(valor, mapa, refs):
+    """(nuevo valor, partes sin cruce). Cada albarán separado por «/» se cambia por su Refer. si cruza; las que ya son
+    una Refer. del informe se dejan. Un solo albarán queda como número; varios, como «Refer./Refer.»."""
+    partes = [p.strip() for p in str(valor).strip().split("/") if p.strip()]
+    nuevas, sin = [], []
+    for parte in partes:
+        if re.fullmatch(r"\d+", parte) and int(parte) in refs:
+            nueva = int(parte)
+        elif digitos(parte) in mapa:
+            nueva = mapa[digitos(parte)]
+        else:
+            nueva = parte
+            sin.append(parte)
+        if nueva not in nuevas:  # «albarán/Refer.» del mismo documento queda en una sola Refer.
+            nuevas.append(nueva)
+    if len(nuevas) == 1:
+        return nuevas[0], sin
+    return "/".join(str(n) for n in nuevas), sin
+
+
+def cruzar(ruta_ventas, ruta_cascos, salida, cliente=CLIENTE_POR_DEFECTO, desde=None, tipo="cascos"):
+    """Hace el cruce y guarda el resultado en 'salida'. Devuelve {desde, cambiados, ya_estaban, sin_cruce: [(fila, fecha, valor, motivo)], hoja}.
+    'desde' (date/datetime): si no se da, el día 1 del mes de la fecha más antigua del informe.
+    tipo: «cascos» (CASCOS_PROVISIONES) o «pieza_nueva» (Excel de PIEZA NUEVA)."""
     import openpyxl
     from openpyxl.styles import PatternFill
     if Path(salida).resolve() == Path(ruta_cascos).resolve():
@@ -91,14 +145,8 @@ def cruzar(ruta_ventas, ruta_cascos, salida, cliente=CLIENTE_POR_DEFECTO, desde=
 
     wb = openpyxl.load_workbook(ruta_cascos)
     try:
-        if HOJA_CASCOS not in wb.sheetnames:
-            raise ValueError(f"el Excel de cascos no tiene la hoja «{HOJA_CASCOS}»")
-        ws = wb[HOJA_CASCOS]
-        cabecera = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
-        try:
-            col_cliente, col_albaran = cabecera.index("CLIENTE") + 1, cabecera.index("Nº ALBARÁN") + 1
-        except ValueError:
-            raise ValueError("el Excel de cascos no tiene las columnas «CLIENTE» y «Nº ALBARÁN»")
+        ws = elegir_hoja(wb, tipo)
+        col_cliente, col_albaran = _columnas(ws, *TIPOS[tipo][2:])
         amarillo = PatternFill("solid", fgColor=AMARILLO)
         cambiados, sin_cruce, ya = [], [], 0
         for fila in range(2, ws.max_row + 1):
@@ -111,22 +159,23 @@ def cruzar(ruta_ventas, ruta_cascos, salida, cliente=CLIENTE_POR_DEFECTO, desde=
             valor = celda.value
             if valor is None:
                 continue
-            texto = str(valor).strip()
-            if re.fullmatch(r"\d+", texto) and int(texto) in refs:
-                ya += 1
-                continue
-            clave = digitos(texto)
-            if clave in mapa:
-                cambiados.append((fila, fecha.date(), valor, mapa[clave]))
-                celda.value = mapa[clave]
-            else:
-                sin_cruce.append((fila, fecha.date(), valor, motivo_sin_cruce(valor, mapa)))
+            nuevo, sin = cruzar_celda(valor, mapa, refs)
+            igual = str(nuevo) == str(valor).strip()
+            if sin:
+                sin_cruce.append((fila, fecha.date(), valor, motivo_sin_cruce(sin[0], mapa)))
                 celda.fill = amarillo
+            elif igual:
+                ya += 1
+            else:
+                cambiados.append((fila, fecha.date(), valor, nuevo))
+            if not igual:  # si no cruza nada, la celda se queda como estaba (número o texto)
+                celda.value = nuevo
         Path(salida).parent.mkdir(parents=True, exist_ok=True)
         wb.save(salida)
+        hoja = ws.title
     finally:
         wb.close()
-    return {"desde": desde.date(), "cambiados": cambiados, "ya_estaban": ya, "sin_cruce": sin_cruce}
+    return {"desde": desde.date(), "cambiados": cambiados, "ya_estaban": ya, "sin_cruce": sin_cruce, "hoja": hoja}
 
 
 def resumen(resultado):

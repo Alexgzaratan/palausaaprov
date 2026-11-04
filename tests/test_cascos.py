@@ -98,3 +98,59 @@ def test_tarjeta_en_el_comparador(app, archivos, monkeypatch):
     hechos = list(destino.rglob("CASCOS 8049 *.xlsx"))
     assert resumenes and "2 albaranes cambiados" in resumenes[0] and len(hechos) == 1
     assert hechos[0].parent.parent.name == str(datetime.date.today().year)  # destino\AÑO\MES\
+
+
+@pytest.fixture
+def pieza_nueva(archivos):
+    ventas, _, tmp = archivos
+    ruta = tmp / "PIEZA NUEVA.xlsx"
+    wb = openpyxl.Workbook()
+    vieja = wb.active
+    vieja.title = "PIEZA_NUEVA"
+    vieja.append(["Fecha", "Cliente", "Referencia", "Cantidad", "Nº Albarán"])
+    vieja.append([datetime.datetime(2026, 8, 5), 8049, "X", 1, "4126103585"])  # hoja de otro año: no se toca
+    ws = wb.create_sheet("PIEZA_NUEVA _2025")
+    ws.append(["Fecha", "Cliente", "Referencia", "Cantidad", "Nº Albarán", "Cantidad aceptada"])
+    for fila in [
+        (datetime.datetime(2026, 8, 5), 8049, "9035V1", 1, 4126103585),                 # número sin texto -> 11301237
+        (datetime.datetime(2026, 8, 6), 8049, "9035V2", 1, "4126103585/4126103600"),    # dos albaranes
+        (datetime.datetime(2026, 8, 6), 8049, "1607", 1, "4126103600/11301300"),        # albarán/Refer. del mismo
+        (datetime.datetime(2026, 8, 7), 8049, "7416P9", 1, 11301400),                    # ya es una Refer.
+        (datetime.datetime(2026, 8, 7), 8049, "16289321", 1, "4126103700/4126999999"),  # uno cruza y otro no
+        (datetime.datetime(2026, 8, 8), 8049, "84089658", 1, "ES CALIDAD"),
+        (datetime.datetime(2026, 8, 8), 7006, "9812257880", 1, 4126103585),              # otro cliente
+    ]:
+        ws.append(list(fila))
+    wb.save(ruta)
+    return ventas, str(ruta), tmp
+
+
+def test_cruce_de_pieza_nueva(pieza_nueva):
+    ventas, ruta, tmp = pieza_nueva
+    r = cc.cruzar(ventas, ruta, str(tmp / "pn.xlsx"), tipo="pieza_nueva")
+    assert r["hoja"] == "PIEZA_NUEVA _2025" and r["ya_estaban"] == 1
+    assert [(f, nuevo) for f, _, _, nuevo in r["cambiados"]] == [(2, 11301237), (3, "11301237/11301300"), (4, 11301300)]
+    assert [(f, m) for f, _, _, m in r["sin_cruce"]] == [(6, "revisar a mano"), (7, "revisar a mano")]
+    wb = openpyxl.load_workbook(tmp / "pn.xlsx")
+    ws = wb["PIEZA_NUEVA _2025"]
+    assert [ws.cell(f, 5).value for f in range(2, 9)] == [11301237, "11301237/11301300", 11301300, 11301400, "11301400/4126999999", "ES CALIDAD", 4126103585]
+    assert ws.cell(6, 5).fill.start_color.rgb == "00FFFF00" and ws.cell(5, 5).fill.fill_type is None
+    assert wb["PIEZA_NUEVA"]["E2"].value == "4126103585"
+    assert cc.ruta_salida(tmp, "8049", datetime.date(2026, 11, 4), tipo="pieza_nueva").name == "PIEZA NUEVA 8049 04-11-2026.xlsx"
+
+
+def test_boton_de_pieza_nueva(app, pieza_nueva, monkeypatch):
+    ventas, ruta, tmp = pieza_nueva
+    app.tabview.set("Comparador")
+    app.construir_pestana("Comparador")
+    destino = tmp / "CRUCES 8049"
+    for campo, valor in ((app.pieza_nueva_entry, ruta), (app.ventas_cascos_entry, ventas), (app.destino_cascos_entry, str(destino))):
+        campo.delete(0, "end")
+        campo.insert(0, valor)
+    monkeypatch.setattr(app_mod.messagebox, "showinfo", lambda *a, **k: None)
+    monkeypatch.setattr(app_mod.threading, "Thread", lambda target, daemon=None: type("H", (), {"start": lambda self: target()})())
+    monkeypatch.setattr(app, "after", lambda ms, funcion, *a: funcion(*a))
+    monkeypatch.setattr(app, "excel_abierto", lambda *a: False)
+    assert app.cruzar_cascos("pieza_nueva")
+    assert len(list(destino.rglob("PIEZA NUEVA 8049 *.xlsx"))) == 1
+    assert app.btn_pieza_nueva.cget("text") == "Cruzar pieza nueva" and app.btn_cascos.cget("text") == "Cruzar cascos"

@@ -128,6 +128,7 @@ CAMPOS_CONFIG = (
     ("ruta_ventas_cascos", "ventas_cascos_entry", ""),
     ("cliente_cascos", "cliente_cascos_entry", cascos_cruce.CLIENTE_POR_DEFECTO),
     ("ruta_destino_cascos", "destino_cascos_entry", ""),
+    ("ruta_pieza_nueva", "pieza_nueva_entry", ""),
 )
 
 DIAS_ES = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
@@ -2623,17 +2624,20 @@ class AppIntegrada(ctk.CTk):
     # ---------- cruce de cascos con ventas (cascos_cruce.py, como la skill cruce-cascos-ventas) ----------
 
     def construir_tarjeta_cascos(self, contenedor):
-        card = self.crear_tarjeta_tab(contenedor, "Cruce de cascos con ventas", "Cambia el Nº ALBARÁN de CASCOS_PROVISIONES por la Refer. del informe de ventas del cliente. El original no se toca: el resultado se guarda en la carpeta de cruces, por año y mes.",
+        card = self.crear_tarjeta_tab(contenedor, "Cruce de albaranes con ventas", "Cambia el Nº ALBARÁN de CASCOS_PROVISIONES o de PIEZA NUEVA por la Refer. del informe de ventas del cliente. El original no se toca: el resultado se guarda en la carpeta de cruces, por año y mes.",
                                       en_rejilla=True, icono="comparar")
         self.crear_fila_archivo(card, "CASCOS_PROVISIONES", "cascos_entry", "ruta_cascos_provisiones", "CASCOS_PROVISIONES.xlsx...", "Examinar",
                                 lambda: self.seleccionar_archivo(self.cascos_entry, [("Excel files", "*.xlsx")]))
+        self.crear_fila_archivo(card, "PIEZA NUEVA", "pieza_nueva_entry", "ruta_pieza_nueva", "PIEZA NUEVA.xlsx...", "Examinar",
+                                lambda: self.seleccionar_archivo(self.pieza_nueva_entry, [("Excel files", "*.xlsx")]))
+        efectos.poner_pista(self, self.pieza_nueva_entry, "Se cruza la última hoja (la del año en curso). Las celdas con varios albaranes «a/b» se cruzan uno a uno")
         self.crear_fila_archivo(card, "Informe de ventas del cliente", "ventas_cascos_entry", "ruta_ventas_cascos", "VENTAS 8049.xls...", "Examinar",
                                 lambda: self.seleccionar_archivo(self.ventas_cascos_entry, [("Excel", "*.xls *.xlsx")]), extensiones=(".xls", ".xlsx"))
         self.crear_fila_archivo(card, "Carpeta destino de los cruces", "destino_cascos_entry", "ruta_destino_cascos", "ABONO CASCOS\\CRUCES 8049...", "Carpeta",
                                 lambda: self.seleccionar_carpeta(self.destino_cascos_entry))
         if not self.destino_cascos_entry.get().strip() and cascos_cruce.carpeta_por_defecto():
             self.destino_cascos_entry.insert(0, cascos_cruce.carpeta_por_defecto())
-        efectos.poner_pista(self, self.destino_cascos_entry, "Dentro se crean las carpetas AÑO\\MES con un CASCOS <cliente> <fecha>.xlsx por cruce")
+        efectos.poner_pista(self, self.destino_cascos_entry, "Dentro se crean las carpetas AÑO\\MES con un CASCOS (o PIEZA NUEVA) <cliente> <fecha>.xlsx por cruce")
         fila = ctk.CTkFrame(card, fg_color="transparent")
         fila.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
         self.crear_etiqueta(fila, "Cliente", negrita=True).pack(side="left")
@@ -2644,15 +2648,21 @@ class AppIntegrada(ctk.CTk):
         self.desde_cascos_entry = self.crear_entrada(fila, width=120, justify="center", placeholder_text="dd/mm/aaaa")
         self.desde_cascos_entry.pack(side="left", padx=(8, 0))
         efectos.poner_pista(self, self.desde_cascos_entry, "Vacío: el día 1 del mes de la fecha más antigua del informe de ventas")
-        self.btn_cascos = self.crear_boton_principal(fila, "Cruzar", self.cruzar_cascos, alto=estilo.ALTO_CONTROL)
+        self.btn_cascos = self.crear_boton_principal(fila, "Cruzar cascos", self.cruzar_cascos, alto=estilo.ALTO_CONTROL)
         self.btn_cascos.pack(side="right")
+        self.btn_pieza_nueva = self.crear_boton_secundario(fila, "Cruzar pieza nueva", lambda: self.cruzar_cascos("pieza_nueva"), alto=estilo.ALTO_CONTROL)
+        self.btn_pieza_nueva.pack(side="right", padx=(0, 8))
 
-    def cruzar_cascos(self):
+    TEXTOS_CRUCE = {"cascos": ("Cruzar cascos", "cascos_entry", "Selecciona el CASCOS_PROVISIONES.xlsx."),
+                    "pieza_nueva": ("Cruzar pieza nueva", "pieza_nueva_entry", "Selecciona el Excel de PIEZA NUEVA.")}
+
+    def cruzar_cascos(self, tipo="cascos"):
         if self.hay_tarea_activa():
             return False
         self.guardar_configuracion_ui_internal()
-        cascos, ventas = self.cascos_entry.get().strip(), self.ventas_cascos_entry.get().strip()
-        if not self.validar_archivo(cascos, "Selecciona el CASCOS_PROVISIONES.xlsx."):
+        _, campo, falta = self.TEXTOS_CRUCE[tipo]
+        cascos, ventas = getattr(self, campo).get().strip(), self.ventas_cascos_entry.get().strip()
+        if not self.validar_archivo(cascos, falta):
             return False
         if not self.validar_archivo(ventas, "Selecciona el informe de ventas del cliente (VENTAS ....xls)."):
             return False
@@ -2668,15 +2678,16 @@ class AppIntegrada(ctk.CTk):
         if not destino:
             messagebox.showwarning("Cruce de cascos", "Elige la carpeta destino de los cruces (por ejemplo ABONO CASCOS\\CRUCES 8049).")
             return False
-        salida = cascos_cruce.ruta_salida(destino, cliente)
-        self.btn_cascos.configure(state="disabled")
-        efectos.marcar_ocupado(self.btn_cascos, "Cruzando")
+        salida = cascos_cruce.ruta_salida(destino, cliente, tipo=tipo)
+        for boton in (self.btn_cascos, self.btn_pieza_nueva):
+            boton.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_cascos if tipo == "cascos" else self.btn_pieza_nueva, "Cruzando")
         self.actualizar_estado("cruzando cascos con ventas", str(salida))
 
         def trabajo():
             resultado, error = None, None
             try:
-                resultado = cascos_cruce.cruzar(ventas, cascos, str(salida), cliente, desde)
+                resultado = cascos_cruce.cruzar(ventas, cascos, str(salida), cliente, desde, tipo=tipo)
             except Exception as e:
                 error = str(e)
                 registrar_error_detallado(f"Cruce de cascos: {e}", traceback.format_exc())
@@ -2686,7 +2697,8 @@ class AppIntegrada(ctk.CTk):
         return True
 
     def cascos_cruzados(self, salida, resultado, error):
-        self.btn_cascos.configure(state="normal", text="Cruzar")
+        for boton, tipo in ((self.btn_cascos, "cascos"), (self.btn_pieza_nueva, "pieza_nueva")):
+            boton.configure(state="normal", text=self.TEXTOS_CRUCE[tipo][0])
         if error:
             self.agregar_log(f"[CASCOS] ❌ {error}", "error")
             messagebox.showwarning("Cruce de cascos", f"No se pudo hacer el cruce:\n{error}")
