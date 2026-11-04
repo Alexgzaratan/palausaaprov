@@ -140,28 +140,123 @@ class GestorAvisos:
 
 # ---------- botones ocupados ----------
 
+def _color(widget, nombre):
+    try:
+        return widget._apply_appearance_mode(widget.cget(nombre))
+    except Exception:
+        return None
+
+
 def marcar_ocupado(boton, texto, intervalo_ms=150):
     """Muestra un círculo girando y el tiempo transcurrido ("◐ Analizando · 0:42") hasta que otro código
-    cambia el texto del botón (al terminar la tarea), momento en que se para solo."""
+    cambia el texto del botón (al terminar la tarea), momento en que se para solo.
+    Devuelve poner(detalle, fraccion): el paso en curso sustituye al texto ("◐ Fila 12.000 de 40.000 · 0:05") y aparece
+    una barrita fina dentro del botón, con el avance (0 a 1) o en movimiento si fraccion es None. Se puede llamar
+    desde otro hilo: solo guarda los valores y el temporizador del botón los pinta."""
     inicio = time.monotonic()
-    estado = {"texto": None, "vuelta": 0}
+    estado = {"texto": None, "vuelta": 0, "detalle": None, "fraccion": None, "barra": None}
+
+    def poner(detalle=None, fraccion=None):
+        estado["detalle"], estado["fraccion"] = detalle, fraccion
+
+    def quitar_barra():
+        barra = estado["barra"]
+        estado["barra"] = None
+        if barra is not None:
+            try:
+                barra.stop()
+                barra.destroy()
+            except Exception:
+                pass
+
+    def pintar_barra():
+        barra = estado["barra"]
+        if barra is None:
+            fondo, letra = _color(boton, "fg_color"), _color(boton, "text_color")
+            pista = mezclar(fondo, letra, 0.3) if fondo and letra and fondo.startswith("#") and letra.startswith("#") else None
+            barra = ctk.CTkProgressBar(boton, height=3, corner_radius=2, border_width=0, progress_color=letra or "#ffffff",
+                                       fg_color=pista or "transparent", mode="determinate")
+            barra.place(relx=0.5, rely=1.0, relwidth=0.8, anchor="s", y=-4)
+            estado["barra"] = barra
+            estado["modo"] = None
+        fraccion = estado["fraccion"]
+        modo = "indeterminate" if fraccion is None else "determinate"
+        if estado.get("modo") != modo:
+            barra.stop()
+            barra.configure(mode=modo)
+            if modo == "indeterminate":
+                barra.start()
+            estado["modo"] = modo
+        if fraccion is not None:
+            barra.set(max(0.0, min(1.0, fraccion)))
 
     def paso():
         try:
             if not boton.winfo_exists():
                 return
             if estado["texto"] is not None and boton.cget("text") != estado["texto"]:
+                quitar_barra()
                 return
             segundos = int(time.monotonic() - inicio)
-            nuevo = f"{GIRO[estado['vuelta'] % len(GIRO)]}  {texto} · {segundos // 60}:{segundos % 60:02d}"
+            nuevo = f"{GIRO[estado['vuelta'] % len(GIRO)]}  {estado['detalle'] or texto} · {segundos // 60}:{segundos % 60:02d}"
             estado["vuelta"] += 1
             estado["texto"] = nuevo
             boton.configure(text=nuevo)
+            if estado["detalle"] is not None:
+                pintar_barra()
             boton.after(intervalo_ms, paso)
         except Exception:
             pass
 
     paso()
+    poner.estado = estado
+    return poner
+
+
+# ---------- campo que falta ----------
+
+SACUDIDA = (6, -6, 4, -4, 2, -2, 0)  # desplazamientos en píxeles, uno cada SACUDIDA_MS
+SACUDIDA_MS = 35
+ROJO_MS = 2500  # el borde sigue en rojo este tiempo (o hasta que se escribe en el campo)
+
+
+def sacudir(app, entrada):
+    """El campo tiembla un instante con el borde en rojo y recibe el foco: «aquí falta algo». Solo se mueve si está
+    colocado con pack (cambia el margen izquierdo y el derecho a la vez, sin mover a sus vecinos)."""
+    if not entrada.winfo_exists():
+        return False
+    entrada.configure(border_color=app.color_texto_error, border_width=2)
+    entrada.focus_set()
+    margen = None
+    if entrada.winfo_manager() == "pack":
+        padx = entrada.pack_info().get("padx", 0)
+        partes = [int(float(p)) for p in (padx if isinstance(padx, (tuple, list)) else str(padx).split())] or [0]
+        margen = (partes[0], partes[-1])
+    if getattr(entrada, "_sacudiendo", False):
+        return True
+    entrada._sacudiendo = True
+
+    def mover(i=0):
+        if not entrada.winfo_exists():
+            return
+        if margen is not None:
+            izquierda, derecha = margen
+            d = max(-izquierda, min(derecha, SACUDIDA[i])) if i < len(SACUDIDA) else 0
+            entrada.pack_configure(padx=(izquierda + d, derecha - d))
+        if i < len(SACUDIDA):
+            entrada.after(SACUDIDA_MS, lambda: mover(i + 1))
+        else:
+            entrada._sacudiendo = False
+
+    def quitar_rojo():
+        if entrada.winfo_exists() and app.focus_get() is not getattr(entrada, "_entry", None):
+            entrada.configure(border_color=app.color_borde_campo, border_width=1)
+        elif entrada.winfo_exists():
+            entrada.configure(border_color=app.color_principal, border_width=2)  # con el foco, como los demás campos
+
+    mover()
+    entrada.after(ROJO_MS, quitar_rojo)
+    return True
 
 
 # ---------- animación de envío ----------

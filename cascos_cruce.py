@@ -11,7 +11,10 @@ El original no se toca: el resultado se guarda en la carpeta de cruces, por año
 Lo mismo sirve para el Excel de PIEZA NUEVA (última hoja con columnas «Cliente» y «Nº Albarán», p. ej.
 «PIEZA_NUEVA _2025»). Ahí una celda puede llevar varios albaranes separados por «/»: se cruza cada uno."""
 import datetime
+import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HOJA_CASCOS = "RECAMBIOS PALAUSA"
@@ -47,6 +50,95 @@ def elegir_hoja(wb, tipo):
     if not candidatas:
         raise ValueError("el Excel no tiene ninguna hoja con datos y columnas «Cliente» y «Nº Albarán»")
     return candidatas[-1]  # la del año en curso es la última
+
+
+# ---------- precarga en segundo plano ----------
+# Al elegir el Excel en la app se empieza a abrir aquí, para que al pulsar «Cruzar» ya esté leído. El libro precargado
+# se usa una sola vez (el cruce lo modifica); el informe de ventas se guarda y se reutiliza mientras no cambie el archivo.
+
+_ejecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="precarga")
+_cerrojo = threading.Lock()
+_libros = {}   # ruta -> (firma, futuro con el libro de openpyxl)
+_ventas = {}   # ruta -> (firma, futuro con (mapa, fecha_min))
+MAX_LIBROS = 2  # cascos y pieza nueva
+
+
+def _clave(ruta):
+    return os.path.normcase(os.path.abspath(str(ruta)))
+
+
+def firma(ruta):
+    """(fecha de modificación, tamaño): si cambia, lo precargado ya no vale."""
+    st = os.stat(ruta)
+    return st.st_mtime_ns, st.st_size
+
+
+def _abrir_libro(ruta):
+    import openpyxl
+    return openpyxl.load_workbook(ruta)
+
+
+def precargar(ruta):
+    """Empieza a abrir el Excel en segundo plano (si no está ya). Devuelve True si lo ha encargado."""
+    try:
+        if not ruta or not str(ruta).lower().endswith(".xlsx") or not os.path.isfile(ruta):
+            return False
+        clave, f = _clave(ruta), firma(ruta)
+    except OSError:
+        return False
+    with _cerrojo:
+        if clave in _libros and _libros[clave][0] == f:
+            return False
+        while len(_libros) >= MAX_LIBROS:
+            _libros.pop(next(iter(_libros)))
+        _libros[clave] = (f, _ejecutor.submit(_abrir_libro, ruta))
+    return True
+
+
+def tomar_libro(ruta):
+    """El libro precargado (esperando a que termine de abrirse) o None si no lo hay o el archivo ha cambiado."""
+    with _cerrojo:
+        entrada = _libros.pop(_clave(ruta), None)
+    if entrada is None:
+        return None
+    try:
+        if entrada[0] != firma(ruta):
+            return None
+        return entrada[1].result()
+    except Exception:
+        return None  # si falló la precarga, se abre como siempre
+
+
+def leer_ventas_guardado(ruta_ventas):
+    """leer_ventas, pero reutilizando lo ya leído si el archivo no ha cambiado (p. ej. cascos y luego pieza nueva)."""
+    precargar_ventas(ruta_ventas)
+    clave = _clave(ruta_ventas)
+    with _cerrojo:
+        entrada = _ventas.get(clave)
+    if entrada is None:
+        return leer_ventas(ruta_ventas)  # no se pudo encargar (p. ej. no existe): que dé el error de siempre
+    try:
+        return entrada[1].result()
+    except Exception:
+        with _cerrojo:
+            _ventas.pop(clave, None)  # que el siguiente intento lo vuelva a leer
+        raise
+
+
+def precargar_ventas(ruta_ventas):
+    """Empieza a leer el informe de ventas en segundo plano si no está ya leído (solo se guarda el último)."""
+    try:
+        if not ruta_ventas or not os.path.isfile(ruta_ventas):
+            return False
+        clave, f = _clave(ruta_ventas), firma(ruta_ventas)
+    except OSError:
+        return False
+    with _cerrojo:
+        if clave in _ventas and _ventas[clave][0] == f:
+            return False
+        _ventas.clear()
+        _ventas[clave] = (f, _ejecutor.submit(leer_ventas, ruta_ventas))
+    return True
 
 
 def digitos(valor):
@@ -123,15 +215,17 @@ def cruzar_celda(valor, mapa, refs):
     return "/".join(str(n) for n in nuevas), sin
 
 
-def cruzar(ruta_ventas, ruta_cascos, salida, cliente=CLIENTE_POR_DEFECTO, desde=None, tipo="cascos"):
+def cruzar(ruta_ventas, ruta_cascos, salida, cliente=CLIENTE_POR_DEFECTO, desde=None, tipo="cascos", progreso=None):
     """Hace el cruce y guarda el resultado en 'salida'. Devuelve {desde, cambiados, ya_estaban, sin_cruce: [(fila, fecha, valor, motivo)], hoja}.
     'desde' (date/datetime): si no se da, el día 1 del mes de la fecha más antigua del informe.
-    tipo: «cascos» (CASCOS_PROVISIONES) o «pieza_nueva» (Excel de PIEZA NUEVA)."""
-    import openpyxl
+    tipo: «cascos» (CASCOS_PROVISIONES) o «pieza_nueva» (Excel de PIEZA NUEVA).
+    progreso(texto, fraccion o None): se llama al cambiar de paso y cada pocas filas (desde este hilo)."""
     from openpyxl.styles import PatternFill
+    avisar = progreso or (lambda texto, fraccion=None: None)
     if Path(salida).resolve() == Path(ruta_cascos).resolve():
         raise ValueError("el resultado no puede sobrescribir el CASCOS_PROVISIONES original")
-    mapa, fecha_min = leer_ventas(ruta_ventas)
+    avisar("Leyendo ventas")
+    mapa, fecha_min = leer_ventas_guardado(ruta_ventas)
     if not mapa:
         raise ValueError("el informe de ventas no tiene líneas de albarán (columna «Documento» que empiece por ALBARAN)")
     refs = set(mapa.values())
@@ -143,13 +237,17 @@ def cruzar(ruta_ventas, ruta_cascos, salida, cliente=CLIENTE_POR_DEFECTO, desde=
         desde = datetime.datetime(desde.year, desde.month, desde.day)
     cliente = str(cliente).strip()
 
-    wb = openpyxl.load_workbook(ruta_cascos)
+    avisar("Abriendo Excel")
+    wb = tomar_libro(ruta_cascos) or _abrir_libro(ruta_cascos)
     try:
         ws = elegir_hoja(wb, tipo)
         col_cliente, col_albaran = _columnas(ws, *TIPOS[tipo][2:])
         amarillo = PatternFill("solid", fgColor=AMARILLO)
         cambiados, sin_cruce, ya = [], [], 0
-        for fila in range(2, ws.max_row + 1):
+        ultima = ws.max_row
+        for fila in range(2, ultima + 1):
+            if fila % 500 == 0:
+                avisar(f"Fila {fila:,} de {ultima:,}".replace(",", "."), fila / ultima)
             if str(ws.cell(fila, col_cliente).value).strip().replace(".0", "") != cliente:
                 continue
             fecha = ws.cell(fila, 1).value
@@ -170,6 +268,7 @@ def cruzar(ruta_ventas, ruta_cascos, salida, cliente=CLIENTE_POR_DEFECTO, desde=
                 cambiados.append((fila, fecha.date(), valor, nuevo))
             if not igual:  # si no cruza nada, la celda se queda como estaba (número o texto)
                 celda.value = nuevo
+        avisar("Guardando")
         Path(salida).parent.mkdir(parents=True, exist_ok=True)
         wb.save(salida)
         hoja = ws.title

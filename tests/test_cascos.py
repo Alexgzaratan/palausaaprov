@@ -154,3 +154,28 @@ def test_boton_de_pieza_nueva(app, pieza_nueva, monkeypatch):
     assert app.cruzar_cascos("pieza_nueva")
     assert len(list(destino.rglob("PIEZA NUEVA 8049 *.xlsx"))) == 1
     assert app.btn_pieza_nueva.cget("text") == "Cruzar pieza nueva" and app.btn_cascos.cget("text") == "Cruzar cascos"
+
+
+def test_precarga_y_ventas_guardadas(archivos, monkeypatch):
+    ventas, cascos, tmp = archivos
+    assert cc.precargar(cascos) and not cc.precargar(cascos)  # la segunda vez ya está encargado
+    libro = cc.tomar_libro(cascos)
+    assert libro is not None and cc.HOJA_CASCOS in libro.sheetnames
+    assert cc.tomar_libro(cascos) is None  # se usa una sola vez
+    cc.precargar(cascos)
+    os.utime(cascos, (1, 1))  # el archivo cambia: lo precargado no vale
+    assert cc.tomar_libro(cascos) is None
+    lecturas = []
+    leer = cc.leer_ventas
+    monkeypatch.setattr(cc, "leer_ventas", lambda ruta: lecturas.append(ruta) or leer(ruta))
+    cc._ventas.clear()
+    primero = cc.leer_ventas_guardado(ventas)
+    assert cc.leer_ventas_guardado(ventas) == primero and len(lecturas) == 1  # cascos y luego pieza nueva: una lectura
+
+
+def test_cruce_avisa_de_cada_paso(archivos):
+    ventas, cascos, tmp = archivos
+    cc.precargar(cascos)
+    pasos = []
+    cc.cruzar(ventas, cascos, str(tmp / "p.xlsx"), progreso=lambda texto, fraccion=None: pasos.append(texto))
+    assert pasos == ["Leyendo ventas", "Abriendo Excel", "Guardando"]

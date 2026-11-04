@@ -2652,6 +2652,10 @@ class AppIntegrada(ctk.CTk):
         self.btn_cascos.pack(side="right")
         self.btn_pieza_nueva = self.crear_boton_secundario(fila, "Cruzar pieza nueva", lambda: self.cruzar_cascos("pieza_nueva"), alto=estilo.ALTO_CONTROL)
         self.btn_pieza_nueva.pack(side="right", padx=(0, 8))
+        # Al elegir un Excel se empieza a abrir en segundo plano: al pulsar «Cruzar» ya está leído
+        self.cascos_entry._al_cambiar = lambda actual, anterior: cascos_cruce.precargar(actual)
+        self.pieza_nueva_entry._al_cambiar = lambda actual, anterior: cascos_cruce.precargar(actual)
+        self.ventas_cascos_entry._al_cambiar = lambda actual, anterior: cascos_cruce.precargar_ventas(actual)
 
     TEXTOS_CRUCE = {"cascos": ("Cruzar cascos", "cascos_entry", "Selecciona el CASCOS_PROVISIONES.xlsx."),
                     "pieza_nueva": ("Cruzar pieza nueva", "pieza_nueva_entry", "Selecciona el Excel de PIEZA NUEVA.")}
@@ -2662,9 +2666,9 @@ class AppIntegrada(ctk.CTk):
         self.guardar_configuracion_ui_internal()
         _, campo, falta = self.TEXTOS_CRUCE[tipo]
         cascos, ventas = getattr(self, campo).get().strip(), self.ventas_cascos_entry.get().strip()
-        if not self.validar_archivo(cascos, falta):
+        if not self.validar_archivo(cascos, falta, getattr(self, campo)):
             return False
-        if not self.validar_archivo(ventas, "Selecciona el informe de ventas del cliente (VENTAS ....xls)."):
+        if not self.validar_archivo(ventas, "Selecciona el informe de ventas del cliente (VENTAS ....xls).", self.ventas_cascos_entry):
             return False
         cliente = self.cliente_cascos_entry.get().strip() or cascos_cruce.CLIENTE_POR_DEFECTO
         desde = None
@@ -2672,22 +2676,22 @@ class AppIntegrada(ctk.CTk):
             try:
                 desde = datetime.strptime(self.desde_cascos_entry.get().strip(), "%d/%m/%Y")
             except ValueError:
-                messagebox.showwarning("Cruce de cascos", "La fecha «Desde» debe ser dd/mm/aaaa, o déjala vacía.")
+                self.avisar_campo(None, "La fecha «Desde» debe ser dd/mm/aaaa, o déjala vacía.", self.desde_cascos_entry)
                 return False
         destino = self.destino_cascos_entry.get().strip()
         if not destino:
-            messagebox.showwarning("Cruce de cascos", "Elige la carpeta destino de los cruces (por ejemplo ABONO CASCOS\\CRUCES 8049).")
+            self.avisar_campo(destino, "Elige la carpeta destino de los cruces (por ejemplo ABONO CASCOS\\CRUCES 8049).", self.destino_cascos_entry)
             return False
         salida = cascos_cruce.ruta_salida(destino, cliente, tipo=tipo)
         for boton in (self.btn_cascos, self.btn_pieza_nueva):
             boton.configure(state="disabled")
-        efectos.marcar_ocupado(self.btn_cascos if tipo == "cascos" else self.btn_pieza_nueva, "Cruzando")
+        poner_paso = efectos.marcar_ocupado(self.btn_cascos if tipo == "cascos" else self.btn_pieza_nueva, "Cruzando")
         self.actualizar_estado("cruzando cascos con ventas", str(salida))
 
         def trabajo():
             resultado, error = None, None
             try:
-                resultado = cascos_cruce.cruzar(ventas, cascos, str(salida), cliente, desde, tipo=tipo)
+                resultado = cascos_cruce.cruzar(ventas, cascos, str(salida), cliente, desde, tipo=tipo, progreso=poner_paso)
             except Exception as e:
                 error = str(e)
                 registrar_error_detallado(f"Cruce de cascos: {e}", traceback.format_exc())
@@ -3418,15 +3422,33 @@ class AppIntegrada(ctk.CTk):
             return True
         return False
 
-    def validar_archivo(self, ruta, mensaje):
-        if not ruta or not os.path.exists(ruta):
+    def campo_con_valor(self, valor):
+        """El único campo de ruta visible ahora mismo con ese valor (p. ej. vacío), o None si hay varios o ninguno."""
+        valor = (valor or "").strip()
+        encontrados = []
+        for _, atributo, *_ in CAMPOS_CONFIG:
+            campo = getattr(self, atributo, None)
+            if isinstance(campo, ctk.CTkEntry) and campo.winfo_exists() and campo.winfo_ismapped() and campo.get().strip() == valor:
+                encontrados.append(campo)
+        return encontrados[0] if len(encontrados) == 1 else None
+
+    def avisar_campo(self, valor, mensaje, campo=None):
+        """Si se sabe qué campo falta, tiembla en rojo y el aviso no interrumpe; si no, la ventana de siempre."""
+        campo = campo or self.campo_con_valor(valor)
+        if campo is not None and efectos.sacudir(self, campo):
+            self.avisar(mensaje, "aviso")
+        else:
             messagebox.showwarning("Aviso", mensaje)
+
+    def validar_archivo(self, ruta, mensaje, campo=None):
+        if not ruta or not os.path.exists(ruta):
+            self.avisar_campo(ruta, mensaje, campo)
             return False
         return True
 
-    def validar_carpeta(self, ruta, mensaje):
+    def validar_carpeta(self, ruta, mensaje, campo=None):
         if not ruta:
-            messagebox.showwarning("Aviso", mensaje)
+            self.avisar_campo(ruta, mensaje, campo)
             return False
         Path(ruta).mkdir(parents=True, exist_ok=True)
         return True

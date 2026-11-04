@@ -181,3 +181,38 @@ def test_ticket_terminado_anima_solo_si_sale_bien(app, monkeypatch):
     m._ticket_terminado("del litigio 2", None, "fallo", None)
     m._ticket_terminado("del litigio 3", "TKT0003", None, "sin clip")
     assert animados == ["Ticket TKT0001 enviado"]
+
+
+def test_boton_ocupado_con_paso_y_barra(app):
+    boton = app.btn_rotacion
+    texto = boton.cget("text")
+    poner = efectos.marcar_ocupado(boton, "Cruzando", intervalo_ms=20)
+    poner("Fila 500 de 1.000", 0.5)
+    bombear(app, 0.1)
+    assert "Fila 500 de 1.000" in boton.cget("text")
+    barra = poner.estado["barra"]
+    assert barra is not None and abs(barra.get() - 0.5) < 0.01
+    poner("Guardando")
+    bombear(app, 0.1)
+    assert barra.cget("mode") == "indeterminate"
+    boton.configure(text=texto)  # la tarea termina
+    bombear(app, 0.1)
+    assert poner.estado["barra"] is None and not barra.winfo_exists()
+
+
+def test_campo_que_falta_tiembla_sin_ventana(app, monkeypatch):
+    app.tabview.set("Comparador")
+    app.construir_pestana("Comparador")
+    app.update()
+    ventanas = []
+    monkeypatch.setattr(app_mod.messagebox, "showwarning", lambda *a, **k: ventanas.append(a))
+    campo = app.pieza_nueva_entry
+    campo.delete(0, "end")
+    margen = campo.pack_info()["padx"]
+    assert not app.cruzar_cascos("pieza_nueva")
+    assert ventanas == [] and app.avisos.historial[-1] == ("aviso", "Selecciona el Excel de PIEZA NUEVA.")
+    assert campo.cget("border_color") == app.color_texto_error
+    bombear(app, 0.1)
+    assert campo.pack_info()["padx"] != margen  # se está moviendo
+    bombear(app, 0.4)
+    assert campo.pack_info()["padx"] == margen
