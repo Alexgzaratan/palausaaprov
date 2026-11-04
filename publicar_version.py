@@ -54,7 +54,8 @@ def ejecutar(orden, **kw):
 
 
 def salida_de(orden):
-    return subprocess.run([str(p) for p in orden], cwd=RAIZ, capture_output=True, text=True, encoding="utf-8").stdout.strip()
+    return subprocess.run([str(p) for p in orden], cwd=RAIZ, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace").stdout.strip()  # tasklist responde en la página de códigos de la consola
 
 
 def ruta_gh():
