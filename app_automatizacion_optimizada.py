@@ -2227,6 +2227,9 @@ class AppIntegrada(ctk.CTk):
             hijo.destroy()
         for icono, texto, correcto in resumen_del_dia(self.config):
             self.crear_ficha_resumen(marco, icono, texto, self.color_ok if correcto else self.color_texto_sec)
+        # Accesos desde cualquier pestaña (el mismo botón que en el Comparador)
+        self.ficha_informe = self.crear_ficha_resumen(marco, "documento", "Informe anterior", self.color_principal, lambda evento: self.abrir_informe_anterior())
+        efectos.poner_pista(self, self.ficha_informe, self.pista_informe_anterior)
         lista = getattr(self, "lista_tareas", None)
         pendientes = lista.pendientes() if lista is not None else 0
         if pendientes:

@@ -212,7 +212,22 @@ def test_campo_que_falta_tiembla_sin_ventana(app, monkeypatch):
     assert not app.cruzar_cascos("pieza_nueva")
     assert ventanas == [] and app.avisos.historial[-1] == ("aviso", "Selecciona el Excel de PIEZA NUEVA.")
     assert campo.cget("border_color") == app.color_texto_error
-    bombear(app, 0.1)
-    assert campo.pack_info()["padx"] != margen  # se está moviendo
-    bombear(app, 0.4)
-    assert campo.pack_info()["padx"] == margen
+    posiciones = set()
+    fin = time.time() + 0.5
+    while time.time() < fin:
+        app.update()
+        posiciones.add(campo.pack_info()["padx"])
+        time.sleep(0.005)
+    assert len(posiciones) > 1 and campo.pack_info()["padx"] == margen  # se ha movido y vuelve a su sitio
+
+
+def test_informe_anterior_desde_la_cabecera(app, monkeypatch):
+    abiertos = []
+    monkeypatch.setattr(app, "abrir_informe_anterior", lambda: abiertos.append(1))
+    app.actualizar_resumen()
+    app.tabview.set("Facturas")  # desde cualquier pestaña
+    app.update()
+    ficha = app.ficha_informe
+    assert ficha.winfo_exists() and ficha.master is app.frame_resumen
+    ficha.winfo_children()[-1]._label.event_generate("<Button-1>")  # donde cae el clic
+    assert abiertos == [1]
