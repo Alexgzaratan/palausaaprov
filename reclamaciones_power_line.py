@@ -111,20 +111,34 @@ def anotar_respuestas(resultados, ruta=None):
     os.replace(temporal, ruta)
 
 
-def texto_resueltos(resultados):
+def texto_resueltos(resultados, solo_leer=False):
     """Resumen para la persona: cada ticket con su litigio, si se cerró y lo que ha respondido Stellantis."""
     if not resultados:
         return "No hay tickets resueltos pendientes de cerrar."
     cerrados = sum(1 for r in resultados if r.get("cerrado"))
-    lineas = [f"{cerrados} de {len(resultados)} ticket{'s' if len(resultados) != 1 else ''} cerrado{'s' if cerrados != 1 else ''} y valorado{'s' if cerrados != 1 else ''} (Totalmente satisfactorio · Sí)."]
+    n = len(resultados)
+    if solo_leer:
+        lineas = [f"{n} ticket{'s' if n != 1 else ''} resuelto{'s' if n != 1 else ''} pendiente{'s' if n != 1 else ''} de cerrar."]
+    else:
+        lineas = [f"{cerrados} de {n} ticket{'s' if n != 1 else ''} cerrado{'s' if cerrados != 1 else ''} y valorado{'s' if cerrados != 1 else ''} (Totalmente satisfactorio · Sí)."]
     for r in resultados:
         de = f" (litigio {r['litigio']})" if r.get("litigio") else ""
-        estado = "cerrado ✓" if r.get("cerrado") else (f"error: {r['error']}" if r.get("error") else "sin cerrar")
+        estado = "cerrado ✓" if r.get("cerrado") else (f"error: {r['error']}" if r.get("error") else ("pendiente de cerrar" if solo_leer else "sin cerrar"))
         lineas += ["", f"{r['ticket']}{de}: {estado}"]
         respuesta = " ".join(l for l in (r.get("respuesta") or "").splitlines() if not l.startswith("PD"))
         if respuesta:
             lineas.append(f"  «{respuesta[:300]}»")
     return "\n".join(lineas)
+
+
+def ultimas_respuestas(ruta=None, maximo=15):
+    """La última lectura de cada ticket, la más reciente primero (para el cuadro de la pestaña)."""
+    vistos, salida = set(), []
+    for r in reversed(leer_respuestas(ruta)):
+        if r.get("ticket") not in vistos:
+            vistos.add(r.get("ticket"))
+            salida.append(r)
+    return salida[:maximo]
 
 
 def litigio_anterior(factura, pos, ruta=None):
@@ -959,8 +973,18 @@ class ModuloReclamacionesPowerLine:
         self.btn_crear_ticket.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
         resueltos = app.crear_tarjeta_tab(contenedor, "Tickets resueltos", "Abre los tickets resueltos, te enseña lo que ha respondido Stellantis y los cierra con la encuesta "
                                           "«Totalmente satisfactorio» y «Sí». Pulsas tú «Confirmar», salvo que esté activado enviar sin confirmación.", icono="check")
-        self.btn_cerrar_resueltos = app.crear_boton_principal(resueltos, "Cerrar tickets resueltos", self.cerrar_tickets_resueltos)
-        self.btn_cerrar_resueltos.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        self.respuestas_box = ctk.CTkTextbox(resueltos, height=130, corner_radius=estilo.RADIO, border_width=1, border_color=app.color_borde,
+                                             fg_color=app.color_campo, text_color=app.color_texto, font=estilo.fuente(estilo.TAM_PEQUENO), wrap="word")
+        self.respuestas_box.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
+        botones = ctk.CTkFrame(resueltos, fg_color="transparent")
+        botones.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        botones.grid_columnconfigure((0, 1), weight=1)
+        self.btn_ver_respuestas = app.crear_boton_secundario(botones, "Ver respuestas", self.ver_respuestas_resueltos)
+        self.btn_ver_respuestas.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        efectos.poner_pista(self, self.btn_ver_respuestas, "Lee los tickets resueltos sin abrir ventana y sin cerrar ninguno")
+        self.btn_cerrar_resueltos = app.crear_boton_principal(botones, "Cerrar tickets resueltos", self.cerrar_tickets_resueltos)
+        self.btn_cerrar_resueltos.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.refrescar_respuestas()
         recientes = app.crear_tarjeta_tab(contenedor, "Últimos tickets creados", "Los tickets creados desde esta pestaña.", icono="reloj")
         self.tickets_recientes_box = ctk.CTkTextbox(recientes, height=150, corner_radius=estilo.RADIO, border_width=1, border_color=app.color_borde,
                                                     fg_color=app.color_campo, text_color=app.color_texto, font=estilo.fuente(estilo.TAM_PEQUENO))
@@ -968,7 +992,25 @@ class ModuloReclamacionesPowerLine:
         self._pintar_criterios()
         self.refrescar_tickets_recientes()
 
-    def cerrar_tickets_resueltos(self):
+    def ver_respuestas_resueltos(self):
+        return self.cerrar_tickets_resueltos(solo_leer=True)
+
+    def refrescar_respuestas(self):
+        caja = getattr(self, "respuestas_box", None)
+        if caja is None or not caja.winfo_exists():
+            return
+        bloques = []
+        for r in ultimas_respuestas():
+            de = f" · litigio {r['litigio']}" if r.get("litigio") else ""
+            estado = "cerrado" if r.get("cerrado") else "pendiente de cerrar"
+            respuesta = " ".join(l for l in (r.get("respuesta") or "").splitlines() if not l.startswith("PD")) or "(sin respuesta escrita)"
+            bloques.append(f"{datetime.fromisoformat(r['cuando']):%d/%m %H:%M}  {r['ticket']}{de} · {estado}\n  {respuesta}")
+        caja.configure(state="normal")
+        caja.delete("1.0", "end")
+        caja.insert("1.0", "\n\n".join(bloques) or "Pulsa «Ver respuestas» para leer lo que ha respondido Stellantis en los tickets resueltos.")
+        caja.configure(state="disabled")
+
+    def cerrar_tickets_resueltos(self, solo_leer=False):
         if getattr(self, "_enviando_power_line", False):
             self.app.avisar("Ya hay una ventana de Power-Line trabajando.")
             return False
@@ -978,15 +1020,21 @@ class ModuloReclamacionesPowerLine:
             return False
         confirmar_solo = bool(self.obtener_configuracion()["power_line_envio_automatico"])
         self._enviando_power_line = True
-        self.btn_cerrar_resueltos.configure(state="disabled")
-        efectos.marcar_ocupado(self.btn_cerrar_resueltos, "Revisando")
-        self.app.avisar("Revisando los tickets resueltos en Power-Line" + ("." if confirmar_solo else ": pulsa «Confirmar» en cada encuesta."))
+        for boton in (self.btn_ver_respuestas, self.btn_cerrar_resueltos):
+            boton.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_ver_respuestas if solo_leer else self.btn_cerrar_resueltos, "Leyendo" if solo_leer else "Revisando")
+        if solo_leer:
+            self.app.avisar("Leyendo los tickets resueltos en Power-Line (sin cerrar ninguno).")
+        else:
+            self.app.avisar("Revisando los tickets resueltos en Power-Line" + ("." if confirmar_solo else ": pulsa «Confirmar» en cada encuesta."))
         log = lambda texto, tag=None: self.app.after(0, self.app.agregar_log, f"[POWER-LINE] {texto}", tag)
 
         def trabajo():
             resultados, error = [], None
             try:
-                resultados = power_line_ticket.CierreTickets(usuario, password, confirmar_solo=confirmar_solo, log=log).ejecutar()
+                # Para solo leer no hace falta enseñar la ventana
+                resultados = power_line_ticket.CierreTickets(usuario, password, confirmar_solo=confirmar_solo, log=log,
+                                                             visible=not solo_leer, solo_leer=solo_leer).ejecutar()
                 for r in resultados:
                     r["litigio"] = self.historial.litigio_de_ticket(r["ticket"])
                 if resultados:
@@ -994,21 +1042,26 @@ class ModuloReclamacionesPowerLine:
             except Exception as e:
                 error = str(e).splitlines()[0] if str(e) else type(e).__name__
                 registrar_error_reclamacion(traceback.format_exc(), f"Cerrar tickets resueltos: {error}", None)
-            self.app.after(0, lambda: self._resueltos_terminados(resultados, error))
+            self.app.after(0, lambda: self._resueltos_terminados(resultados, error, solo_leer))
 
         threading.Thread(target=trabajo, daemon=True).start()
         return True
 
-    def _resueltos_terminados(self, resultados, error):
+    def _resueltos_terminados(self, resultados, error, solo_leer=False):
         self._enviando_power_line = False
-        if self.btn_cerrar_resueltos.winfo_exists():
-            self.btn_cerrar_resueltos.configure(state="normal", text="Cerrar tickets resueltos")
+        for boton, texto in ((self.btn_ver_respuestas, "Ver respuestas"), (self.btn_cerrar_resueltos, "Cerrar tickets resueltos")):
+            if boton.winfo_exists():
+                boton.configure(state="normal", text=texto)
+        self.refrescar_respuestas()
         if error:
             self.app.agregar_log(f"[POWER-LINE] ❌ No se pudieron revisar los tickets resueltos: {error}", "error")
             messagebox.showwarning("Power-Line", f"No se pudieron revisar los tickets resueltos:\n{error}")
             return
-        texto = texto_resueltos(resultados)
+        texto = texto_resueltos(resultados, solo_leer)
         self.app.agregar_log("[POWER-LINE] " + texto.splitlines()[0], "success")
+        if solo_leer:  # las respuestas quedan en el cuadro de la tarjeta: sin ventana
+            self.app.avisar(texto.splitlines()[0], "ok" if resultados else "info")
+            return
         cerrados = sum(1 for r in resultados if r.get("cerrado"))
         if cerrados:
             try:

@@ -379,13 +379,15 @@ def limpiar_respuesta(texto):
 class CierreTickets(TicketPowerLine):
     """Cierra los tickets de «Tickets resueltos»: los abre uno a uno, lee la respuesta y rellena la encuesta de
     «Cerrar» con «Totalmente satisfactorio» y «Sí». Con confirmar_solo pulsa «Confirmar»; si no, espera a que lo
-    pulse la persona (si cierra la encuesta sin confirmar, ese ticket se deja como estaba)."""
+    pulse la persona (si cierra la encuesta sin confirmar, ese ticket se deja como estaba).
+    Con solo_leer solo se leen las respuestas: no se pulsa «Cerrar» en ninguno."""
 
     def __init__(self, usuario, password, confirmar_solo=False, log=lambda texto, tag=None: None, url=URL_POWERLINE,
-                 espera_confirmacion=ESPERA_CONFIRMACION, visible=True):
+                 espera_confirmacion=ESPERA_CONFIRMACION, visible=True, solo_leer=False):
         super().__init__(usuario, password, {}, enviar_solo=confirmar_solo, log=log, url=url,
                          espera_confirmacion=espera_confirmacion, visible=visible)
         self.confirmar_solo = confirmar_solo
+        self.solo_leer = solo_leer
 
     def abrir_resueltos(self, page):
         page.goto(self.url.rstrip("/") + "/" + RUTA_TICKETS_RESUELTOS, timeout=60000)
@@ -489,6 +491,8 @@ class CierreTickets(TicketPowerLine):
                     try:
                         self.abrir(page, numero)
                         resultado["respuesta"] = self.leer_respuesta(page)
+                        if self.solo_leer:
+                            continue
                         resultado["cerrado"] = self.cerrar(page, numero)
                         self.log(f"Ticket {numero} {'cerrado y valorado' if resultado['cerrado'] else 'sin cerrar'}.", "success" if resultado["cerrado"] else "error")
                     except TicketCancelado:

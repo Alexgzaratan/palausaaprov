@@ -129,11 +129,12 @@ def test_boton_de_la_pestana_tickets(app, monkeypatch, tmp_path):
     usados = []
 
     class Falso:
-        def __init__(self, usuario, password, confirmar_solo=False, log=None):
-            usados.append(confirmar_solo)
+        def __init__(self, usuario, password, confirmar_solo=False, log=None, visible=True, solo_leer=False):
+            usados.append((confirmar_solo, visible, solo_leer))
+            self.solo_leer = solo_leer
 
         def ejecutar(self):
-            return [{"ticket": "TKT1622729", "respuesta": "Litigio aceptado", "cerrado": True, "error": None}]
+            return [{"ticket": "TKT1622729", "respuesta": "Litigio aceptado", "cerrado": not self.solo_leer, "error": None}]
 
     monkeypatch.setattr(plt, "CierreTickets", Falso)
     monkeypatch.setattr(pl.threading, "Thread", lambda target, daemon=None: type("H", (), {"start": lambda self: target()})())
@@ -143,7 +144,45 @@ def test_boton_de_la_pestana_tickets(app, monkeypatch, tmp_path):
     monkeypatch.setattr(pl.messagebox, "showinfo", lambda titulo, texto, **k: mostrados.append(texto))
     monkeypatch.setattr(pl.efectos, "animar_envio", lambda *a, **k: None)
     assert m.cerrar_tickets_resueltos()
-    assert usados == [False]  # sin el envío automático, «Confirmar» lo pulsa la persona
+    assert usados == [(False, True, False)]  # sin el envío automático, «Confirmar» lo pulsa la persona
     assert "TKT1622729 (litigio 131209474): cerrado ✓" in mostrados[0] and "«Litigio aceptado»" in mostrados[0]
     assert pl.leer_respuestas()[-1]["litigio"] == "131209474"
     assert m.btn_cerrar_resueltos.cget("text") == "Cerrar tickets resueltos" and not m._enviando_power_line
+
+    assert "TKT1622729 · litigio 131209474 · cerrado" in m.respuestas_box.get("1.0", "end")
+
+
+def test_ver_respuestas_sin_cerrar_ni_abrir_ventana(app, monkeypatch, tmp_path):
+    monkeypatch.setattr(pl, "RESPUESTAS_POWER_LINE", str(tmp_path / "respuestas.json"))
+    app.tabview.set("Reclamaciones")
+    app.construir_pestana("Reclamaciones")
+    m = app.reclamaciones_power_line
+    m.configuracion.update({"usuario_madd": "u", "password_madd": "p"})
+    assert "Pulsa «Ver respuestas»" in m.respuestas_box.get("1.0", "end")
+    usados = []
+
+    class Falso:
+        def __init__(self, usuario, password, confirmar_solo=False, log=None, visible=True, solo_leer=False):
+            usados.append((visible, solo_leer))
+
+        def ejecutar(self):
+            return [{"ticket": "TKT1622729", "respuesta": "Hola Alex\nLitigio aceptado, proceder a la destrucción de la pieza\nPD - Gracias", "cerrado": False, "error": None}]
+
+    monkeypatch.setattr(plt, "CierreTickets", Falso)
+    monkeypatch.setattr(pl.threading, "Thread", lambda target, daemon=None: type("H", (), {"start": lambda self: target()})())
+    monkeypatch.setattr(app, "after", lambda ms, funcion, *a: funcion(*a))
+    monkeypatch.setattr(m.historial, "litigio_de_ticket", lambda ticket: "131209474")
+    ventanas = []
+    monkeypatch.setattr(pl.messagebox, "showinfo", lambda *a, **k: ventanas.append(a))
+    assert m.ver_respuestas_resueltos()
+    assert usados == [(False, True)] and ventanas == []
+    caja = m.respuestas_box.get("1.0", "end")
+    assert "TKT1622729 · litigio 131209474 · pendiente de cerrar" in caja and "proceder a la destrucción de la pieza" in caja and "Gracias" not in caja
+    assert m.btn_ver_respuestas.cget("text") == "Ver respuestas"
+
+
+def test_solo_leer_no_pulsa_cerrar(portal):
+    tarea, _ = cierre(portal, solo_leer=True)
+    resultados = tarea.ejecutar()
+    assert [r["ticket"] for r in resultados] == ["TKT1000001", "TKT1000002"] and portal.cerrados == []
+    assert "El abono se hará en la próxima factura" in resultados[1]["respuesta"]
