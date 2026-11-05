@@ -97,8 +97,11 @@ def test_boton_ocupado_muestra_giro_y_tiempo_y_se_para_solo(app):
     efectos.marcar_ocupado(boton, "Analizando", intervalo_ms=30)
     primero = boton.cget("text")
     assert primero[0] in efectos.GIRO and primero.endswith("Analizando · 0:00")
-    bombear(app, 0.1)
-    assert boton.cget("text")[0] != primero[0] or boton.cget("text") != primero  # gira
+    fin = time.time() + 2  # con el equipo cargado el temporizador puede tardar algo más
+    while boton.cget("text") == primero and time.time() < fin:
+        app.update()
+        time.sleep(0.01)
+    assert boton.cget("text") != primero  # gira
     boton.configure(text="Resaltar por rotación")  # la tarea termina
     bombear(app, 0.15)
     assert boton.cget("text") == "Resaltar por rotación"

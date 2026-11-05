@@ -12,6 +12,8 @@ import re
 import time
 from datetime import date, timedelta
 
+import navegador as navegador_sistema
+
 URL_BASE = "https://parts.citroen.com"
 RUTA_SESION = "/zzlogpl0"
 RUTA_MENU = "/sap/bc/gui/sap/its/zmenu?sap-language=ES"
@@ -206,7 +208,7 @@ class LitigioPSA:
         """{litigio, doc_ventas, factura, pos, fecha_factura, avisos}. LitigioNoCreado si no se guarda."""
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            navegador = p.chromium.launch(headless=not self.visible)
+            navegador = navegador_sistema.lanzar(p, self.visible)
             try:
                 page = navegador.new_context(http_credentials={"username": self.usuario, "password": self.password}).new_page()
                 self.log("Entrando en PSA Parts...")

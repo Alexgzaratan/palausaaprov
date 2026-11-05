@@ -15,6 +15,8 @@ Plantillas (comprobadas el 03/11/2026): cada tipo de ticket añade sus filas de 
 import re
 import time
 
+import navegador as navegador_sistema
+
 URL_POWERLINE = "https://powerline.axelor.com/"
 RUTA_LISTA_TICKETS = "#/ds/helpdesk.ticket/list/1"
 TEMA_POR_DEFECTO = "Reclamaciones / Devoluciones"
@@ -332,7 +334,7 @@ class TicketPowerLine:
         from playwright.sync_api import sync_playwright
         self.error_adjunto = None
         with sync_playwright() as p:
-            navegador = p.chromium.launch(headless=not self.visible)
+            navegador = navegador_sistema.lanzar(p, self.visible)
             try:
                 page = navegador.new_context(no_viewport=True).new_page()
                 self.log("Entrando en Power-Line...")

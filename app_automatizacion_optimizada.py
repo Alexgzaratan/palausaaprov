@@ -4551,9 +4551,11 @@ def probar_navegador():
             try:
                 page = browser.new_page()
                 page.set_content("<title>navegador-ok</title><p>hola</p>")
-                resultado = f"OK {page.title()}"
+                titulo = page.title()
             finally:
                 browser.close()
+            import navegador
+            resultado = f"OK {titulo} · ventanas visibles con {navegador.comprobar_ventanas(p)}"
     except Exception as e:
         resultado = f"ERROR {e}"
     with open(ruta, "w", encoding="utf-8") as f:
