@@ -91,6 +91,42 @@ def anotar_ticket(numero, plantilla, criterios, ruta=None):
     os.replace(temporal, ruta)
 
 
+RESPUESTAS_POWER_LINE = ruta_datos("respuestas_power_line.json", migrar=False)  # tickets resueltos que se han cerrado desde la app
+
+
+def leer_respuestas(ruta=None):
+    return leer_tickets(ruta or RESPUESTAS_POWER_LINE)
+
+
+def anotar_respuestas(resultados, ruta=None):
+    """Guarda la respuesta de cada ticket resuelto que se ha revisado (para poder consultarla después)."""
+    ruta = ruta or RESPUESTAS_POWER_LINE
+    cuando = datetime.now().isoformat(timespec="seconds")
+    nuevos = [{"ticket": r["ticket"], "litigio": r.get("litigio"), "respuesta": r.get("respuesta", ""), "cerrado": bool(r.get("cerrado")), "cuando": cuando}
+              for r in resultados]
+    datos = leer_respuestas(ruta)[-(300 - len(nuevos)):] + nuevos
+    temporal = ruta + ".tmp"
+    with open(temporal, "w", encoding="utf-8") as f:
+        _json.dump(datos, f, ensure_ascii=False, indent=1)
+    os.replace(temporal, ruta)
+
+
+def texto_resueltos(resultados):
+    """Resumen para la persona: cada ticket con su litigio, si se cerró y lo que ha respondido Stellantis."""
+    if not resultados:
+        return "No hay tickets resueltos pendientes de cerrar."
+    cerrados = sum(1 for r in resultados if r.get("cerrado"))
+    lineas = [f"{cerrados} de {len(resultados)} ticket{'s' if len(resultados) != 1 else ''} cerrado{'s' if cerrados != 1 else ''} y valorado{'s' if cerrados != 1 else ''} (Totalmente satisfactorio · Sí)."]
+    for r in resultados:
+        de = f" (litigio {r['litigio']})" if r.get("litigio") else ""
+        estado = "cerrado ✓" if r.get("cerrado") else (f"error: {r['error']}" if r.get("error") else "sin cerrar")
+        lineas += ["", f"{r['ticket']}{de}: {estado}"]
+        respuesta = " ".join(l for l in (r.get("respuesta") or "").splitlines() if not l.startswith("PD"))
+        if respuesta:
+            lineas.append(f"  «{respuesta[:300]}»")
+    return "\n".join(lineas)
+
+
 def litigio_anterior(factura, pos, ruta=None):
     """El litigio ya creado desde la app para esa factura y línea, o None."""
     return next((r for r in reversed(leer_litigios_psa(ruta)) if r.get("factura") == factura and r.get("pos") == pos), None)
@@ -176,6 +212,14 @@ class HistorialReclamaciones:
         try:
             with conexion:
                 conexion.execute("UPDATE reclamaciones_power_line SET ticket = ? WHERE id = ?", (ticket, registro_id))
+        finally:
+            conexion.close()
+
+    def litigio_de_ticket(self, ticket):
+        conexion = self._conexion()
+        try:
+            fila = conexion.execute("SELECT litigio FROM reclamaciones_power_line WHERE ticket = ? ORDER BY id DESC LIMIT 1", (ticket,)).fetchone()
+            return fila[0] if fila else None
         finally:
             conexion.close()
 
@@ -913,12 +957,65 @@ class ModuloReclamacionesPowerLine:
         self.descripcion_ticket_text.pack(padx=estilo.PAD_X, pady=(0, estilo.PAD_Y), fill="x")
         self.btn_crear_ticket = app.crear_boton_principal(card, "Crear ticket", self.crear_ticket_plantilla)
         self.btn_crear_ticket.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
+        resueltos = app.crear_tarjeta_tab(contenedor, "Tickets resueltos", "Abre los tickets resueltos, te enseña lo que ha respondido Stellantis y los cierra con la encuesta "
+                                          "«Totalmente satisfactorio» y «Sí». Pulsas tú «Confirmar», salvo que esté activado enviar sin confirmación.", icono="check")
+        self.btn_cerrar_resueltos = app.crear_boton_principal(resueltos, "Cerrar tickets resueltos", self.cerrar_tickets_resueltos)
+        self.btn_cerrar_resueltos.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
         recientes = app.crear_tarjeta_tab(contenedor, "Últimos tickets creados", "Los tickets creados desde esta pestaña.", icono="reloj")
         self.tickets_recientes_box = ctk.CTkTextbox(recientes, height=150, corner_radius=estilo.RADIO, border_width=1, border_color=app.color_borde,
                                                     fg_color=app.color_campo, text_color=app.color_texto, font=estilo.fuente(estilo.TAM_PEQUENO))
         self.tickets_recientes_box.pack(padx=estilo.PAD_X, pady=(0, 14), fill="x")
         self._pintar_criterios()
         self.refrescar_tickets_recientes()
+
+    def cerrar_tickets_resueltos(self):
+        if getattr(self, "_enviando_power_line", False):
+            self.app.avisar("Ya hay una ventana de Power-Line trabajando.")
+            return False
+        usuario, password = self.credenciales_power_line()
+        if not usuario or not password:
+            messagebox.showwarning("Power-Line", "Falta el usuario o la contraseña de Stellantis: ponlos en Configuración > Reclamaciones Power Line (o los de MADD en la pestaña Facturas).")
+            return False
+        confirmar_solo = bool(self.obtener_configuracion()["power_line_envio_automatico"])
+        self._enviando_power_line = True
+        self.btn_cerrar_resueltos.configure(state="disabled")
+        efectos.marcar_ocupado(self.btn_cerrar_resueltos, "Revisando")
+        self.app.avisar("Revisando los tickets resueltos en Power-Line" + ("." if confirmar_solo else ": pulsa «Confirmar» en cada encuesta."))
+        log = lambda texto, tag=None: self.app.after(0, self.app.agregar_log, f"[POWER-LINE] {texto}", tag)
+
+        def trabajo():
+            resultados, error = [], None
+            try:
+                resultados = power_line_ticket.CierreTickets(usuario, password, confirmar_solo=confirmar_solo, log=log).ejecutar()
+                for r in resultados:
+                    r["litigio"] = self.historial.litigio_de_ticket(r["ticket"])
+                if resultados:
+                    anotar_respuestas(resultados)
+            except Exception as e:
+                error = str(e).splitlines()[0] if str(e) else type(e).__name__
+                registrar_error_reclamacion(traceback.format_exc(), f"Cerrar tickets resueltos: {error}", None)
+            self.app.after(0, lambda: self._resueltos_terminados(resultados, error))
+
+        threading.Thread(target=trabajo, daemon=True).start()
+        return True
+
+    def _resueltos_terminados(self, resultados, error):
+        self._enviando_power_line = False
+        if self.btn_cerrar_resueltos.winfo_exists():
+            self.btn_cerrar_resueltos.configure(state="normal", text="Cerrar tickets resueltos")
+        if error:
+            self.app.agregar_log(f"[POWER-LINE] ❌ No se pudieron revisar los tickets resueltos: {error}", "error")
+            messagebox.showwarning("Power-Line", f"No se pudieron revisar los tickets resueltos:\n{error}")
+            return
+        texto = texto_resueltos(resultados)
+        self.app.agregar_log("[POWER-LINE] " + texto.splitlines()[0], "success")
+        cerrados = sum(1 for r in resultados if r.get("cerrado"))
+        if cerrados:
+            try:
+                efectos.animar_envio(self.app, f"{cerrados} ticket{'s' if cerrados != 1 else ''} cerrado{'s' if cerrados != 1 else ''}", "Totalmente satisfactorio · Sí")
+            except Exception:
+                pass  # la animación es decorativa
+        messagebox.showinfo("Tickets resueltos", texto)
 
     def plantilla_elegida(self):
         nombre = self.plantilla_ticket_option.get()

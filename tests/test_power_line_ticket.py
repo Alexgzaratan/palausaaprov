@@ -82,8 +82,10 @@ window.onhashchange = vista; vista();
 
 
 class Portal:
-    def __init__(self):
+    def __init__(self, app=APP):
+        self.app = app
         self.enviados, self.adjuntos, self.pulsar = [], [], False
+        self.cerrados = []
         self.intentos_login, self.fallos_login = 0, 0
         self.sesion, self.errores_internos = False, 0
         portal = self
@@ -105,7 +107,7 @@ class Portal:
                     if portal.errores_internos > 0:  # como el real: a veces, tras el acceso, «internal error»
                         portal.errores_internos -= 1
                         return self.responder("<html><body><h1>Internal Error</h1></body></html>")
-                    return self.responder(APP)
+                    return self.responder(portal.app)
                 if self.path == "/" and portal.sesion:  # con la sesión abierta el enlace lleva directo a la aplicación
                     return self.responder("<html><body><script>location.href = \"/app.html\"</script></body></html>")
                 if self.path == "/pulsar":
@@ -128,6 +130,8 @@ class Portal:
                     return self.responder(f"TKT99900{len(portal.enviados)}", "text/plain")
                 if self.path == "/adjunto":
                     portal.adjuntos.append(cuerpo)
+                if self.path == "/cerrado":
+                    portal.cerrados.append(json.loads(cuerpo))
                 return self.responder("ok", "text/plain")
 
         self.servidor = ThreadingHTTPServer(("127.0.0.1", 0), Manejador)

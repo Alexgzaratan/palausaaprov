@@ -19,6 +19,8 @@ import navegador as navegador_sistema
 
 URL_POWERLINE = "https://powerline.axelor.com/"
 RUTA_LISTA_TICKETS = "#/ds/helpdesk.ticket/list/1"
+RUTA_TICKETS_RESUELTOS = "#/ds/helpdesk.ticket.resolved/list/1"
+VALORACION = "Totalmente satisfactorio"  # «Calidad de servicio» de la encuesta al cerrar (y «¿La respuesta resolvió...?» = Sí)
 TEMA_POR_DEFECTO = "Reclamaciones / Devoluciones"
 TIPO_POR_DEFECTO = "Progreso / Seguimiento de una reclamacion"
 # Nombre interno (francés) con el que el buscador encuentra cada opción
@@ -364,3 +366,143 @@ class TicketPowerLine:
                     navegador.close()
                 except Exception:
                     pass
+
+
+def limpiar_respuesta(texto):
+    """De la última fila de comentarios del ticket, solo lo que ha escrito quien lo resuelve (sin la cabecera
+    «Actualizado por ...» ni las líneas «Status : ...»)."""
+    lineas = [l.strip() for l in str(texto or "").splitlines()]
+    utiles = [l for l in lineas if l and not l.startswith("Actualizado por") and not re.match(r"^Status\s*:", l)]
+    return "\n".join(utiles)
+
+
+class CierreTickets(TicketPowerLine):
+    """Cierra los tickets de «Tickets resueltos»: los abre uno a uno, lee la respuesta y rellena la encuesta de
+    «Cerrar» con «Totalmente satisfactorio» y «Sí». Con confirmar_solo pulsa «Confirmar»; si no, espera a que lo
+    pulse la persona (si cierra la encuesta sin confirmar, ese ticket se deja como estaba)."""
+
+    def __init__(self, usuario, password, confirmar_solo=False, log=lambda texto, tag=None: None, url=URL_POWERLINE,
+                 espera_confirmacion=ESPERA_CONFIRMACION, visible=True):
+        super().__init__(usuario, password, {}, enviar_solo=confirmar_solo, log=log, url=url,
+                         espera_confirmacion=espera_confirmacion, visible=visible)
+        self.confirmar_solo = confirmar_solo
+
+    def abrir_resueltos(self, page):
+        page.goto(self.url.rstrip("/") + "/" + RUTA_TICKETS_RESUELTOS, timeout=60000)
+        page.locator(".slick-viewport").first.wait_for(state="visible", timeout=30000)
+
+    def numeros_resueltos(self, page, segundos=8):
+        """Los Nº TKT de la lista (la lista se carga después de la vista: se espera un poco si aún está vacía)."""
+        fin = time.monotonic() + segundos
+        while True:
+            numeros = []
+            for fila in page.locator(".slick-row").all_inner_texts():
+                numero = numero_ticket(fila)
+                if numero and numero not in numeros:
+                    numeros.append(numero)
+            if numeros or time.monotonic() >= fin:
+                return numeros
+            time.sleep(0.5)
+
+    def abrir(self, page, numero):
+        page.locator(".slick-row", has_text=numero).first.dblclick()
+        fin = time.monotonic() + 30
+        while self.leer_numero(page) != numero:
+            if time.monotonic() >= fin:
+                raise RuntimeError(f"no se abrió el ticket {numero}")
+            time.sleep(0.3)
+
+    def leer_respuesta(self, page):
+        filas = page.locator('[x-field="ticketCommentList"] .o2m-list-row')
+        try:
+            filas.first.wait_for(state="attached", timeout=10000)
+            return limpiar_respuesta(filas.nth(filas.count() - 1).inner_text(timeout=5000))
+        except Exception:
+            return ""
+
+    def rellenar_encuesta(self, page):
+        page.locator('[x-field="closeTicket"]').first.click()
+        encuesta = page.locator(".ui-dialog:visible, .modal:visible").filter(has=page.locator('[x-field="rating"]')).first
+        encuesta.wait_for(state="visible", timeout=30000)
+        valoracion = encuesta.locator('[x-field="rating"] label').filter(has_text=VALORACION).first
+        valoracion.click()
+        si = encuesta.locator('[x-field="isProblemSolved"] label').filter(has_text=re.compile(r"^\s*(S[ií]|Yes)\s*$")).first
+        si.click()
+        for opcion in (valoracion, si):
+            casilla = opcion.locator("input")
+            if casilla.count() and not casilla.first.is_checked():
+                raise RuntimeError("no se pudo marcar la encuesta de satisfacción")
+        return encuesta
+
+    def cerrado(self, page):
+        try:
+            return not page.locator('[x-field="closeTicket"]').first.is_visible()
+        except Exception:
+            return False
+
+    def esperar_cierre(self, page, encuesta, segundos):
+        """True si el ticket queda cerrado; False si la encuesta se cierra sin confirmar o se agota la espera."""
+        fin = time.monotonic() + segundos
+        while time.monotonic() < fin:
+            if page.is_closed():
+                raise TicketCancelado("se cerró la ventana")
+            try:
+                abierta = encuesta.is_visible()
+            except Exception:
+                abierta = False
+            if not abierta:
+                espera = time.monotonic() + 10  # tras «Confirmar» el ticket se recarga: «Cerrar» desaparece
+                while time.monotonic() < espera:
+                    if self.cerrado(page):
+                        return True
+                    time.sleep(0.5)
+                return False
+            time.sleep(0.5)
+        return False
+
+    def cerrar(self, page, numero):
+        encuesta = self.rellenar_encuesta(page)
+        if self.confirmar_solo:
+            encuesta.locator('[x-field="confirm"], [name="confirm"]').first.click()
+            return self.esperar_cierre(page, encuesta, 60)
+        self.log(f"Encuesta del ticket {numero} rellenada (Totalmente satisfactorio · Sí): revísala y pulsa «Confirmar».", "success")
+        return self.esperar_cierre(page, encuesta, self.espera_confirmacion)
+
+    def ejecutar(self):
+        """[{ticket, respuesta, cerrado, error}] de cada ticket resuelto. Si se cierra la ventana, lo hecho hasta entonces."""
+        from playwright.sync_api import sync_playwright
+        resultados = []
+        with sync_playwright() as p:
+            navegador = navegador_sistema.lanzar(p, self.visible)
+            try:
+                page = navegador.new_context(no_viewport=True).new_page()
+                self.log("Entrando en Power-Line...")
+                self.iniciar_sesion(page)
+                self.abrir_resueltos(page)
+                numeros = self.numeros_resueltos(page)
+                self.log(f"{len(numeros)} ticket{'s' if len(numeros) != 1 else ''} resuelto{'s' if len(numeros) != 1 else ''}: {', '.join(numeros) or 'ninguno'}.")
+                for i, numero in enumerate(numeros):
+                    if i:
+                        self.abrir_resueltos(page)
+                    resultado = {"ticket": numero, "respuesta": "", "cerrado": False, "error": None}
+                    resultados.append(resultado)
+                    try:
+                        self.abrir(page, numero)
+                        resultado["respuesta"] = self.leer_respuesta(page)
+                        resultado["cerrado"] = self.cerrar(page, numero)
+                        self.log(f"Ticket {numero} {'cerrado y valorado' if resultado['cerrado'] else 'sin cerrar'}.", "success" if resultado["cerrado"] else "error")
+                    except TicketCancelado:
+                        raise
+                    except Exception as e:
+                        if page.is_closed():
+                            raise TicketCancelado("se cerró la ventana")
+                        resultado["error"] = str(e).splitlines()[0]
+                        self.log(f"Ticket {numero}: {resultado['error']}", "error")
+            except TicketCancelado:
+                pass  # la persona cerró la ventana: se devuelve lo hecho
+            finally:
+                try:
+                    navegador.close()
+                except Exception:
+                    pass
+        return resultados
