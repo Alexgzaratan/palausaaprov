@@ -1012,6 +1012,51 @@ def ruta_hoja_pedidos_del_dia(carpeta_hojas, fecha=None):
     nombre = fecha.strftime("%d-%m-%Y") + ".xlsx"
     return carpeta_mes / nombre
 
+# Filas de la hoja de pedidos (como las rellena Álex): referencia en B:D (combinadas), ESTADO en E, CANTIDAD en G,
+# CLIENTE DMS en H y «OK» en J. Las filas 5 a 50 de la plantilla ya tienen el formato y la lista de ESTADO.
+HOJA_PRIMERA_FILA, HOJA_ULTIMA_FILA = 5, 50
+HOJA_PESTANA_URGENTES = "PSA"
+
+def _numero_si_puede(valor):
+    texto = str(valor if valor is not None else "").strip()
+    if re.fullmatch(r"\d+(\.0)?", texto):
+        return int(float(texto))
+    return texto or None
+
+def apuntar_no_suministra_en_hoja(ruta_hoja, coincidencias):
+    """Apunta en la pestaña PSA de la hoja de pedidos las referencias que ya no suministran: en la primera fila libre,
+    referencia, «NO SUMINISTRA», cantidad, cliente y «OK». Las que ya estén en la hoja no se repiten.
+    Devuelve (apuntadas, ya_estaban, sin_sitio) con las referencias."""
+    wb = load_workbook(ruta_hoja)
+    try:
+        ws = wb[HOJA_PESTANA_URGENTES] if HOJA_PESTANA_URGENTES in wb.sheetnames else wb.worksheets[0]
+        en_hoja = {avisos_clientes.normalizar_ref(ws.cell(f, 2).value) for f in range(HOJA_PRIMERA_FILA, HOJA_ULTIMA_FILA + 1) if ws.cell(f, 2).value}
+        libres = (f for f in range(HOJA_PRIMERA_FILA, HOJA_ULTIMA_FILA + 1) if ws.cell(f, 2).value in (None, "") and ws.cell(f, 5).value in (None, ""))
+        combinadas = {str(m) for m in ws.merged_cells.ranges}
+        apuntadas, ya_estaban, sin_sitio = [], [], []
+        for c in coincidencias:
+            if c["referencia"] in en_hoja:
+                ya_estaban.append(c["referencia"])
+                continue
+            fila = next(libres, None)
+            if fila is None:
+                sin_sitio.append(c["referencia"])
+                continue
+            if f"B{fila}:D{fila}" not in combinadas:
+                ws.merge_cells(f"B{fila}:D{fila}")
+            ws.cell(fila, 2).value = c.get("original") or c["referencia"]
+            ws.cell(fila, 5).value = "NO SUMINISTRA"
+            ws.cell(fila, 7).value = _numero_si_puede(c.get("cantidad"))
+            ws.cell(fila, 8).value = _numero_si_puede(c.get("cliente"))
+            ws.cell(fila, 10).value = "OK"
+            en_hoja.add(c["referencia"])
+            apuntadas.append(c["referencia"])
+        if apuntadas:
+            wb.save(ruta_hoja)
+        return apuntadas, ya_estaban, sin_sitio
+    finally:
+        wb.close()
+
 EXTENSIONES_INFORME = (".xlsx", ".xlsm", ".xls", ".csv")
 
 
@@ -3640,10 +3685,49 @@ class AppIntegrada(ctk.CTk):
         except Exception:
             coincidencias = []  # si no se puede leer, la generación lo explicará en el registro
         if coincidencias:
-            self.dialogo_no_suministra = avisos_clientes.DialogoNoSuministra(
-                self, coincidencias, lambda generar: generar and self.continuar_pedidos(ruta, folder))
+            def al_decidir(generar):
+                self.apuntar_no_suministra_hoy(coincidencias)  # se pidan o no, en la hoja de hoy quedan como NO SUMINISTRA
+                if generar:
+                    self.continuar_pedidos(ruta, folder)
+
+            self.dialogo_no_suministra = avisos_clientes.DialogoNoSuministra(self, coincidencias, al_decidir)
             return
         self.continuar_pedidos(ruta, folder)
+
+    def apuntar_no_suministra_hoy(self, coincidencias):
+        """Apunta en la hoja de pedidos de hoy (creándola si aún no existe) las referencias que ya no suministran."""
+        carpeta, plantilla = self.config.get("ruta_carpeta_hojas", ""), self.config.get("ruta_plantilla_hojas", "")
+        if not carpeta:
+            self.agregar_log("[HOJA PEDIDOS] Sin carpeta de hojas de pedido: no se han apuntado las referencias que no suministran.", "error")
+            return False
+        ruta = ruta_hoja_pedidos_del_dia(carpeta)
+        if not ruta.exists():
+            if not plantilla or not os.path.exists(plantilla):
+                self.agregar_log("[HOJA PEDIDOS] No existe la hoja de hoy ni la plantilla: no se han apuntado las referencias que no suministran.", "error")
+                return False
+            ruta.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(plantilla, ruta)
+        n = len(coincidencias)
+        while archivo_bloqueado(ruta):
+            if not messagebox.askretrycancel("Hoja de pedidos abierta", f"La hoja de hoy ({ruta.name}) está abierta en Excel.\n\nGuárdala y ciérrala, y pulsa "
+                                             f"«Reintentar» para apuntar en ella {'la referencia' if n == 1 else f'las {n} referencias'} que no suministra{'' if n == 1 else 'n'}."):
+                self.agregar_log("[HOJA PEDIDOS] No se han apuntado en la hoja de hoy las referencias que no suministran (estaba abierta).", "error")
+                return False
+        try:
+            apuntadas, ya_estaban, sin_sitio = apuntar_no_suministra_en_hoja(ruta, coincidencias)
+        except Exception as e:
+            registrar_error_detallado(f"Apuntar NO SUMINISTRA en la hoja: {e}", traceback.format_exc())
+            messagebox.showwarning("Hoja de pedidos", f"No se pudieron apuntar en la hoja de hoy las referencias que no suministran:\n{e}")
+            return False
+        if apuntadas:
+            self.agregar_log(f"[HOJA PEDIDOS] Apuntadas como NO SUMINISTRA en {ruta.name}: {', '.join(apuntadas)}.", "success")
+            self.avisar(f"{len(apuntadas)} referencia{'s' if len(apuntadas) != 1 else ''} apuntada{'s' if len(apuntadas) != 1 else ''} como NO SUMINISTRA en la hoja de hoy.",
+                        "ok", accion=("Abrir", lambda: self.abrir_archivo(ruta)))
+        if ya_estaban:
+            self.agregar_log(f"[HOJA PEDIDOS] Ya estaban en la hoja de hoy: {', '.join(ya_estaban)}.")
+        if sin_sitio:
+            self.agregar_log(f"[HOJA PEDIDOS] ❌ La hoja de hoy está llena: apunta a mano {', '.join(sin_sitio)}.", "error")
+        return bool(apuntadas or ya_estaban)
 
     def continuar_pedidos(self, ruta, folder):
         anterior = pedido_ya_generado(ruta)

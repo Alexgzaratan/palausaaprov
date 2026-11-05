@@ -183,12 +183,14 @@ def no_suministra_previas(registro, lineas, dias=60, hoy=None):
             vistas[normalizar_ref(ref)]["fechas"].add(fecha)
             vistas[normalizar_ref(ref)]["clientes"].add(str(r.get("cliente", "")))
     resultado, ya = [], set()
-    for referencia, cantidad, *_ in lineas:
+    for referencia, cantidad, *resto in lineas:
         clave = normalizar_ref(referencia)
         if clave in vistas and clave not in ya:
             ya.add(clave)
+            # original y cliente: tal como vienen en el Excel urgente, para apuntarlas en la hoja de pedidos de hoy
             resultado.append({"referencia": clave, "cantidad": cantidad, "fechas": sorted(vistas[clave]["fechas"]),
-                              "clientes": sorted(c for c in vistas[clave]["clientes"] if c)})
+                              "clientes": sorted(c for c in vistas[clave]["clientes"] if c),
+                              "original": str(referencia).replace("2/", "").strip(), "cliente": resto[0] if resto else None})
     return resultado
 
 
@@ -475,7 +477,7 @@ class DialogoNoSuministra:
         cuantas = len(coincidencias)
         ctk.CTkLabel(tarjeta, text=f"{cuantas} referencia{'s' if cuantas != 1 else ''} ya salió como NO SUMINISTRA" if cuantas == 1 else
                      f"{cuantas} referencias ya salieron como NO SUMINISTRA", font=estilo.fuente_titulo(), text_color=app.color_texto).pack(anchor="w", padx=estilo.PAD_X, pady=(14, 2))
-        app.crear_etiqueta(tarjeta, "Según los avisos enviados a los talleres: ya no se fabrican. Si no quieres pedirlas, cancela y quítalas del Excel urgente.",
+        app.crear_etiqueta(tarjeta, "Según los avisos enviados a los talleres: ya no se fabrican. Se apuntarán como NO SUMINISTRA en la hoja de pedidos de hoy. Si no quieres pedirlas, cancela y quítalas del Excel urgente.",
                            secundario=True, wraplength=560, justify="left").pack(anchor="w", padx=estilo.PAD_X, pady=(0, 10))
         lista = ctk.CTkScrollableFrame(tarjeta, fg_color="transparent", height=min(300, 70 * cuantas)) if cuantas > 4 else ctk.CTkFrame(tarjeta, fg_color="transparent")
         lista.pack(padx=estilo.PAD_X - 4, fill="both", expand=True)
