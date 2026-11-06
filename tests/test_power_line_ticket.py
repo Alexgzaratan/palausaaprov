@@ -2,6 +2,7 @@
 (jQuery UI autocomplete), criterio «Número de reclamacion», «Enviar», Nº TKT y adjuntos con el clip."""
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -86,6 +87,7 @@ class Portal:
         self.app = app
         self.enviados, self.adjuntos, self.pulsar = [], [], False
         self.cerrados = []
+        self.retraso_adjunto, self.rechazar_adjunto = 0, False
         self.intentos_login, self.fallos_login = 0, 0
         self.sesion, self.errores_internos = False, 0
         portal = self
@@ -129,7 +131,17 @@ class Portal:
                     portal.enviados.append(json.loads(cuerpo))
                     return self.responder(f"TKT99900{len(portal.enviados)}", "text/plain")
                 if self.path == "/adjunto":
+                    # Como el real: el nombre ya se ve en la lista, pero la subida tarda en terminar; si el navegador
+                    # se cierra antes, la respuesta no llega a escribirse y el adjunto no cuenta.
+                    time.sleep(portal.retraso_adjunto)
+                    if portal.rechazar_adjunto:
+                        self.send_response(500)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    self.responder("ok", "text/plain")
                     portal.adjuntos.append(cuerpo)
+                    return
                 if self.path == "/cerrado":
                     portal.cerrados.append(json.loads(cuerpo))
                 return self.responder("ok", "text/plain")
@@ -177,6 +189,21 @@ def test_envio_automatico_rellena_envia_y_adjunta(portal, word):
     assert t.ejecutar() == "TKT999001" and t.error_adjunto is None
     assert portal.enviados == [ESPERADO]
     assert portal.adjuntos == ["Litigio 131172031.docx"]
+
+
+def test_espera_a_que_el_word_termine_de_subir_antes_de_cerrar(portal, word):
+    # El nombre aparece en la lista al momento, pero la subida tarda: antes se cerraba el navegador y se perdía
+    portal.retraso_adjunto = 4
+    t, _ = ticket(portal, word, enviar_solo=True)
+    assert t.ejecutar() == "TKT999001" and t.error_adjunto is None
+    assert portal.adjuntos == ["Litigio 131172031.docx"]  # ya terminada al volver, no a medias
+
+
+def test_si_power_line_rechaza_el_word_se_avisa(portal, word):
+    portal.rechazar_adjunto = True
+    t, _ = ticket(portal, word, enviar_solo=True)
+    assert t.ejecutar() == "TKT999001"
+    assert t.error_adjunto  # «rechazó el Word (error 500)» o «subida cortada», según el navegador
 
 
 def test_con_confirmacion_espera_a_que_la_persona_pulse_enviar(portal, word):

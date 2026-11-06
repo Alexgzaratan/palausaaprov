@@ -20,6 +20,8 @@ import navegador as navegador_sistema
 URL_POWERLINE = "https://powerline.axelor.com/"
 RUTA_LISTA_TICKETS = "#/ds/helpdesk.ticket/list/1"
 RUTA_TICKETS_RESUELTOS = "#/ds/helpdesk.ticket.resolved/list/1"
+SUBIDA_MAX_SEGUNDOS = 180   # lo más que se espera a que el Word termine de subir
+SUBIDA_CALMA_SEGUNDOS = 3   # segundos sin envíos pendientes para darla por terminada
 VALORACION = "Totalmente satisfactorio"  # «Calidad de servicio» de la encuesta al cerrar (y «¿La respuesta resolvió...?» = Sí)
 TEMA_POR_DEFECTO = "Reclamaciones / Devoluciones"
 TIPO_POR_DEFECTO = "Progreso / Seguimiento de una reclamacion"
@@ -322,10 +324,57 @@ class TicketPowerLine:
         page.locator("button:has(i.fa-paperclip)").first.click()
         dialogo = page.locator(".ui-dialog:visible").filter(has_text="Attachments").first
         dialogo.wait_for(state="visible", timeout=20000)
-        dialogo.locator("input.upload-input").first.set_input_files(str(ruta_word))
-        nombre = re.sub(r".*[\\/]", "", str(ruta_word))
-        dialogo.locator(f"text={nombre}").first.wait_for(state="visible", timeout=90000)
+        # El portal pinta el nombre del archivo en cuanto se elige y lo sube después: hay que esperar a que terminen
+        # los envíos (POST) que provoca, o al cerrar el navegador la subida se corta y el ticket se queda sin Word.
+        pendientes, envios, fallidos = set(), [], []
+
+        def empieza(peticion):
+            if peticion.method == "POST":
+                pendientes.add(peticion)
+                envios.append(peticion)
+
+        def acaba(peticion):
+            pendientes.discard(peticion)
+
+        def falla(peticion):
+            pendientes.discard(peticion)
+            fallidos.append(peticion)
+
+        page.on("request", empieza)
+        page.on("requestfinished", acaba)
+        page.on("requestfailed", falla)
+        try:
+            dialogo.locator("input.upload-input").first.set_input_files(str(ruta_word))
+            nombre = re.sub(r".*[\\/]", "", str(ruta_word))
+            dialogo.locator(f"text={nombre}").first.wait_for(state="visible", timeout=90000)
+            self.esperar_subida(page, pendientes, envios)
+        finally:
+            for evento, funcion in (("request", empieza), ("requestfinished", acaba), ("requestfailed", falla)):
+                page.remove_listener(evento, funcion)
+        if fallidos:
+            raise RuntimeError(f"la subida del Word se cortó ({fallidos[0].failure or 'sin respuesta'})")
+        errores = [r for r in envios if (r.response() is not None and r.response().status >= 400)]
+        if errores:
+            raise RuntimeError(f"Power-Line rechazó el Word (error {errores[0].response().status})")
         dialogo.locator("button:has-text('Cerrar')").first.click()
+        page.wait_for_timeout(1500)
+
+    def esperar_subida(self, page, pendientes, envios):
+        """Hasta que se haya enviado algo y lleve SUBIDA_CALMA_SEGUNDOS sin envíos pendientes."""
+        limite, calma = SUBIDA_MAX_SEGUNDOS, SUBIDA_CALMA_SEGUNDOS
+        fin = time.monotonic() + limite
+        tranquilo_desde = None
+        while time.monotonic() < fin:
+            page.wait_for_timeout(250)  # deja que Playwright reparta los eventos de red
+            if envios and not pendientes:
+                tranquilo_desde = tranquilo_desde or time.monotonic()
+                if time.monotonic() - tranquilo_desde >= calma:
+                    return
+            else:
+                tranquilo_desde = None
+        if not envios:
+            raise RuntimeError("Power-Line no llegó a subir el Word")
+        raise RuntimeError(f"la subida del Word no terminó en {limite} s")
 
     # ---------- todo junto ----------
 
