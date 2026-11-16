@@ -2214,6 +2214,18 @@ class AppIntegrada(ctk.CTk):
 
     def construir_cabecera(self):
         """Cabecera de bienvenida: logo, saludo según la hora, fecha y un resumen de cómo va el día."""
+        saludo = texto_saludo(self.config.get("nombre_usuario", ""))
+        subtitulo = f"{fecha_larga()}  ·  Palausa Aprovisionamiento {VERSION}"
+        atajos = "Ctrl+1…8 pestañas  ·  Ctrl+Intro ejecutar  ·  Esc detener"
+        try:  # banda con degradado según la hora; si algo falla, la cabecera lisa de siempre
+            self.cabecera_lienzo = efectos.crear_cabecera_degradada(self, saludo, subtitulo, self.imagen_logo(), atajos)
+            self.cabecera_lienzo.pack(fill="x")
+            self.frame_resumen = self.cabecera_lienzo.marco_fichas
+            self.cabecera_lienzo.al_cambiar = self.actualizar_resumen
+            self.actualizar_resumen()
+            return
+        except Exception:
+            self.cabecera_lienzo = None
         cabecera = ctk.CTkFrame(self, fg_color=self.color_superficie, corner_radius=0, border_width=0)
         cabecera.pack(fill="x")
         cabecera_int = ctk.CTkFrame(cabecera, fg_color="transparent")
@@ -2294,6 +2306,9 @@ class AppIntegrada(ctk.CTk):
                                                    fg_color=self.color_principal, hover_color=self.color_hover, text_color="#ffffff",
                                                    text_color_disabled="#ffffff", state="normal" if comando else "disabled")
             self.btn_actualizacion.pack(side="left", padx=(8, 0))
+        lienzo = getattr(self, "cabecera_lienzo", None)
+        if lienzo is not None:
+            lienzo.repintar()  # las fichas han cambiado de ancho: el degradado termina donde empiezan
 
     def crear_ficha_resumen(self, marco, icono, texto, color_icono, al_pulsar=None):
         ficha = ctk.CTkFrame(marco, fg_color=self.color_superficie_alt, corner_radius=12)
@@ -3158,7 +3173,18 @@ class AppIntegrada(ctk.CTk):
 
     # ---------- «Última vez» en el título de cada tarjeta ----------
 
+    BOTONES_DE_TAREA = {"auto": "btn_auto", "pedidos": "btn_pedidos", "hoja": "btn_hoja_pedidos", "avisos": "btn_avisos", "comparador": "btn_comparador",
+                        "rotacion": "btn_rotacion", "mopar": "btn_mopar", "stock_fiat": "btn_stock_fiat", "madd": "btn_madd"}
+    DETALLES_SIN_CELEBRAR = ("detenida", "incorrectos", "incidencias")
+
+    def celebrar_tarea(self, clave, detalle=""):
+        """Check verde en el botón de la tarea que acaba de terminar bien."""
+        if any(palabra in (detalle or "") for palabra in self.DETALLES_SIN_CELEBRAR):
+            return False
+        return efectos.celebrar(self, getattr(self, self.BOTONES_DE_TAREA.get(clave, ""), None))
+
     def registrar_ejecucion(self, clave, detalle=""):
+        self.celebrar_tarea(clave, detalle)
         info = registrar_ultima_ejecucion(clave, detalle)
         if info is not None:
             self.config.setdefault("ultimas_ejecuciones", {})[clave] = info

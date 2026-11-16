@@ -2,6 +2,7 @@
 responden al ratón y arrastrar archivos a los campos. Todo con customtkinter y temporizadores after()."""
 import math
 import time
+from datetime import datetime
 import tkinter
 
 import customtkinter as ctk
@@ -506,3 +507,194 @@ def activar_soltar(app, entrada, al_soltar):
         widget.dnd_bind("<<DropPosition>>", lambda evento: COPY)
         widget.dnd_bind("<<DropLeave>>", fuera)
         widget.dnd_bind("<<Drop>>", soltar)
+
+
+# ---------- cabecera con degradado según la hora ----------
+
+DEGRADADOS = {  # tres colores de izquierda a derecha; el último es además el fondo liso de la zona de fichas
+    "amanecer": ("#f6a15c", "#e96b8a", "#7a6ad8"),
+    "mediodia": ("#2f7fe6", "#2f9fd8", "#23958f"),
+    "tarde": ("#e8793a", "#c8456e", "#5b3fa8"),
+    "noche": ("#141c3a", "#27306b", "#4a3f8f"),
+}
+CABECERA_ALTO = 74
+CABECERA_REVISION_MS = 5 * 60 * 1000  # cada cuánto se mira si ha cambiado el momento del día
+
+
+def momento_del_dia(ahora=None):
+    hora = (ahora or datetime.now()).hour
+    return "amanecer" if 6 <= hora < 10 else "mediodia" if 10 <= hora < 16 else "tarde" if 16 <= hora < 21 else "noche"
+
+
+def _rgb(color):
+    return tuple(int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def imagen_degradado(ancho, alto, colores, corte):
+    """Degradado horizontal de los tres colores hasta el píxel 'corte' (liso con el tercero desde ahí), con una luz
+    suave arriba a la izquierda. Imagen PIL en RGB."""
+    from PIL import Image, ImageChops
+    c1, c2, c3 = (_rgb(c) for c in colores)
+    corte = max(1, corte)
+    fila = []
+    for x in range(ancho):
+        p = x / corte
+        a, b, t = (c1, c2, p * 2) if p < 0.5 else (c2, c3, (p - 0.5) * 2) if p < 1 else (c3, c3, 0)
+        fila.append(tuple(round(u + (v - u) * t) for u, v in zip(a, b)))
+    imagen = Image.new("RGB", (ancho, 1))
+    imagen.putdata(fila)
+    imagen = imagen.resize((ancho, alto))
+    luz = ImageChops.invert(Image.radial_gradient("L")).resize((alto * 7, alto * 4)).point(lambda v: max(0, v - 90) * 0.5)  # a cero antes del borde: sin escalón
+    imagen.paste((255, 255, 255), (-alto * 2, -alto * 2), luz)
+    return imagen
+
+
+def crear_cabecera_degradada(app, titulo, subtitulo, logo=None, pista=""):
+    """Banda de cabecera pintada en un lienzo: degradado según la hora, logo, saludo y fecha a la izquierda y, a la
+    derecha, un marco liso (lienzo.derecha) para las fichas. lienzo.repintar() la ajusta al ancho y a las fichas."""
+    from PIL import ImageTk
+    s = escala(app)
+    alto = round(CABECERA_ALTO * s)
+    estado = {"momento": momento_del_dia(), "ancho": 0, "corte": 0, "foto": None}
+
+    def colores():
+        return DEGRADADOS[estado["momento"]]
+
+    lienzo = tkinter.Canvas(app, height=alto, highlightthickness=0, bd=0, bg=colores()[2])
+    derecha = ctk.CTkFrame(lienzo, fg_color=colores()[2], corner_radius=0)
+    lienzo.derecha = derecha
+    lienzo.marco_fichas = ctk.CTkFrame(derecha, fg_color="transparent", width=1, height=1)
+    lienzo.marco_fichas.pack(anchor="e")
+    if pista:
+        ctk.CTkLabel(derecha, text=pista, font=estilo.fuente(estilo.TAM_PEQUENO), text_color="#eef1f7", height=16).pack(anchor="e", pady=(6, 0))
+    fondo = lienzo.create_image(0, 0, anchor="nw")
+    margen = round(20 * s)
+    x_texto = margen
+    if logo is not None:
+        lado = round(38 * s)
+        estado["logo"] = logo.convert("RGBA").resize((lado, lado))
+        x_texto += lado + round(14 * s)
+    familia_titulo, familia = estilo.fuente_titulo()[0], estilo.fuente()[0]
+    lienzo.create_text(x_texto, alto / 2 - round(11 * s), anchor="w", text=titulo, fill="#ffffff", font=(familia_titulo, -round(estilo.TAM_APP * 1.35 * s), "bold"))
+    lienzo.create_text(x_texto, alto / 2 + round(15 * s), anchor="w", text=subtitulo, fill="#eef1f7", font=(familia, -round(estilo.TAM_TEXTO * 1.35 * s)))
+    ventana = lienzo.create_window(0, alto / 2, anchor="e", window=derecha)
+
+    def repintar(evento=None, forzar=False):
+        try:
+            if not lienzo.winfo_exists():
+                return
+            ancho = lienzo.winfo_width()
+            if ancho <= 1:
+                return
+            derecha.update_idletasks()
+            corte = max(round(ancho * 0.25), min(round(ancho * 0.6), ancho - derecha.winfo_reqwidth() - margen * 2))
+            if not forzar and (ancho, corte) == (estado["ancho"], estado["corte"]):
+                return
+            estado["ancho"], estado["corte"] = ancho, corte
+            imagen = imagen_degradado(ancho, alto, colores(), corte)
+            if estado.get("logo") is not None:
+                imagen.paste(estado["logo"], (margen, (alto - estado["logo"].height) // 2), estado["logo"])
+            estado["foto"] = ImageTk.PhotoImage(imagen, master=lienzo)  # se guarda: sin referencia Tk la borra
+            lienzo.itemconfigure(fondo, image=estado["foto"])
+            lienzo.coords(ventana, ancho - margen, alto / 2)
+        except Exception:
+            pass  # decorativo: si falla queda el color liso
+
+    def revisar_hora():
+        try:
+            if not lienzo.winfo_exists():
+                return
+            nuevo = momento_del_dia()
+            if nuevo != estado["momento"]:
+                estado["momento"] = nuevo
+                lienzo.configure(bg=colores()[2])
+                derecha.configure(fg_color=colores()[2])
+                repintar(forzar=True)
+                if lienzo.al_cambiar is not None:
+                    lienzo.al_cambiar()  # las fichas redondeadas toman el fondo nuevo
+            lienzo.after(CABECERA_REVISION_MS, revisar_hora)
+        except Exception:
+            pass
+
+    lienzo.repintar, lienzo.estado, lienzo.al_cambiar, lienzo.revisar_hora = repintar, estado, None, revisar_hora
+    lienzo.bind("<Configure>", repintar)
+    lienzo.after(CABECERA_REVISION_MS, revisar_hora)
+    return lienzo
+
+
+# ---------- celebración al terminar una tarea ----------
+
+CELEBRA_TRAZO_MS = 380   # lo que tarda en dibujarse el check
+CELEBRA_VISIBLE_MS = 1400  # tiempo en verde antes de volver a ser el botón de siempre
+CELEBRA_PASO_MS = 16
+
+
+def celebrar(app, boton):
+    """El botón se pone verde y se dibuja un check blanco en su centro; al rato vuelve a su texto y su color.
+    Decorativo: no hace nada con las animaciones apagadas, si el botón ya no existe o si ya está celebrando."""
+    try:
+        if not getattr(app, "config", {}).get("animacion_inicio", True) or boton is None or not boton.winfo_exists():
+            return False
+        if getattr(boton, "_celebrando", False):
+            return False
+        texto, fondo, encima = boton.cget("text"), boton.cget("fg_color"), boton.cget("hover_color")
+        origen, verde = _color(boton, "fg_color"), app.color_ok
+        if not (isinstance(origen, str) and origen.startswith("#") and verde.startswith("#")):
+            return False
+        boton._celebrando = True
+        s = escala(boton)
+        lado = round(26 * s)
+        boton.configure(text="", fg_color=origen, hover_color=origen)
+        lienzo = tkinter.Canvas(boton, width=lado, height=lado, bg=origen, highlightthickness=0, bd=0)
+        lienzo.place(relx=0.5, rely=0.5, anchor="center")
+        puntos = [(0.18 * lado, 0.54 * lado), (0.42 * lado, 0.76 * lado), (0.84 * lado, 0.28 * lado)]
+        tramo1 = math.dist(puntos[0], puntos[1])
+        total = tramo1 + math.dist(puntos[1], puntos[2])
+        inicio = time.monotonic()
+        pintado = [origen]
+
+        def restaurar():
+            boton._celebrando = False
+            try:
+                lienzo.destroy()
+                if boton.winfo_exists():
+                    cambios = {}
+                    if boton.cget("text") == "":  # si otra tarea ya ha puesto su texto, no se pisa
+                        cambios["text"] = texto
+                    if _color(boton, "fg_color") == pintado[0]:  # solo si el color sigue siendo el que puso la celebración
+                        cambios.update(fg_color=fondo, hover_color=encima)
+                    if cambios:
+                        boton.configure(**cambios)
+            except Exception:
+                pass
+
+        def paso():
+            try:
+                if not boton.winfo_exists() or boton.cget("text") != "":
+                    return restaurar()
+                t = min(1.0, (time.monotonic() - inicio) * 1000 / CELEBRA_TRAZO_MS)
+                color = mezclar(origen, verde, min(1.0, t * 2))
+                boton.configure(fg_color=color, hover_color=color)
+                pintado[0] = color
+                lienzo.configure(bg=color)
+                lienzo.delete("all")
+                largo = total * _suave(t)
+                linea = [*puntos[0]]
+                if largo <= tramo1:
+                    f = largo / tramo1
+                    linea += [puntos[0][0] + (puntos[1][0] - puntos[0][0]) * f, puntos[0][1] + (puntos[1][1] - puntos[0][1]) * f]
+                else:
+                    f = (largo - tramo1) / (total - tramo1)
+                    linea += [*puntos[1], puntos[1][0] + (puntos[2][0] - puntos[1][0]) * f, puntos[1][1] + (puntos[2][1] - puntos[1][1]) * f]
+                lienzo.create_line(*linea, fill="#ffffff", width=max(2, round(3 * s)), capstyle="round", joinstyle="round")
+                if t < 1.0:
+                    boton.after(CELEBRA_PASO_MS, paso)
+                else:
+                    boton.after(CELEBRA_VISIBLE_MS, restaurar)
+            except Exception:
+                restaurar()
+
+        paso()
+        return True
+    except Exception:
+        return False
