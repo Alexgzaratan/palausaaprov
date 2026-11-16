@@ -186,3 +186,39 @@ def test_solo_leer_no_pulsa_cerrar(portal):
     resultados = tarea.ejecutar()
     assert [r["ticket"] for r in resultados] == ["TKT1000001", "TKT1000002"] and portal.cerrados == []
     assert "El abono se hará en la próxima factura" in resultados[1]["respuesta"]
+
+
+def test_al_abrir_avisa_arriba_de_los_tickets_resueltos_sin_cerrar_nada(app, monkeypatch, tmp_path):
+    monkeypatch.setattr(pl, "RESPUESTAS_POWER_LINE", str(tmp_path / "respuestas.json"))
+    m = app.reclamaciones_power_line
+    m.configuracion.update({"usuario_madd": "u", "password_madd": "p"})
+    usados = []
+
+    class Falso:
+        def __init__(self, usuario, password, confirmar_solo=False, log=None, visible=True, solo_leer=False):
+            usados.append((visible, solo_leer))
+
+        def ejecutar(self):
+            return [{"ticket": "TKT1", "respuesta": "Aceptado", "cerrado": False, "error": None},
+                    {"ticket": "TKT2", "respuesta": "Aceptado", "cerrado": False, "error": None}]
+
+    monkeypatch.setattr(plt, "CierreTickets", Falso)
+    monkeypatch.setattr(pl.threading, "Thread", lambda target, daemon=None: type("H", (), {"start": lambda self: target()})())
+    monkeypatch.setattr(app, "after", lambda ms, funcion, *a: funcion(*a))
+    monkeypatch.setattr(m.historial, "litigio_de_ticket", lambda ticket: None)
+    avisos = []
+    monkeypatch.setattr(app, "avisar", lambda texto, *a, **k: avisos.append(texto))
+    assert m.comprobar_resueltos_al_abrir()
+    assert usados == [(False, True)]  # sin ventana y solo leyendo
+    assert m.resueltos_pendientes == 2 and not m._enviando_power_line
+    assert avisos == ["Hay 2 tickets resueltos en Power-Line sin cerrar."]
+    assert app.ficha_resueltos.winfo_exists()
+    app.ir_a_tickets_resueltos()
+    assert app.tabview.get() == "Reclamaciones" and m.panel.get() == "Tickets Power-Line"
+
+    # Desactivado en Configuración, o si Power-Line falla: no hace ni dice nada
+    m.configuracion["power_line_avisar_resueltos"] = False
+    assert not m.comprobar_resueltos_al_abrir() and len(usados) == 1
+    m.configuracion["power_line_avisar_resueltos"] = True
+    monkeypatch.setattr(Falso, "ejecutar", lambda self: (_ for _ in ()).throw(RuntimeError("sin conexión")))
+    assert m.comprobar_resueltos_al_abrir() and len(avisos) == 1 and not m._enviando_power_line

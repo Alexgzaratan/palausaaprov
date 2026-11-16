@@ -2275,6 +2275,11 @@ class AppIntegrada(ctk.CTk):
         # Accesos desde cualquier pestaña (el mismo botón que en el Comparador)
         self.ficha_informe = self.crear_ficha_resumen(marco, "documento", "Informe anterior", self.color_principal, lambda evento: self.abrir_informe_anterior())
         efectos.poner_pista(self, self.ficha_informe, self.pista_informe_anterior)
+        resueltos = getattr(getattr(self, "reclamaciones_power_line", None), "resueltos_pendientes", 0)
+        if resueltos:
+            texto = f"{resueltos} ticket{'s' if resueltos != 1 else ''} resuelto{'s' if resueltos != 1 else ''}"
+            self.ficha_resueltos = self.crear_ficha_resumen(marco, "correo", texto, self.color_ok, self.ir_a_tickets_resueltos)
+            efectos.poner_pista(self, self.ficha_resueltos, "Stellantis ha respondido: pulsa para ver las respuestas y cerrarlos")
         lista = getattr(self, "lista_tareas", None)
         pendientes = lista.pendientes() if lista is not None else 0
         if pendientes:
@@ -2500,6 +2505,15 @@ class AppIntegrada(ctk.CTk):
             self.bind_all(f"<Control-Key-{numero}>", lambda evento, n=numero - 1: self.ir_a_pestana(n))
         self.bind_all("<Control-Return>", lambda evento: self.accion_principal())
         self.bind_all("<Escape>", lambda evento: self.detener_tarea_actual())
+
+    def ir_a_tickets_resueltos(self, evento=None):
+        """Reclamaciones > Tickets Power-Line, donde están las respuestas y el botón de cerrar."""
+        self.tabview.set("Reclamaciones")
+        self.al_cambiar_pestana()
+        panel = getattr(self.reclamaciones_power_line, "panel", None)
+        if panel is not None:
+            panel.set("Tickets Power-Line")
+            self.resaltar_pestana_activa(panel)
 
     def ir_a_pestana(self, indice):
         nombres = list(self.constructores_pestanas)
@@ -3318,15 +3332,31 @@ class AppIntegrada(ctk.CTk):
         self.refrescar_ultima_vez("madd")
         self.actualizar_resumen()
 
+    @staticmethod
+    def carpeta_inicial(entry, es_carpeta=False):
+        """Carpeta en la que abre «Examinar»: la del archivo (o la carpeta) que ya tiene el campo, para que cada campo
+        abra siempre en su sitio y no en la última carpeta que se usó en cualquier otro."""
+        texto = entry.get().strip().strip('"') if entry is not None else ""
+        if not texto:
+            return {}
+        ruta = Path(texto)
+        for candidata in ((ruta,) if es_carpeta else ()) + (ruta.parent, ruta.parent.parent):
+            try:
+                if str(candidata) not in ("", ".") and candidata.is_dir():
+                    return {"initialdir": str(candidata)}
+            except OSError:
+                pass
+        return {}
+
     def seleccionar_archivo(self, entry, tipos):
-        ruta = filedialog.askopenfilename(filetypes=tipos)
+        ruta = filedialog.askopenfilename(filetypes=tipos, **self.carpeta_inicial(entry))
         if ruta:
             entry.delete(0, "end")
             entry.insert(0, ruta)
             self.campo_cambiado(entry)
 
     def seleccionar_carpeta(self, entry):
-        ruta = filedialog.askdirectory()
+        ruta = filedialog.askdirectory(**self.carpeta_inicial(entry, es_carpeta=True))
         if ruta:
             entry.delete(0, "end")
             entry.insert(0, ruta)
@@ -4661,4 +4691,5 @@ if __name__ == "__main__":
     app.comprobar_actualizaciones_al_inicio()
     app.after(2500, app.recordar_tareas)
     app.after(4000, app.comprobar_facturas_pendientes)
+    app.after(8000, app.reclamaciones_power_line.comprobar_resueltos_al_abrir)
     app.mainloop()

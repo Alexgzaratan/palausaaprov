@@ -1010,6 +1010,47 @@ class ModuloReclamacionesPowerLine:
         caja.insert("1.0", "\n\n".join(bloques) or "Pulsa «Ver respuestas» para leer lo que ha respondido Stellantis en los tickets resueltos.")
         caja.configure(state="disabled")
 
+    resueltos_pendientes = 0  # tickets resueltos que siguen sin cerrar, según la última lectura (ficha de la cabecera)
+
+    def comprobar_resueltos_al_abrir(self):
+        """Al arrancar: mira en Power-Line, sin ventana y sin cerrar nada, si hay tickets resueltos y lo enseña en la
+        cabecera. Silencioso: sin usuario, sin conexión o con cualquier fallo no molesta (solo lo apunta en el registro)."""
+        if not self.configuracion.get("power_line_avisar_resueltos", True) or getattr(self, "_enviando_power_line", False):
+            return False
+        usuario, password = self.credenciales_power_line()
+        if not usuario or not password:
+            return False
+        self._enviando_power_line = True
+
+        def trabajo():
+            resultados, error = [], None
+            try:
+                resultados = power_line_ticket.CierreTickets(usuario, password, visible=False, solo_leer=True).ejecutar()
+                for r in resultados:
+                    r["litigio"] = self.historial.litigio_de_ticket(r["ticket"])
+                if resultados:
+                    anotar_respuestas(resultados)
+            except Exception as e:
+                error = str(e).splitlines()[0] if str(e) else type(e).__name__
+            self.app.after(0, lambda: self._resueltos_comprobados(resultados, error))
+
+        threading.Thread(target=trabajo, daemon=True).start()
+        return True
+
+    def _resueltos_comprobados(self, resultados, error):
+        self._enviando_power_line = False
+        if error:
+            self.app.agregar_log(f"[POWER-LINE] No se pudo mirar si hay tickets resueltos: {error}")
+            return
+        self.resueltos_pendientes = len(resultados)
+        self.refrescar_respuestas()
+        self.app.actualizar_resumen()
+        if resultados:
+            n = len(resultados)
+            texto = f"Hay {n} ticket{'s' if n != 1 else ''} resuelto{'s' if n != 1 else ''} en Power-Line sin cerrar."
+            self.app.agregar_log(f"[POWER-LINE] {texto}", "success")
+            self.app.avisar(texto, "info", accion=("Ver", self.app.ir_a_tickets_resueltos))
+
     def cerrar_tickets_resueltos(self, solo_leer=False):
         if getattr(self, "_enviando_power_line", False):
             self.app.avisar("Ya hay una ventana de Power-Line trabajando.")
@@ -1057,6 +1098,8 @@ class ModuloReclamacionesPowerLine:
             self.app.agregar_log(f"[POWER-LINE] ❌ No se pudieron revisar los tickets resueltos: {error}", "error")
             messagebox.showwarning("Power-Line", f"No se pudieron revisar los tickets resueltos:\n{error}")
             return
+        self.resueltos_pendientes = sum(1 for r in resultados if not r.get("cerrado"))
+        self.app.actualizar_resumen()
         texto = texto_resueltos(resultados, solo_leer)
         self.app.agregar_log("[POWER-LINE] " + texto.splitlines()[0], "success")
         if solo_leer:  # las respuestas quedan en el cuadro de la tarjeta: sin ventana
@@ -1146,6 +1189,9 @@ class ModuloReclamacionesPowerLine:
         self.tipo_power_line_entry = self._fila_texto(marco, "Tipo de ticket", "power_line_tipo", power_line_ticket.TIPO_POR_DEFECTO)
         self.envio_automatico_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_envio_automatico", False)))
         ctk.CTkCheckBox(marco, text="Enviar el ticket sin pedir confirmación (la app pulsa «Enviar» y adjunta el Word sola)", variable=self.envio_automatico_var,
+                        fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=4)
+        self.avisar_resueltos_var = ctk.BooleanVar(value=bool(self.configuracion.get("power_line_avisar_resueltos", True)))
+        ctk.CTkCheckBox(marco, text="Al abrir la app, mirar si hay tickets resueltos y avisar arriba (no cierra ninguno)", variable=self.avisar_resueltos_var,
                         fg_color=app.color_principal, hover_color=app.color_hover, text_color=app.color_texto, font=estilo.fuente()).pack(anchor="w", padx=estilo.PAD_FILA, pady=(4, estilo.PAD_FILA))
 
     def _fila_texto(self, parent, texto, clave, defecto, ejemplo="", ocultar=False):
@@ -1191,6 +1237,7 @@ class ModuloReclamacionesPowerLine:
             "power_line_tema": self._valor("tema_power_line_entry", "power_line_tema", power_line_ticket.TEMA_POR_DEFECTO),
             "power_line_tipo": self._valor("tipo_power_line_entry", "power_line_tipo", power_line_ticket.TIPO_POR_DEFECTO),
             "power_line_envio_automatico": self.envio_automatico_var.get() if hasattr(self, "envio_automatico_var") else bool(self.configuracion.get("power_line_envio_automatico", False)),
+            "power_line_avisar_resueltos": self.avisar_resueltos_var.get() if hasattr(self, "avisar_resueltos_var") else bool(self.configuracion.get("power_line_avisar_resueltos", True)),
             "psa_litigio_sin_confirmacion": self.litigio_sin_confirmacion_var.get() if hasattr(self, "litigio_sin_confirmacion_var") else bool(self.configuracion.get("psa_litigio_sin_confirmacion", False)),
             "psa_motivo": litigio_psa.codigo_motivo(self.motivo_option.get()) if hasattr(self, "motivo_option") else self.configuracion.get("psa_motivo", litigio_psa.MOTIVO_POR_DEFECTO),
         }

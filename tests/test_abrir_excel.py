@@ -150,3 +150,37 @@ def test_pista_aparece_y_se_va(app, monkeypatch):
         app.update()
         time.sleep(0.01)
     assert boton._pista["ventana"] is None and not ventana.winfo_exists()
+
+
+# ---------- «Examinar» abre en la carpeta del campo ----------
+
+class Campo:
+    def __init__(self, texto=""):
+        self.texto = texto
+
+    def get(self):
+        return self.texto
+
+    def delete(self, *a):
+        self.texto = ""
+
+    def insert(self, _i, texto):
+        self.texto = texto
+
+
+def test_examinar_abre_en_la_carpeta_del_archivo_del_campo(tmp_path, monkeypatch):
+    excel = crear(tmp_path / "STOCK" / "stock.xlsx")
+    vistos = []
+    monkeypatch.setattr(app_mod.filedialog, "askopenfilename", lambda **k: vistos.append(k.get("initialdir")) or "")
+    falsa = type("Falsa", (), {"carpeta_inicial": staticmethod(app_mod.AppIntegrada.carpeta_inicial), "campo_cambiado": lambda self, e: None})()
+    app_mod.AppIntegrada.seleccionar_archivo(falsa, Campo(str(excel)), [("Excel", "*.xlsx")])
+    assert vistos == [str(excel.parent)]
+
+
+def test_examinar_si_el_archivo_ya_no_existe_abre_en_su_carpeta_y_si_esta_vacio_sin_carpeta(tmp_path):
+    carpeta = tmp_path / "STOCK"
+    carpeta.mkdir()
+    sel = app_mod.AppIntegrada.carpeta_inicial
+    assert sel(Campo(str(carpeta / "borrado.xlsx"))) == {"initialdir": str(carpeta)}
+    assert sel(Campo(str(carpeta)), es_carpeta=True) == {"initialdir": str(carpeta)}
+    assert sel(Campo("")) == {}
