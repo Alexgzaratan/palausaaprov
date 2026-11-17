@@ -134,7 +134,8 @@ def test_al_decidir_se_apuntan_en_la_hoja_de_hoy(app, registro, monkeypatch, tmp
     ruta = tmp_path / "URGENTE.xlsx"
     wb = openpyxl.Workbook()
     wb.active.append(["REF", "D", "CANT", "", "", "CLIENTE"])
-    wb.active.append(["2/1434 C8", "x", 3, None, None, 160533])
+    wb.active.append(["2/1434 C8", "x", 3, None, None, "160533 TALLER DE PRUEBA SL"])
+    wb.active.append(["2/9800111", "y", 1, None, None, "8049 OTRO TALLER"])  # esta sí se pide
     wb.save(ruta)
     app.tabview.set("Pedidos")
     app.construir_pestana("Pedidos")
@@ -159,3 +160,26 @@ def test_al_decidir_se_apuntan_en_la_hoja_de_hoy(app, registro, monkeypatch, tmp
     assert preguntas and "está abierta en Excel" in preguntas[0]
     ws = openpyxl.load_workbook(hoja)["PSA"]
     assert [ws.cell(5, c).value for c in (2, 5, 7, 8, 10)] == ["1434 C8", "NO SUMINISTRA", 3, 160533, "OK"]
+    # y sale del Excel urgente: solo queda la que sí se pide, con copia de antes
+    urgente = openpyxl.load_workbook(ruta).active
+    assert [urgente.cell(f, 1).value for f in range(1, urgente.max_row + 1)] == ["REF", "2/9800111"]
+
+
+def test_codigo_cliente_sin_nombre():
+    assert app_mod.codigo_cliente("160533 TALLER DE PRUEBA SL") == 160533
+    assert app_mod.codigo_cliente("152919.0") == 152919 and app_mod.codigo_cliente(8049) == 8049
+    assert app_mod.codigo_cliente("") is None and app_mod.codigo_cliente("SIN CODIGO") == "SIN CODIGO"
+
+
+def test_quitar_espacios_de_la_hoja(tmp_path):
+    ruta = plantilla_hoja(tmp_path / "17-11-2026.xlsx")
+    wb = openpyxl.load_workbook(ruta)
+    wb["PSA"]["B5"], wb["PSA"]["F5"], wb["PSA"]["H5"] = "98 123 456 80", "98 123 456 99 ", "160533"
+    wb["PSA"]["B6"], wb["FIAT"]["B5"], wb["FIAT"]["G5"] = "1434C8", " 5180 1234 ", 3
+    wb.save(ruta)
+    assert app_mod.quitar_espacios_hoja(ruta) == 3
+    wb = openpyxl.load_workbook(ruta)
+    assert [wb["PSA"]["B5"].value, wb["PSA"]["F5"].value, wb["PSA"]["B6"].value, wb["FIAT"]["B5"].value] == ["9812345680", "9812345699", "1434C8", "51801234"]
+    assert wb["PSA"]["H5"].value == "160533" and wb["FIAT"]["G5"].value == 3  # solo referencias
+    assert wb["PSA"].data_validations.dataValidation and "B10:D10" in {str(m) for m in wb["PSA"].merged_cells.ranges}
+    assert app_mod.quitar_espacios_hoja(ruta) == 0

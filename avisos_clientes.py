@@ -477,7 +477,7 @@ class DialogoNoSuministra:
         cuantas = len(coincidencias)
         ctk.CTkLabel(tarjeta, text=f"{cuantas} referencia{'s' if cuantas != 1 else ''} ya salió como NO SUMINISTRA" if cuantas == 1 else
                      f"{cuantas} referencias ya salieron como NO SUMINISTRA", font=estilo.fuente_titulo(), text_color=app.color_texto).pack(anchor="w", padx=estilo.PAD_X, pady=(14, 2))
-        app.crear_etiqueta(tarjeta, "Según los avisos enviados a los talleres: ya no se fabrican. Se apuntarán como NO SUMINISTRA en la hoja de pedidos de hoy. Si no quieres pedirlas, cancela y quítalas del Excel urgente.",
+        app.crear_etiqueta(tarjeta, "Según los avisos enviados a los talleres: ya no se fabrican. Se apuntarán como NO SUMINISTRA en la hoja de pedidos de hoy y se quitarán del Excel urgente (queda copia de seguridad).",
                            secundario=True, wraplength=560, justify="left").pack(anchor="w", padx=estilo.PAD_X, pady=(0, 10))
         lista = ctk.CTkScrollableFrame(tarjeta, fg_color="transparent", height=min(300, 70 * cuantas)) if cuantas > 4 else ctk.CTkFrame(tarjeta, fg_color="transparent")
         lista.pack(padx=estilo.PAD_X - 4, fill="both", expand=True)
@@ -494,7 +494,7 @@ class DialogoNoSuministra:
                                wraplength=520, justify="left").pack(anchor="w")
         pie = ctk.CTkFrame(tarjeta, fg_color="transparent")
         pie.pack(padx=estilo.PAD_X, pady=(8, 14), fill="x")
-        app.crear_boton_principal(pie, "Generar igualmente", lambda: self.decidir(True), alto=estilo.ALTO_BOTON_COMPACTO).pack(side="right")
+        app.crear_boton_principal(pie, "Generar sin ellas", lambda: self.decidir(True), alto=estilo.ALTO_BOTON_COMPACTO).pack(side="right")
         app.crear_boton_secundario(pie, "Cancelar", lambda: self.decidir(False), alto=estilo.ALTO_BOTON_COMPACTO).pack(side="right", padx=(0, 6))
         _centrar(app, ventana)
 

@@ -1023,6 +1023,52 @@ def _numero_si_puede(valor):
         return int(float(texto))
     return texto or None
 
+def codigo_cliente(valor):
+    """Del cliente del Excel urgente («8049 TALLER ...») solo el código, como número si se puede."""
+    texto = str(valor if valor is not None else "").strip()
+    encontrado = re.match(r"(\d+)(\.0)?(?!\d)", texto)
+    return int(encontrado.group(1)) if encontrado else _numero_si_puede(texto)
+
+# Columnas de la hoja de pedidos con referencias: REFERENCIAS A PEDIR (B) y SUSTITUCIÓN (F)
+HOJA_COLUMNAS_REFERENCIA = (2, 6)
+
+def quitar_espacios_hoja(ruta_hoja):
+    """Quita los espacios de las referencias (B y F, filas 5 a 50) de todas las pestañas de la hoja de pedidos.
+    Solo toca textos; devuelve cuántas celdas ha cambiado (y no guarda si no cambia ninguna)."""
+    wb = load_workbook(ruta_hoja)
+    try:
+        cambiadas = 0
+        for ws in wb.worksheets:
+            for fila in range(HOJA_PRIMERA_FILA, HOJA_ULTIMA_FILA + 1):
+                for columna in HOJA_COLUMNAS_REFERENCIA:
+                    celda = ws.cell(fila, columna)
+                    if isinstance(celda.value, str):
+                        limpia = re.sub(r"\s+", "", celda.value)
+                        if limpia != celda.value:
+                            celda.value = limpia
+                            cambiadas += 1
+        if cambiadas:
+            wb.save(ruta_hoja)
+        return cambiadas
+    finally:
+        wb.close()
+
+def quitar_referencias_de_urgente(ruta_excel, referencias):
+    """Borra del Excel urgente las filas cuya referencia (sin «2/» ni espacios) está en 'referencias'.
+    Devuelve cuántas filas ha quitado (y no guarda si no quita ninguna)."""
+    buscadas = {avisos_clientes.normalizar_ref(r) for r in referencias}
+    wb = load_workbook(ruta_excel)
+    try:
+        ws = wb.active
+        filas = [f for f in range(2, ws.max_row + 1) if ws.cell(f, 1).value and avisos_clientes.normalizar_ref(ws.cell(f, 1).value) in buscadas]
+        for fila in reversed(filas):
+            ws.delete_rows(fila)
+        if filas:
+            wb.save(ruta_excel)
+        return len(filas)
+    finally:
+        wb.close()
+
 def apuntar_no_suministra_en_hoja(ruta_hoja, coincidencias):
     """Apunta en la pestaña PSA de la hoja de pedidos las referencias que ya no suministran: en la primera fila libre,
     referencia, «NO SUMINISTRA», cantidad, cliente y «OK». Las que ya estén en la hoja no se repiten.
@@ -1047,7 +1093,7 @@ def apuntar_no_suministra_en_hoja(ruta_hoja, coincidencias):
             ws.cell(fila, 2).value = c.get("original") or c["referencia"]
             ws.cell(fila, 5).value = "NO SUMINISTRA"
             ws.cell(fila, 7).value = _numero_si_puede(c.get("cantidad"))
-            ws.cell(fila, 8).value = _numero_si_puede(c.get("cliente"))
+            ws.cell(fila, 8).value = codigo_cliente(c.get("cliente"))
             ws.cell(fila, 10).value = "OK"
             en_hoja.add(c["referencia"])
             apuntadas.append(c["referencia"])
@@ -2648,6 +2694,9 @@ class AppIntegrada(ctk.CTk):
         self.btn_abrir_hoja = self.crear_boton_secundario(fila_hoja, "Abrir hoja de hoy", self.abrir_hoja_de_hoy, alto=estilo.ALTO_BOTON, width=150)
         self.btn_abrir_hoja.pack(side="right")
         efectos.poner_pista(self, self.btn_abrir_hoja, lambda: f"Abrir {self.ruta_hoja_de_hoy().name}" if self.ruta_hoja_de_hoy() else "")
+        self.btn_quitar_espacios = self.crear_boton_secundario(fila_hoja, "Quitar espacios", self.quitar_espacios_de_hoja, alto=estilo.ALTO_BOTON, width=130)
+        self.btn_quitar_espacios.pack(side="right", padx=(0, 8))
+        efectos.poner_pista(self, self.btn_quitar_espacios, "Elige una hoja de pedido y quita los espacios de las referencias y sustituciones (al pegarlas se cuelan)")
 
         card_avisos = self.crear_tarjeta_tab(contenedor, "Avisos de no suministro y sustituciones", "Lee la hoja de pedido ya rellenada y gestiona en Outlook un aviso por cliente con las referencias en NO SUMINISTRA y otro con las referencias SUSTITUIDAS.", en_rejilla=True, ultima_vez="avisos", icono="correo")
         self.crear_fila_archivo(card_avisos, "Hoja de pedido a procesar", "hoja_avisos_entry", "ruta_hoja_avisos", "Hoja dd-mm-aaaa.xlsx ya rellenada...", "Examinar", lambda: self.seleccionar_archivo(self.hoja_avisos_entry, [("Excel files", "*.xlsx")]))
@@ -3100,6 +3149,36 @@ class AppIntegrada(ctk.CTk):
     def ruta_hoja_de_hoy(self):
         carpeta = self.valor_widget_o_config("carpeta_hojas_entry", "ruta_carpeta_hojas", "")
         return ruta_hoja_pedidos_del_dia(carpeta) if carpeta else None
+
+    def quitar_espacios_de_hoja(self):
+        """Pide la hoja de pedido (propone la de hoy) y quita los espacios de sus referencias."""
+        hoy = self.ruta_hoja_de_hoy()
+        opciones = {}
+        if hoy is not None:
+            carpeta = next((c for c in (hoy.parent, hoy.parent.parent) if c.is_dir()), None)
+            if carpeta is not None:
+                opciones["initialdir"] = str(carpeta)
+            if hoy.exists():
+                opciones["initialfile"] = hoy.name
+        ruta = filedialog.askopenfilename(title="Hoja de pedido a la que quitar los espacios", filetypes=[("Excel files", "*.xlsx")], **opciones)
+        if not ruta:
+            return False
+        while archivo_bloqueado(ruta):
+            if not messagebox.askretrycancel("Hoja de pedidos abierta", f"{Path(ruta).name} está abierta en Excel.\n\nGuárdala y ciérrala, y pulsa «Reintentar»."):
+                return False
+        try:
+            cambiadas = quitar_espacios_hoja(ruta)
+        except Exception as e:
+            registrar_error_detallado(f"Quitar espacios de la hoja: {e}", traceback.format_exc())
+            messagebox.showwarning("Hoja de pedidos", f"No se pudieron quitar los espacios de {Path(ruta).name}:\n{e}")
+            return False
+        if cambiadas:
+            self.agregar_log(f"[HOJA PEDIDOS] Quitados los espacios de {cambiadas} referencia{'s' if cambiadas != 1 else ''} en {Path(ruta).name}.", "success")
+            self.avisar(f"Espacios quitados en {cambiadas} referencia{'s' if cambiadas != 1 else ''} de {Path(ruta).name}.", "ok", accion=("Abrir", lambda: self.abrir_archivo(ruta)))
+            efectos.celebrar(self, getattr(self, "btn_quitar_espacios", None))
+        else:
+            self.avisar(f"{Path(ruta).name} no tenía referencias con espacios.")
+        return True
 
     def abrir_hoja_de_hoy(self):
         ruta = self.ruta_hoja_de_hoy()
@@ -3742,8 +3821,18 @@ class AppIntegrada(ctk.CTk):
             coincidencias = []  # si no se puede leer, la generación lo explicará en el registro
         if coincidencias:
             def al_decidir(generar):
-                self.apuntar_no_suministra_hoy(coincidencias)  # se pidan o no, en la hoja de hoy quedan como NO SUMINISTRA
+                # Se pidan o no, en la hoja de hoy quedan como NO SUMINISTRA y salen del Excel urgente
+                en_hoja = self.apuntar_no_suministra_hoy(coincidencias)
+                if en_hoja:
+                    self.quitar_no_suministra_del_urgente(ruta, en_hoja)
                 if generar:
+                    try:
+                        quedan = bool(leer_lineas_pedido(ruta))
+                    except Exception:
+                        quedan = True  # que lo explique la generación
+                    if not quedan:
+                        self.avisar("El Excel urgente se ha quedado vacío al quitar las referencias que no suministran: no hay nada que pedir.", "aviso")
+                        return
                     self.continuar_pedidos(ruta, folder)
 
             self.dialogo_no_suministra = avisos_clientes.DialogoNoSuministra(self, coincidencias, al_decidir)
@@ -3783,7 +3872,24 @@ class AppIntegrada(ctk.CTk):
             self.agregar_log(f"[HOJA PEDIDOS] Ya estaban en la hoja de hoy: {', '.join(ya_estaban)}.")
         if sin_sitio:
             self.agregar_log(f"[HOJA PEDIDOS] ❌ La hoja de hoy está llena: apunta a mano {', '.join(sin_sitio)}.", "error")
-        return bool(apuntadas or ya_estaban)
+        return apuntadas + ya_estaban  # las que están en la hoja: esas se pueden quitar del Excel urgente
+
+    def quitar_no_suministra_del_urgente(self, ruta, referencias):
+        """Quita del Excel urgente las referencias ya apuntadas como NO SUMINISTRA (con copia de seguridad antes)."""
+        try:
+            if archivo_bloqueado(ruta):
+                raise RuntimeError(f"{Path(ruta).name} está abierto en Excel")
+            copia = crear_copia_seguridad(ruta)
+            quitadas = quitar_referencias_de_urgente(ruta, referencias)
+        except Exception as e:
+            registrar_error_detallado(f"Quitar NO SUMINISTRA del Excel urgente: {e}", traceback.format_exc())
+            self.agregar_log(f"[PEDIDOS] ❌ No se pudieron quitar del Excel urgente las referencias que no suministran ({e}): quítalas a mano.", "error")
+            messagebox.showwarning("Excel urgente", f"No se pudieron quitar del Excel urgente las referencias que no suministran:\n{e}\n\nQuítalas a mano antes de pedir.")
+            return 0
+        if quitadas:
+            self.agregar_log(f"[PEDIDOS] Quitada{'s' if quitadas != 1 else ''} del Excel urgente {quitadas} línea{'s' if quitadas != 1 else ''} que no suministran "
+                             f"({', '.join(referencias)}). Copia de antes: {Path(copia).name}", "success")
+        return quitadas
 
     def continuar_pedidos(self, ruta, folder):
         anterior = pedido_ya_generado(ruta)
